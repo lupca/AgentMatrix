@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.db.models import Agent as AgentModel
 from app.schemas.agent import Agent, AgentCreate, AgentUpdate
+from app.services.crypto import encrypt_api_key
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -19,6 +20,31 @@ def _validate_default_role(role: str, is_default: bool) -> None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Only coordinator agents can be the default coordinator.",
+        )
+
+
+def _validate_agent_configuration(
+    agent_type: str,
+    cli: str | None,
+    provider: str | None,
+    has_api_key: bool,
+    require_cli: bool = True,
+) -> None:
+    if agent_type == "api":
+        if not provider:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="API agents require a provider.",
+            )
+        if not has_api_key:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="API agents require an api_key.",
+            )
+    elif agent_type == "cli" and require_cli and not cli:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="CLI agents require a cli tool.",
         )
 
 
@@ -48,6 +74,22 @@ def create_agent(agent_in: AgentCreate, db: Session = Depends(get_db)):
         )
 
     agent_data = agent_in.model_dump(exclude_unset=True)
+    has_explicit_type = "agent_type" in agent_data
+    agent_type = agent_data.get("agent_type", "cli")
+    api_key = agent_data.pop("api_key", None)
+    agent_data["agent_type"] = agent_type
+    _validate_agent_configuration(
+        agent_type,
+        agent_data.get("cli"),
+        agent_data.get("provider"),
+        bool(api_key),
+        require_cli=has_explicit_type,
+    )
+    if agent_type == "api":
+        agent_data["api_key"] = encrypt_api_key(api_key)
+    else:
+        agent_data["api_key"] = None
+        agent_data["provider"] = None
     _validate_default_role(agent_data["role"], agent_data.get("is_default", False))
     if agent_data["role"] != "coordinator":
         agent_data["is_default"] = False
@@ -81,6 +123,30 @@ def update_agent(id: str, agent_in: AgentUpdate, db: Session = Depends(get_db)):
         )
 
     update_data = agent_in.model_dump(exclude_unset=True)
+    api_key_was_provided = "api_key" in update_data
+    api_key = update_data.pop("api_key", None)
+    target_type = update_data.get("agent_type", db_agent.agent_type or "cli")
+    target_cli = update_data.get("cli", db_agent.cli)
+    target_provider = update_data.get("provider", db_agent.provider)
+    has_api_key = bool(api_key) if api_key_was_provided else bool(db_agent.api_key)
+    legacy_cli_update = (
+        target_type == "cli"
+        and not db_agent.cli
+        and "agent_type" not in update_data
+        and "cli" not in update_data
+    )
+    _validate_agent_configuration(
+        target_type,
+        target_cli,
+        target_provider,
+        has_api_key,
+        require_cli=not legacy_cli_update,
+    )
+    if target_type == "api" and api_key_was_provided:
+        update_data["api_key"] = encrypt_api_key(api_key)
+    elif target_type == "cli":
+        update_data["api_key"] = None
+        update_data["provider"] = None
     target_role = update_data.get("role", db_agent.role)
     target_default = update_data.get("is_default", db_agent.is_default)
     _validate_default_role(target_role, target_default)

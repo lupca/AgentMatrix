@@ -35,6 +35,11 @@ class SessionStatus(str, Enum):
     CLOSED = "closed"
 
 
+class AgentType(str, Enum):
+    CLI = "cli"
+    API = "api"
+
+
 class Task(Base):
     __tablename__ = "tasks"
 
@@ -278,10 +283,19 @@ class Agent(Base):
     model = Column(String(50), nullable=True)
     effort = Column(String(20), nullable=True)
     cli = Column(String(50), nullable=True)
+    agent_type = Column(String(10), nullable=False, default=AgentType.CLI.value, server_default=AgentType.CLI.value)
+    api_key = Column(String(500), nullable=True)
+    provider = Column(String(50), nullable=True)
     is_default = Column(Boolean, nullable=False, default=False, server_default="false")
     success_rate = Column(Float, nullable=True, default=0.0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    @property
+    def has_api_key(self) -> bool:
+        """Expose only whether a key exists; never expose the encrypted value."""
+
+        return bool(self.api_key)
 
 
 class AgentRun(Base):

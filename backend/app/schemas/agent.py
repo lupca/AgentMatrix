@@ -1,6 +1,10 @@
 from datetime import datetime
-from typing import Any
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, Literal
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+AgentTypeValue = Literal["cli", "api"]
+ProviderValue = Literal["anthropic", "google", "openai"]
 
 
 class AgentCreate(BaseModel):
@@ -13,7 +17,26 @@ class AgentCreate(BaseModel):
     model: str | None = None
     effort: str | None = None
     cli: str | None = None
+    agent_type: AgentTypeValue = "cli"
+    api_key: str | None = None
+    provider: ProviderValue | None = None
     is_default: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_type_fields(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+
+        agent_type = values.get("agent_type", "cli")
+        if agent_type == "api":
+            if not values.get("api_key") or not str(values["api_key"]).strip():
+                raise ValueError("API agents require an api_key")
+            if not values.get("provider"):
+                raise ValueError("API agents require a provider")
+        elif "agent_type" in values and not values.get("cli"):
+            raise ValueError("CLI agents require a cli tool")
+        return values
 
 
 class AgentUpdate(BaseModel):
@@ -25,6 +48,9 @@ class AgentUpdate(BaseModel):
     model: str | None = None
     effort: str | None = None
     cli: str | None = None
+    agent_type: AgentTypeValue | None = None
+    api_key: str | None = None
+    provider: ProviderValue | None = None
     is_default: bool | None = None
 
 
@@ -38,6 +64,9 @@ class Agent(BaseModel):
     model: str | None = None
     effort: str | None = None
     cli: str | None = None
+    agent_type: AgentTypeValue = "cli"
+    provider: ProviderValue | None = None
+    has_api_key: bool = False
     is_default: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None

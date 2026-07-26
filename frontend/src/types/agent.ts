@@ -1,3 +1,6 @@
+export type AgentType = 'cli' | 'api';
+export type AgentProvider = 'anthropic' | 'google' | 'openai';
+
 export interface Agent {
   id: string;
   name: string;
@@ -8,6 +11,9 @@ export interface Agent {
   model?: string | null;
   effort?: string | null;
   cli?: string | null;
+  agent_type: AgentType;
+  provider?: AgentProvider | null;
+  has_api_key?: boolean;
   is_default?: boolean;
   created_at?: string | null;
   updated_at?: string | null;

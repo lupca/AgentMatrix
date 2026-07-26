@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Bot, Cpu, CheckCircle2, Award, ArrowRight, ShieldCheck, Zap, Pencil, Star } from 'lucide-react';
+import { Bot, Cpu, CheckCircle2, Award, ArrowRight, ShieldCheck, Zap, Pencil, Star, KeyRound, Terminal } from 'lucide-react';
 import { Agent, AgentStats } from '../../types/agent';
 
 interface AgentCardProps {
@@ -40,6 +40,7 @@ export const AgentCard: React.FC<AgentCardProps> = ({ agent, stats, onEdit, onSe
   };
 
   const statusStyle = getStatusBadge(agent.status);
+  const agentType = agent.agent_type || (agent.provider ? 'api' : 'cli');
 
   // Array of capabilities or fallback defaults
   const capabilitiesList: string[] = Array.isArray(agent.capabilities)
@@ -89,6 +90,10 @@ export const AgentCard: React.FC<AgentCardProps> = ({ agent, stats, onEdit, onSe
           <span className="text-xs px-2.5 py-1 rounded-md bg-gray-950/80 border border-gray-800 text-gray-300 font-medium capitalize flex items-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
             Role: <strong className="text-gray-100">{agent.role}</strong>
+          </span>
+          <span className={`text-xs px-2.5 py-1 rounded-md border font-medium capitalize flex items-center gap-1.5 ${agentType === 'api' ? 'border-cyan-500/30 bg-cyan-500/10 text-cyan-300' : 'border-slate-500/30 bg-slate-500/10 text-slate-300'}`}>
+            {agentType === 'api' ? <KeyRound className="w-3.5 h-3.5" /> : <Terminal className="w-3.5 h-3.5" />}
+            {agentType === 'api' ? 'API' : 'CLI'}
           </span>
         </div>
 

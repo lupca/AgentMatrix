@@ -1,3 +1,6 @@
+from app.db.models import Agent as AgentModel
+
+
 def test_create_agent(client):
     payload = {
         "id": "agent-007",
@@ -121,3 +124,79 @@ def test_delete_agent(client):
 
     get_res = client.get("/api/agents/agent-del")
     assert get_res.status_code == 404
+
+
+def test_api_agent_requires_provider_and_key(client):
+    missing_key = client.post(
+        "/api/agents",
+        json={
+            "id": "api-missing-key",
+            "name": "API Agent",
+            "role": "executor",
+            "agent_type": "api",
+            "provider": "anthropic",
+        },
+    )
+    assert missing_key.status_code == 422
+
+    missing_provider = client.post(
+        "/api/agents",
+        json={
+            "id": "api-missing-provider",
+            "name": "API Agent",
+            "role": "executor",
+            "agent_type": "api",
+            "api_key": "sk-test-key",
+        },
+    )
+    assert missing_provider.status_code == 422
+
+
+def test_api_agent_encrypts_key_and_redacts_response(client, db_session):
+    response = client.post(
+        "/api/agents",
+        json={
+            "id": "api-secure",
+            "name": "Secure API Agent",
+            "role": "executor",
+            "agent_type": "api",
+            "provider": "openai",
+            "api_key": "sk-secret-value",
+        },
+    )
+
+    assert response.status_code == 201
+    data = response.json()
+    assert data["agent_type"] == "api"
+    assert data["provider"] == "openai"
+    assert data["has_api_key"] is True
+    assert "api_key" not in data
+
+    stored = db_session.query(AgentModel).filter_by(id="api-secure").one()
+    assert stored.api_key != "sk-secret-value"
+
+
+def test_patch_api_agent_replaces_key_without_returning_it(client, db_session):
+    created = client.post(
+        "/api/agents",
+        json={
+            "id": "api-patch",
+            "name": "Patchable API Agent",
+            "role": "executor",
+            "agent_type": "api",
+            "provider": "anthropic",
+            "api_key": "old-secret",
+        },
+    )
+    assert created.status_code == 201
+
+    response = client.patch(
+        "/api/agents/api-patch",
+        json={"api_key": "new-secret", "provider": "google"},
+    )
+
+    assert response.status_code == 200
+    assert "api_key" not in response.json()
+    assert response.json()["provider"] == "google"
+    stored = db_session.query(AgentModel).filter_by(id="api-patch").one()
+    assert stored.api_key not in {"old-secret", "new-secret"}
