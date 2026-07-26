@@ -32,6 +32,12 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     ports:
       - "${BACKEND_PORT:-8001}:8000"
+    volumes:
+      # Mount local CLI tools for coordinator dispatch
+      - ${HOME}/.local/bin/agy:/usr/local/bin/agy:ro
+      - ${HOME}/.local/bin/claude:/usr/local/bin/claude:ro
+      - ${HOME}/.claude:/root/.claude:ro
+      - ${HOME}/.config/agy:/root/.config/agy:ro
     depends_on:
       db:
         condition: service_healthy
