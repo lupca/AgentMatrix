@@ -39,7 +39,7 @@ export const TaskDetailPage: React.FC = () => {
     } catch (err: any) {
       console.error('Error loading task detail:', err);
       setError(err.message || `Failed to fetch task '${id}'`);
-    } font-sans finally {
+    } finally {
       setLoading(false);
     }
   }, [id]);
