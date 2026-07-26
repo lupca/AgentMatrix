@@ -78,6 +78,8 @@ def create_agent(agent_in: AgentCreate, db: Session = Depends(get_db)):
     agent_type = agent_data.get("agent_type", "cli")
     api_key = agent_data.pop("api_key", None)
     agent_data["agent_type"] = agent_type
+    if "base_url" in agent_data:
+        agent_data["base_url"] = (agent_data["base_url"] or "").strip() or None
     _validate_agent_configuration(
         agent_type,
         agent_data.get("cli"),
@@ -90,6 +92,7 @@ def create_agent(agent_in: AgentCreate, db: Session = Depends(get_db)):
     else:
         agent_data["api_key"] = None
         agent_data["provider"] = None
+        agent_data["base_url"] = None
     _validate_default_role(agent_data["role"], agent_data.get("is_default", False))
     if agent_data["role"] != "coordinator":
         agent_data["is_default"] = False
@@ -125,6 +128,8 @@ def update_agent(id: str, agent_in: AgentUpdate, db: Session = Depends(get_db)):
     update_data = agent_in.model_dump(exclude_unset=True)
     api_key_was_provided = "api_key" in update_data
     api_key = update_data.pop("api_key", None)
+    if "base_url" in update_data:
+        update_data["base_url"] = (update_data["base_url"] or "").strip() or None
     target_type = update_data.get("agent_type", db_agent.agent_type or "cli")
     target_cli = update_data.get("cli", db_agent.cli)
     target_provider = update_data.get("provider", db_agent.provider)
@@ -147,6 +152,7 @@ def update_agent(id: str, agent_in: AgentUpdate, db: Session = Depends(get_db)):
     elif target_type == "cli":
         update_data["api_key"] = None
         update_data["provider"] = None
+        update_data["base_url"] = None
     target_role = update_data.get("role", db_agent.role)
     target_default = update_data.get("is_default", db_agent.is_default)
     _validate_default_role(target_role, target_default)

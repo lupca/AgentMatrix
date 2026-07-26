@@ -14,7 +14,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session as DBSession
 
-from app.db.models import LLMUsage, Session as SessionModel, Task as TaskModel
+from app.db.models import Agent as AgentModel, LLMUsage, Session as SessionModel, Task as TaskModel
 from app.services.llm_client import (
     ANTHROPIC_MODEL,
     GOOGLE_MODEL,
@@ -29,6 +29,7 @@ from app.services.cli_dispatcher import (
     route_model,
 )
 from app.services.context_hierarchy import ContextHierarchy
+from app.services.crypto import decrypt_api_key
 from app.services.providers import CoordinatorProvider, ProviderResponse
 from app.services.providers.anthropic_adapter import AnthropicAdapter
 from app.services.providers.google_adapter import GoogleAdapter
@@ -68,7 +69,6 @@ class ProviderRouter:
             else {
                 "anthropic": AnthropicAdapter(),
                 "google": GoogleAdapter(),
-                "openai": OpenAIAdapter(),
             }
         )
 
@@ -90,11 +90,29 @@ class ProviderRouter:
         self,
         model: str,
         provider: str | None = None,
+        *,
+        agent: AgentModel | None = None,
     ) -> CoordinatorProvider:
-        provider_name = (provider or self.provider_name(model)).lower()
+        provider_name = (
+            provider
+            or (agent.provider if agent is not None else self.provider_name(model))
+        ).lower()
+        if provider_name == "openai" and agent is not None:
+            if not agent.api_key:
+                raise ValueError(
+                    f"Coordinator agent '{agent.id}' does not have an API key"
+                )
+            return OpenAIAdapter(
+                api_key=decrypt_api_key(agent.api_key),
+                base_url=agent.base_url,
+            )
         try:
             return self.providers[provider_name]
         except KeyError as exc:
+            if provider_name == "openai":
+                raise ValueError(
+                    "No OpenAI coordinator agent is configured for this model"
+                ) from exc
             supported = ", ".join(sorted(self.providers))
             raise ValueError(
                 f"Unsupported coordinator provider '{provider_name}'. "
@@ -258,24 +276,51 @@ class CoordinatorService:
             else:
                 requested_model = os.getenv("COORDINATOR_MODEL", ANTHROPIC_MODEL)
 
-        route = route_model(requested_model, provider)
-        provider = provider or route.provider
+        if provider != "openai":
+            # Explicit OpenAI selections are resolved from the DB below;
+            # other providers still use the model-to-CLI router.
+            route = route_model(requested_model, provider)
+            provider = provider or route.provider
         if provider == "codex":
             provider = "openai"
+
+        agent: AgentModel | None = None
+        if provider == "openai":
+            agent = (
+                self.db.query(AgentModel)
+                .filter(
+                    AgentModel.model == requested_model,
+                    AgentModel.provider == "openai",
+                    AgentModel.agent_type == "api",
+                )
+                .order_by(AgentModel.is_default.desc(), AgentModel.id)
+                .first()
+            )
 
         # SDK adapters are supported only for the legacy injected-provider
         # path.  The normal path returns None and always dispatches through a
         # CLI account login.
         legacy_adapter: CoordinatorProvider | None = None
         if self._explicit_provider_compatibility:
-            legacy_adapter = self.router.get(requested_model, provider)
+            legacy_adapter = self.router.get(
+                requested_model,
+                provider,
+                agent=agent,
+            )
         else:
-            configured = self.router.providers.get(provider)
-            if configured is not None and not isinstance(
-                configured,
-                (AnthropicAdapter, GoogleAdapter),
-            ):
-                legacy_adapter = configured
+            if provider == "openai":
+                legacy_adapter = self.router.get(
+                    requested_model,
+                    provider,
+                    agent=agent,
+                )
+            else:
+                configured = self.router.providers.get(provider)
+                if configured is not None and not isinstance(
+                    configured,
+                    (AnthropicAdapter, GoogleAdapter),
+                ):
+                    legacy_adapter = configured
         return provider, requested_model, legacy_adapter
 
     def validate_selection(

@@ -286,6 +286,7 @@ class Agent(Base):
     agent_type = Column(String(10), nullable=False, default=AgentType.CLI.value, server_default=AgentType.CLI.value)
     api_key = Column(String(500), nullable=True)
     provider = Column(String(50), nullable=True)
+    base_url = Column(String(500), nullable=True)
     is_default = Column(Boolean, nullable=False, default=False, server_default="false")
     success_rate = Column(Float, nullable=True, default=0.0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

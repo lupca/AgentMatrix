@@ -20,6 +20,7 @@ class AgentCreate(BaseModel):
     agent_type: AgentTypeValue = "cli"
     api_key: str | None = None
     provider: ProviderValue | None = None
+    base_url: str | None = None
     is_default: bool = False
 
     @model_validator(mode="before")
@@ -51,6 +52,7 @@ class AgentUpdate(BaseModel):
     agent_type: AgentTypeValue | None = None
     api_key: str | None = None
     provider: ProviderValue | None = None
+    base_url: str | None = None
     is_default: bool | None = None
 
 
@@ -66,6 +68,7 @@ class Agent(BaseModel):
     cli: str | None = None
     agent_type: AgentTypeValue = "cli"
     provider: ProviderValue | None = None
+    base_url: str | None = None
     has_api_key: bool = False
     is_default: bool = False
     created_at: datetime | None = None

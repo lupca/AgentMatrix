@@ -36,16 +36,18 @@ def _validate_model_selection(
         try:
             inferred = ProviderRouter.provider_name(model)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(exc),
-            ) from exc
-        if provider is not None and provider != inferred:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=f"Model '{model}' belongs to '{inferred}', not '{provider}'.",
-            )
-        data["selected_provider"] = inferred
+            if provider is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=str(exc),
+                ) from exc
+        else:
+            if provider is not None and provider != inferred:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"Model '{model}' belongs to '{inferred}', not '{provider}'.",
+                )
+            data["selected_provider"] = inferred
     return data
 
 

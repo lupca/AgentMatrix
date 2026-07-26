@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.services.llm_client import OPENAI_API_KEY, extract_usage
+from app.services.llm_client import extract_usage
 from app.services.providers import ProviderResponse, response_request_id
 
 
@@ -13,9 +13,18 @@ class OpenAIAdapter:
 
     name = "openai"
 
-    def __init__(self, client: Any | None = None, *, api_key: str | None = None):
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str | None = None,
+        client: Any | None = None,
+    ):
+        if not api_key or not api_key.strip():
+            raise ValueError("OpenAI adapter requires an API key")
         self._client = client
-        self._api_key = api_key if api_key is not None else OPENAI_API_KEY
+        self._api_key = api_key
+        self._base_url = base_url
 
     def _get_client(self):
         if self._client is None:
@@ -27,7 +36,11 @@ class OpenAIAdapter:
                 ) from exc
             # CoordinatorService owns turn retries, so avoid multiplying them by
             # the SDK's built-in retry loop.
-            self._client = AsyncOpenAI(api_key=self._api_key, max_retries=0)
+            self._client = AsyncOpenAI(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                max_retries=0,
+            )
         return self._client
 
     @staticmethod
