@@ -1,6 +1,7 @@
 import React from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import rehypeSanitize from 'rehype-sanitize';
+import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import { Check, Copy } from 'lucide-react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -148,9 +149,9 @@ interface MessageContentProps {
 }
 
 export const MessageContent: React.FC<MessageContentProps> = ({ content }) => (
-  <div className="markdown-content leading-relaxed">
+  <div className="markdown-content leading-relaxed whitespace-pre-wrap">
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
+      remarkPlugins={[remarkGfm, remarkBreaks]}
       rehypePlugins={[rehypeSanitize]}
       components={components}
     >

@@ -73,4 +73,17 @@ describe('ChatMessage Markdown rendering', () => {
     expect(container.querySelector('strong')?.textContent).toBe('operator note');
     expect(container.querySelector('[title="Copy message"]')).not.toBeNull();
   });
+
+  it('preserves single line breaks in complex status reports', () => {
+    renderMessage(
+      '### Task Status\n* PMI-001: done\n* PMI-002: in-review\n\nStatus line one\nStatus line two\n\n**Summary**: 2 tasks total',
+    );
+
+    expect(container.querySelector('h3')?.textContent).toBe('Task Status');
+    expect(container.querySelectorAll('ul > li')).toHaveLength(2);
+    expect(container.querySelector('ul > li')?.textContent).toBe('PMI-001: done');
+    expect(container.querySelectorAll('br')).toHaveLength(1);
+    expect(container.querySelector('.markdown-content')?.className).toContain('whitespace-pre-wrap');
+    expect(container.querySelector('strong')?.textContent).toBe('Summary');
+  });
 });
