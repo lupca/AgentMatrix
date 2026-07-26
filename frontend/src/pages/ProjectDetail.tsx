@@ -38,12 +38,7 @@ export const ProjectDetailPage: React.FC = () => {
 
     try {
       // Fetch project by ID
-      let projData: Project | null = null;
-      try {
-        projData = await api.get<Project>(`/projects/${id}`);
-      } catch (err) {
-        console.warn(`Could not fetch /api/projects/${id}`, err);
-      }
+      const projData = await api.get<Project>(`/projects/${id}`);
 
       // Fetch tasks for this project
       let taskList: Task[] = [];
@@ -53,27 +48,11 @@ export const ProjectDetailPage: React.FC = () => {
         console.warn(`Could not fetch /api/tasks?project=${id}`, err);
       }
 
-      if (!projData) {
-        // Fallback default project object if API unreachable
-        projData = {
-          id: id.toUpperCase(),
-          name: `${id.toUpperCase()} Project`,
-          description: 'Project details and orchestrated task pipeline.',
-          status: 'active',
-          created_at: new Date().toISOString(),
-        };
-      }
-
-      // If no tasks returned, filter or provide fallback
-      if (taskList.length === 0) {
-        taskList = getFallbackTasksForProject(id);
-      }
-
       setProject(projData);
-      setTasks(taskList);
+      setTasks(taskList || []);
     } catch (err: any) {
       console.warn('Error fetching project detail:', err);
-      setError(`Failed to load project '${id}'.`);
+      setError(err?.message || `Failed to load project '${id}'.`);
     } finally {
       setLoading(false);
     }
@@ -82,69 +61,6 @@ export const ProjectDetailPage: React.FC = () => {
   useEffect(() => {
     fetchProjectDetail();
   }, [fetchProjectDetail]);
-
-  const getFallbackTasksForProject = (projId: string): Task[] => [
-    {
-      id: `${projId.toUpperCase()}-001`,
-      project: projId,
-      title: 'Initialize repository structure and base dependencies',
-      status: 'done',
-      current_gate: 'verdict',
-      priority: 'P1',
-      risk: 'low',
-      executor: 'ArchitectAgent',
-      reviewer: 'LeadReviewer',
-      created_at: new Date(Date.now() - 86400000 * 3).toISOString(),
-    },
-    {
-      id: `${projId.toUpperCase()}-002`,
-      project: projId,
-      title: 'Database schema migration and ORM models setup',
-      status: 'done',
-      current_gate: 'verdict',
-      priority: 'P0',
-      risk: 'medium',
-      executor: 'DbAgent',
-      reviewer: 'LeadReviewer',
-      created_at: new Date(Date.now() - 86400000 * 2).toISOString(),
-    },
-    {
-      id: `${projId.toUpperCase()}-003`,
-      project: projId,
-      title: 'Implement REST API routes and payload validation',
-      status: 'in-review',
-      current_gate: 'review',
-      priority: 'P1',
-      risk: 'medium',
-      executor: 'BackendAgent',
-      reviewer: 'SecurityReviewer',
-      created_at: new Date(Date.now() - 86400000 * 1).toISOString(),
-    },
-    {
-      id: `${projId.toUpperCase()}-004`,
-      project: projId,
-      title: 'Build frontend pages and responsive component hierarchy',
-      status: 'dispatched',
-      current_gate: 'dispatch',
-      priority: 'P1',
-      risk: 'low',
-      executor: 'FrontendAgent',
-      reviewer: 'LeadReviewer',
-      created_at: new Date().toISOString(),
-    },
-    {
-      id: `${projId.toUpperCase()}-005`,
-      project: projId,
-      title: 'Configure end-to-end integration tests & CI workflow',
-      status: 'todo',
-      current_gate: 'spec',
-      priority: 'P2',
-      risk: 'high',
-      executor: null,
-      reviewer: null,
-      created_at: new Date().toISOString(),
-    },
-  ];
 
   // Filter tasks
   const filteredTasks = tasks.filter((t) => {
@@ -213,6 +129,22 @@ export const ProjectDetailPage: React.FC = () => {
           <ArrowLeft className="w-4 h-4" />
           <span>Back to Projects Directory</span>
         </button>
+
+        {/* Error Alert Banner */}
+        {error && (
+          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+              <span>{error}</span>
+            </div>
+            <button
+              onClick={() => fetchProjectDetail()}
+              className="underline hover:text-amber-200 font-medium flex-shrink-0"
+            >
+              Retry
+            </button>
+          </div>
+        )}
 
         {loading ? (
           <div className="h-32 bg-gray-900/60 rounded-2xl border border-gray-800 animate-pulse" />

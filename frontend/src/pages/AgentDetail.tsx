@@ -40,12 +40,7 @@ export const AgentDetailPage: React.FC = () => {
 
     try {
       // 1. Fetch Agent info
-      let agentData: Agent | null = null;
-      try {
-        agentData = await api.get<Agent>(`/agents/${id}`);
-      } catch (err) {
-        console.warn(`Could not fetch /api/agents/${id}`, err);
-      }
+      const agentData = await api.get<Agent>(`/agents/${id}`);
 
       // 2. Fetch Agent stats
       let statsData: AgentStatsType | null = null;
@@ -64,32 +59,17 @@ export const AgentDetailPage: React.FC = () => {
         console.warn('Could not fetch /api/tasks', err);
       }
 
-      if (!agentData) {
-        // Fallback default agent object if unreachable
-        agentData = {
-          id: id,
-          name: `${id} Agent`,
-          role: id.toLowerCase().includes('review') ? 'reviewer' : 'executor',
-          capabilities: ['Automated Execution', 'State Verification', 'Unit Testing'],
-          status: 'idle',
-          created_at: new Date().toISOString(),
-        };
-      }
-
       // Filter tasks assigned to this agent
       const assignedTasks = allTasks.filter(
         (t) => t.executor === id || t.reviewer === id
       );
 
-      // If no tasks found from API, produce realistic fallback tasks for demo
-      const finalTasks = assignedTasks.length > 0 ? assignedTasks : getFallbackTasksForAgent(id);
-
       setAgent(agentData);
       setAgentStats(statsData);
-      setTasks(finalTasks);
+      setTasks(assignedTasks);
     } catch (err: any) {
       console.warn('Error fetching agent details:', err);
-      setError(`Failed to load agent profile '${id}'.`);
+      setError(err?.message || `Failed to load agent profile '${id}'.`);
     } finally {
       setLoading(false);
     }
@@ -98,45 +78,6 @@ export const AgentDetailPage: React.FC = () => {
   useEffect(() => {
     fetchAgentDetail();
   }, [fetchAgentDetail]);
-
-  const getFallbackTasksForAgent = (agentId: string): Task[] => [
-    {
-      id: 'CTV2-016',
-      project: 'CTV2',
-      title: 'Frontend Dashboard implementation & KPI widgets',
-      status: 'done',
-      current_gate: 'verdict',
-      priority: 'P0',
-      risk: 'medium',
-      executor: agentId.includes('Reviewer') ? 'CodeAgent-01' : agentId,
-      reviewer: agentId.includes('Reviewer') ? agentId : 'LeadReviewer-01',
-      created_at: new Date(Date.now() - 86400000 * 2).toISOString(),
-    },
-    {
-      id: 'CTV2-017',
-      project: 'CTV2',
-      title: 'Tasks Table & Kanban Drag and Drop View',
-      status: 'done',
-      current_gate: 'verdict',
-      priority: 'P1',
-      risk: 'low',
-      executor: agentId.includes('Reviewer') ? 'CodeAgent-01' : agentId,
-      reviewer: agentId.includes('Reviewer') ? agentId : 'LeadReviewer-01',
-      created_at: new Date(Date.now() - 86400000 * 1).toISOString(),
-    },
-    {
-      id: 'CTV2-019',
-      project: 'CTV2',
-      title: 'Projects & Agents pages frontend creation',
-      status: 'dispatched',
-      current_gate: 'dispatch',
-      priority: 'P1',
-      risk: 'medium',
-      executor: agentId.includes('Reviewer') ? 'FrontendAgent' : agentId,
-      reviewer: agentId.includes('Reviewer') ? agentId : 'LeadReviewer-01',
-      created_at: new Date().toISOString(),
-    },
-  ];
 
   const executorTasks = tasks.filter((t) => t.executor === id);
   const reviewerTasks = tasks.filter((t) => t.reviewer === id);
@@ -185,6 +126,22 @@ export const AgentDetailPage: React.FC = () => {
           <ArrowLeft className="w-4 h-4" />
           <span>Back to Agent Roster</span>
         </button>
+
+        {/* Error Alert Banner */}
+        {error && (
+          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+              <span>{error}</span>
+            </div>
+            <button
+              onClick={() => fetchAgentDetail()}
+              className="underline hover:text-amber-200 font-medium flex-shrink-0"
+            >
+              Retry
+            </button>
+          </div>
+        )}
 
         {loading ? (
           <div className="h-36 bg-gray-900/60 rounded-2xl border border-gray-800 animate-pulse" />

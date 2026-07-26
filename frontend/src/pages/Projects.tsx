@@ -53,20 +53,12 @@ export const ProjectsPage: React.FC = () => {
         map[s.project_id] = s;
       });
 
-      if (projectList && projectList.length > 0) {
-        setProjects(projectList);
-        setStatsMap(map);
-      } else {
-        // Fallback default projects if empty response
-        setProjects(getFallbackProjects());
-        setStatsMap(getFallbackStats());
-      }
+      setProjects(projectList || []);
+      setStatsMap(map);
     } catch (err: any) {
-      console.warn('Error fetching projects API, using fallback data:', err);
-      setError('Could not connect to /api/projects. Showing stored/fallback project list.');
-      setProjects(getFallbackProjects());
-      setStatsMap(getFallbackStats());
-    } fontFinally: {
+      console.warn('Error fetching projects API:', err);
+      setError(err?.message || 'Could not connect to /api/projects.');
+    } finally {
       setLoading(false);
       setIsRefreshing(false);
     }
@@ -100,71 +92,6 @@ export const ProjectsPage: React.FC = () => {
     }
   };
 
-  const getFallbackProjects = (): Project[] => [
-    {
-      id: 'CTV2',
-      name: 'Control Tower V2 Core',
-      description: 'Agentic graph orchestration engine with four-eyes verification & gate approval flows.',
-      status: 'active',
-      created_at: new Date().toISOString(),
-    },
-    {
-      id: 'TOPVN-OMS',
-      name: 'Order Management System',
-      description: 'Multi-channel order ingestion, fulfillment dispatch & inventory sync.',
-      status: 'active',
-      created_at: new Date().toISOString(),
-    },
-    {
-      id: 'TOPVN-WMS',
-      name: 'Warehouse Management System',
-      description: 'Stock tracking, barcode location indexing & picking strategy pipeline.',
-      status: 'completed',
-      created_at: new Date().toISOString(),
-    },
-    {
-      id: 'TOPVN-PMI',
-      name: 'Partner Integration Hub',
-      description: 'Supplier APIs, EDI connector bridges, and webhook audit log dispatchers.',
-      status: 'paused',
-      created_at: new Date().toISOString(),
-    },
-  ];
-
-  const getFallbackStats = (): Record<string, ProjectStats> => ({
-    CTV2: {
-      project_id: 'CTV2',
-      project_name: 'Control Tower V2 Core',
-      total_tasks: 16,
-      done_tasks: 12,
-      active_tasks: 4,
-      by_status: { todo: 2, dispatched: 1, 'in-review': 1, done: 12 },
-    },
-    'TOPVN-OMS': {
-      project_id: 'TOPVN-OMS',
-      project_name: 'Order Management System',
-      total_tasks: 10,
-      done_tasks: 6,
-      active_tasks: 4,
-      by_status: { todo: 2, dispatched: 2, done: 6 },
-    },
-    'TOPVN-WMS': {
-      project_id: 'TOPVN-WMS',
-      project_name: 'Warehouse Management System',
-      total_tasks: 8,
-      done_tasks: 8,
-      active_tasks: 0,
-      by_status: { done: 8 },
-    },
-    'TOPVN-PMI': {
-      project_id: 'TOPVN-PMI',
-      project_name: 'Partner Integration Hub',
-      total_tasks: 5,
-      done_tasks: 2,
-      active_tasks: 3,
-      by_status: { todo: 3, done: 2 },
-    },
-  });
 
   // Filter projects based on search query & status filter
   const filteredProjects = projects.filter((p) => {

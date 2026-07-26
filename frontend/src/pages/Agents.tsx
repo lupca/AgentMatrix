@@ -57,34 +57,12 @@ export const AgentsPage: React.FC = () => {
         map[s.agent_id] = s;
       });
 
-      if (agentList && agentList.length > 0) {
-        setAgents(agentList);
-        setStatsList(stats);
-        setStatsMap(map);
-      } else {
-        // Fallback default agent roster
-        const fallbacks = getFallbackAgents();
-        const fallbackStats = getFallbackStats();
-        setAgents(fallbacks);
-        setStatsList(fallbackStats);
-        const fbMap: Record<string, AgentStatsType> = {};
-        fallbackStats.forEach((s) => {
-          fbMap[s.agent_id] = s;
-        });
-        setStatsMap(fbMap);
-      }
+      setAgents(agentList || []);
+      setStatsList(stats);
+      setStatsMap(map);
     } catch (err: any) {
-      console.warn('Error fetching agents API, using fallback data:', err);
-      setError('Could not connect to /api/agents. Showing fallback agent roster.');
-      const fallbacks = getFallbackAgents();
-      const fallbackStats = getFallbackStats();
-      setAgents(fallbacks);
-      setStatsList(fallbackStats);
-      const fbMap: Record<string, AgentStatsType> = {};
-      fallbackStats.forEach((s) => {
-        fbMap[s.agent_id] = s;
-      });
-      setStatsMap(fbMap);
+      console.warn('Error fetching agents API:', err);
+      setError(err?.message || 'Could not connect to /api/agents.');
     } finally {
       setLoading(false);
       setIsRefreshing(false);
@@ -124,83 +102,6 @@ export const AgentsPage: React.FC = () => {
     }
   };
 
-  const getFallbackAgents = (): Agent[] => [
-    {
-      id: 'CodeAgent-01',
-      name: 'Code Generation Agent',
-      role: 'executor',
-      capabilities: ['Code Implementation', 'Refactoring', 'Unit Tests'],
-      status: 'idle',
-      created_at: new Date().toISOString(),
-    },
-    {
-      id: 'LeadReviewer-01',
-      name: 'Four-Eyes Review Agent',
-      role: 'reviewer',
-      capabilities: ['Security Audit', 'Code Quality', 'Compliance Check'],
-      status: 'busy',
-      created_at: new Date().toISOString(),
-    },
-    {
-      id: 'SpecAuthor-01',
-      name: 'Specification & Plan Agent',
-      role: 'spec_author',
-      capabilities: ['Requirements Analysis', 'Architecture Specs', 'Gate Rules'],
-      status: 'idle',
-      created_at: new Date().toISOString(),
-    },
-    {
-      id: 'GraphRouter-01',
-      name: 'Orchestrator Agent',
-      role: 'orchestrator',
-      capabilities: ['State Dispatch', 'Session Checkpointing', 'Routing'],
-      status: 'idle',
-      created_at: new Date().toISOString(),
-    },
-  ];
-
-  const getFallbackStats = (): AgentStatsType[] => [
-    {
-      agent_id: 'CodeAgent-01',
-      name: 'Code Generation Agent',
-      role: 'executor',
-      tasks_executed: 14,
-      tasks_reviewed: 0,
-      tasks_completed: 12,
-      success_rate: 0.8571,
-      active_tasks: 2,
-    },
-    {
-      agent_id: 'LeadReviewer-01',
-      name: 'Four-Eyes Review Agent',
-      role: 'reviewer',
-      tasks_executed: 0,
-      tasks_reviewed: 12,
-      tasks_completed: 12,
-      success_rate: 1.0,
-      active_tasks: 1,
-    },
-    {
-      agent_id: 'SpecAuthor-01',
-      name: 'Specification & Plan Agent',
-      role: 'spec_author',
-      tasks_executed: 8,
-      tasks_reviewed: 2,
-      tasks_completed: 8,
-      success_rate: 1.0,
-      active_tasks: 0,
-    },
-    {
-      agent_id: 'GraphRouter-01',
-      name: 'Orchestrator Agent',
-      role: 'orchestrator',
-      tasks_executed: 20,
-      tasks_reviewed: 5,
-      tasks_completed: 19,
-      success_rate: 0.95,
-      active_tasks: 1,
-    },
-  ];
 
   // Unique roles from agents
   const availableRoles = Array.from(new Set(agents.map((a) => a.role || 'executor')));
