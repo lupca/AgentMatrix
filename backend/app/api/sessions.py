@@ -25,7 +25,7 @@ def _validate_model_selection(
     )
     if provider is not None:
         provider = provider.lower()
-        if provider not in {"anthropic", "google"}:
+        if provider not in {"anthropic", "google", "openai"}:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"Unsupported coordinator provider '{provider}'.",

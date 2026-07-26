@@ -18,6 +18,7 @@ from app.db.models import LLMUsage, Session as SessionModel, Task as TaskModel
 from app.services.llm_client import (
     ANTHROPIC_MODEL,
     GOOGLE_MODEL,
+    OPENAI_MODEL,
     UsageCounts,
     calculate_cost,
 )
@@ -31,6 +32,7 @@ from app.services.context_hierarchy import ContextHierarchy
 from app.services.providers import CoordinatorProvider, ProviderResponse
 from app.services.providers.anthropic_adapter import AnthropicAdapter
 from app.services.providers.google_adapter import GoogleAdapter
+from app.services.providers.openai_adapter import OpenAIAdapter
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,7 @@ class ProviderRouter:
             else {
                 "anthropic": AnthropicAdapter(),
                 "google": GoogleAdapter(),
+                "openai": OpenAIAdapter(),
             }
         )
 
@@ -76,9 +79,11 @@ class ProviderRouter:
             return "anthropic"
         if "gemini" in normalized:
             return "google"
+        if normalized.startswith(("gpt-", "o1-", "chatgpt-")):
+            return "openai"
         raise ValueError(
             f"Cannot infer provider for coordinator model '{model}'. "
-            "Specify provider='anthropic' or provider='google'."
+            "Specify provider='anthropic', provider='google', or provider='openai'."
         )
 
     def get(
@@ -248,6 +253,8 @@ class CoordinatorService:
                 requested_model = GOOGLE_MODEL
             elif provider == "anthropic":
                 requested_model = ANTHROPIC_MODEL
+            elif provider == "openai":
+                requested_model = OPENAI_MODEL
             else:
                 requested_model = os.getenv("COORDINATOR_MODEL", ANTHROPIC_MODEL)
 

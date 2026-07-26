@@ -3,7 +3,7 @@ import { ChevronDown, Loader2 } from 'lucide-react';
 import { api } from '../../lib/api';
 import { Agent } from '../../types/agent';
 
-export type CoordinatorProvider = 'anthropic' | 'google';
+export type CoordinatorProvider = 'anthropic' | 'google' | 'openai';
 
 export interface CoordinatorModelOption {
   label: string;
@@ -15,7 +15,18 @@ export interface CoordinatorModelOption {
 export const DEFAULT_COORDINATOR_MODEL = 'claude-sonnet-4-20250514';
 
 export function providerForModel(model: string): CoordinatorProvider {
-  return model.toLowerCase().includes('gemini') ? 'google' : 'anthropic';
+  const normalized = model.toLowerCase();
+  if (normalized.includes('gemini')) return 'google';
+  if (
+    normalized.includes('openai') ||
+    normalized.startsWith('gpt-') ||
+    normalized.startsWith('o1-') ||
+    normalized.startsWith('chatgpt-') ||
+    normalized.includes('codex')
+  ) {
+    return 'openai';
+  }
+  return 'anthropic';
 }
 
 function optionForAgent(agent: Agent): CoordinatorModelOption | null {
@@ -33,14 +44,16 @@ interface ProviderBadgeProps {
 const ProviderBadge: React.FC<ProviderBadgeProps> = ({ provider }) => (
   <span
     aria-hidden="true"
-    title={provider === 'anthropic' ? 'Anthropic' : 'Google'}
+    title={provider === 'anthropic' ? 'Anthropic' : provider === 'google' ? 'Google' : 'OpenAI'}
     className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[10px] font-bold ${
       provider === 'anthropic'
         ? 'bg-purple-500/15 text-purple-300 ring-1 ring-purple-400/30'
-        : 'bg-blue-500/15 text-blue-300 ring-1 ring-blue-400/30'
+        : provider === 'google'
+          ? 'bg-blue-500/15 text-blue-300 ring-1 ring-blue-400/30'
+          : 'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-400/30'
     }`}
   >
-    {provider === 'anthropic' ? 'A' : 'G'}
+    {provider === 'anthropic' ? 'A' : provider === 'google' ? 'G' : 'O'}
   </span>
 );
 

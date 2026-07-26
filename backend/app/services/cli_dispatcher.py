@@ -61,7 +61,7 @@ def route_model(model: str, provider: str | None = None) -> CLIRoute:
     ):
         route = CLIRoute("agy", "google")
     elif (
-        normalized_model.startswith("gpt-")
+        normalized_model.startswith(("gpt-", "o1-", "chatgpt-"))
         or "codex" in normalized_model
         or (not normalized_model and normalized_provider in {"openai", "codex"})
     ):
