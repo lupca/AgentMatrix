@@ -2,12 +2,15 @@ import React, { useState } from 'react';
 import { ChatPanel } from './ChatPanel';
 import { Task } from '../../types/task';
 import { MessageSquare, Minimize2, Maximize2, X, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { ContextLevel, useSessions } from '../../hooks/useSessions';
 
 interface ChatPanelManagerProps {
   threadId: string;
   taskId?: string;
   taskTitle?: string;
   task?: Task;
+  projectId?: string | null;
+  projectName?: string | null;
   onTaskAction?: () => Promise<void> | void;
   defaultMode?: 'docked' | 'floating' | 'collapsed';
   className?: string;
@@ -18,12 +21,45 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
   taskId,
   taskTitle,
   task,
+  projectId,
+  projectName,
   onTaskAction,
   defaultMode = 'docked',
   className = '',
 }) => {
   const [mode, setMode] = useState<'docked' | 'floating' | 'collapsed'>(defaultMode);
   const [isExpandedFull, setIsExpandedFull] = useState<boolean>(false);
+
+  const resolvedProjectId = projectId ?? task?.project ?? null;
+  const contextLevel: ContextLevel = taskId ? 'task' : resolvedProjectId ? 'project' : 'global';
+
+  // Fetches sessions for this context on mount and whenever the context changes.
+  const {
+    sessions,
+    activeSessionId,
+    activeSession,
+    loading: sessionsLoading,
+    createSession,
+    switchSession,
+    closeSession,
+  } = useSessions({ level: contextLevel, project_id: resolvedProjectId, task_id: taskId });
+
+  // ChatPanel resolves this value via GET /sessions/{id}, so use the session's
+  // primary key here (not thread_id, which is a distinct LangGraph checkpoint field).
+  const activeThreadId = activeSession?.id || threadId;
+
+  const sessionProps = {
+    contextLevel,
+    projectName,
+    sessions,
+    activeSessionId,
+    sessionsLoading,
+    onSwitchSession: switchSession,
+    onCreateSession: () => {
+      createSession().catch((err) => console.error('Failed to create session:', err));
+    },
+    onCloseSession: closeSession,
+  };
 
   if (mode === 'collapsed') {
     return (
@@ -76,12 +112,14 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
         </div>
 
         <ChatPanel
-          threadId={threadId}
+          key={activeThreadId}
+          threadId={activeThreadId}
           taskId={taskId}
           taskTitle={taskTitle}
           task={task}
           onTaskAction={onTaskAction}
           className="rounded-t-none h-full min-h-0 border-t-0"
+          {...sessionProps}
         />
       </div>
     );
@@ -130,12 +168,14 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
       </div>
 
       <ChatPanel
-        threadId={threadId}
+        key={activeThreadId}
+        threadId={activeThreadId}
         taskId={taskId}
         taskTitle={taskTitle}
         task={task}
         onTaskAction={onTaskAction}
         className="border-0 rounded-t-none flex-1 min-h-0"
+        {...sessionProps}
       />
     </div>
   );

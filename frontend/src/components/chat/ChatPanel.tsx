@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ChatMessage, Message } from './ChatMessage';
 import { ChatInput } from './ChatInput';
+import { SessionTabs } from './SessionTabs';
+import { ContextIndicator } from './ContextIndicator';
 import { api } from '../../lib/api';
 import { Task } from '../../types/task';
 import { Bot, RefreshCw, Trash2, AlertCircle } from 'lucide-react';
@@ -10,6 +12,7 @@ import {
   providerForModel,
 } from './ModelSelector';
 import { ChatSession, useChat } from '../../hooks/useChat';
+import { ChatSessionSummary, ContextLevel } from '../../hooks/useSessions';
 import { showSuccess } from '../../lib/toast';
 
 interface ChatPanelProps {
@@ -20,6 +23,15 @@ interface ChatPanelProps {
   onTaskAction?: () => Promise<void> | void;
   onClose?: () => void;
   className?: string;
+  /** Context breadcrumb + session-tab props (all optional, from useSessions via ChatPanelManager). */
+  contextLevel?: ContextLevel;
+  projectName?: string | null;
+  sessions?: ChatSessionSummary[];
+  activeSessionId?: string | null;
+  sessionsLoading?: boolean;
+  onSwitchSession?: (sessionId: string) => void;
+  onCreateSession?: () => void;
+  onCloseSession?: (sessionId: string) => void;
 }
 
 export const ChatPanel: React.FC<ChatPanelProps> = ({
@@ -30,6 +42,14 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onTaskAction,
   onClose,
   className = '',
+  contextLevel,
+  projectName,
+  sessions,
+  activeSessionId,
+  sessionsLoading = false,
+  onSwitchSession,
+  onCreateSession,
+  onCloseSession,
 }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loadingHistory, setLoadingHistory] = useState<boolean>(true);
@@ -348,6 +368,28 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             </button>
           )}
         </div>
+      </div>
+
+      {/* Session Tabs */}
+      {sessions && onCreateSession && (
+        <SessionTabs
+          sessions={sessions}
+          activeSessionId={activeSessionId ?? null}
+          onSwitch={onSwitchSession ?? (() => {})}
+          onCreate={onCreateSession}
+          onClose={onCloseSession}
+          loading={sessionsLoading}
+        />
+      )}
+
+      {/* Context Breadcrumb */}
+      <div className="px-4 py-2 border-b border-gray-800/60 shrink-0">
+        <ContextIndicator
+          level={contextLevel ?? (taskId ? 'task' : 'global')}
+          projectName={projectName}
+          taskId={taskId}
+          taskTitle={taskTitle}
+        />
       </div>
 
       {/* Messages List Area */}
