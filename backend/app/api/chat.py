@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session as DBSession
 from app.db.base import get_db
 from app.db.models import Task as TaskModel, Session as SessionModel
 from app.services.llm import llm
+from app.services.command_router import CommandRouter
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,41 @@ async def chat_endpoint(req: ChatRequest, db: DBSession = Depends(get_db)):
     db_session.messages = current_messages
     db.commit()
 
+    command_router = CommandRouter(db)
+    cmd, args = command_router.parse(req.message)
+
+    assistant_msg_id = f"msg-{uuid.uuid4()}"
+
+    if cmd:
+        async def stream_command_response():
+            start_payload = json.dumps({"type": "start", "id": assistant_msg_id})
+            yield f"data: {start_payload}\n\n"
+
+            cmd_result = await command_router.execute(cmd, args, db_session.id)
+            full_content = json.dumps(cmd_result)
+
+            chunk_payload = json.dumps({"type": "chunk", "content": full_content})
+            yield f"data: {chunk_payload}\n\n"
+
+            end_iso = datetime.now(timezone.utc).isoformat()
+            assistant_msg = {
+                "id": assistant_msg_id,
+                "role": "assistant",
+                "content": full_content,
+                "timestamp": end_iso
+            }
+
+            try:
+                db_session.messages = list(db_session.messages or []) + [assistant_msg]
+                db.commit()
+            except Exception as db_err:
+                logger.error("Failed to persist assistant message: %s", db_err)
+
+            done_payload = json.dumps({"type": "done", "id": assistant_msg_id, "content": full_content})
+            yield f"data: {done_payload}\n\n"
+
+        return StreamingResponse(stream_command_response(), media_type="text/event-stream")
+
     llm_messages = []
     if db_session.task_id:
         task = db.query(TaskModel).filter(TaskModel.id == db_session.task_id).first()
@@ -97,8 +133,6 @@ async def chat_endpoint(req: ChatRequest, db: DBSession = Depends(get_db)):
 
     for msg in current_messages:
         llm_messages.append({"role": msg["role"], "content": msg["content"]})
-
-    assistant_msg_id = f"msg-{uuid.uuid4()}"
 
     async def stream_response():
         full_content = ""
