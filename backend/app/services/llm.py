@@ -88,6 +88,13 @@ class LLMClient:
 
     # ===== SiliconFlow Implementation =====
 
+    def _extract_kimi_content(self, message: dict) -> str:
+        """Extract content from Kimi-K3 response (handles reasoning_content fallback)."""
+        content = message.get("content", "")
+        reasoning = message.get("reasoning_content", "")
+        # Kimi-K3 may put response in reasoning_content if content is empty
+        return content if content else reasoning
+
     def _siliconflow_complete(self, messages, model, max_tokens, temperature):
         model = model or SILICONFLOW_MODEL
         with self._get_siliconflow_client() as client:
@@ -98,7 +105,8 @@ class LLMClient:
                 "temperature": temperature
             })
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            msg = response.json()["choices"][0]["message"]
+            return self._extract_kimi_content(msg)
 
     async def _siliconflow_complete_async(self, messages, model, max_tokens, temperature):
         model = model or SILICONFLOW_MODEL
@@ -110,7 +118,8 @@ class LLMClient:
                 "temperature": temperature
             })
             response.raise_for_status()
-            return response.json()["choices"][0]["message"]["content"]
+            msg = response.json()["choices"][0]["message"]
+            return self._extract_kimi_content(msg)
 
     async def _siliconflow_stream_async(self, messages, model, max_tokens, temperature):
         model = model or SILICONFLOW_MODEL
@@ -129,8 +138,11 @@ class LLMClient:
                             break
                         import json
                         chunk = json.loads(data)
-                        if chunk["choices"][0].get("delta", {}).get("content"):
-                            yield chunk["choices"][0]["delta"]["content"]
+                        delta = chunk["choices"][0].get("delta", {})
+                        # Handle Kimi-K3 reasoning_content in streaming
+                        content = delta.get("content") or delta.get("reasoning_content")
+                        if content:
+                            yield content
 
     # ===== Anthropic Implementation (fallback) =====
 
