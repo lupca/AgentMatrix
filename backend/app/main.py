@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.db.base import Base, engine
-from app.api import tasks, sessions, audit, chat, ws
+from app.api import tasks, sessions, audit, chat, ws, projects, agents
 
 # Ensure tables are created
 Base.metadata.create_all(bind=engine)
@@ -25,7 +25,10 @@ def health_check():
     return {"status": "ok"}
 
 app.include_router(tasks.router)
+app.include_router(projects.router)
+app.include_router(agents.router)
 app.include_router(sessions.router)
 app.include_router(audit.router)
 app.include_router(chat.router)
 app.include_router(ws.router)
+
