@@ -27,6 +27,9 @@ services:
     restart: always
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ct}:${DB_PASSWORD:-secret}@db:5432/${POSTGRES_DB:-control_tower}
+      LLM_PROVIDER: ${LLM_PROVIDER:-siliconflow}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY}
+      SILICONFLOW_MODEL: ${SILICONFLOW_MODEL:-moonshotai/Kimi-K3}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     ports:
       - "${BACKEND_PORT:-8001}:8000"
@@ -47,6 +50,9 @@ services:
     restart: always
     environment:
       BACKEND_URL: http://backend:8000
+      LLM_PROVIDER: ${LLM_PROVIDER:-siliconflow}
+      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY}
+      SILICONFLOW_MODEL: ${SILICONFLOW_MODEL:-moonshotai/Kimi-K3}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     ports:
       - "${CHAT_PORT:-8081}:8080"

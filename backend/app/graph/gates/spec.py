@@ -4,11 +4,7 @@ import json
 from typing import Tuple
 from app.graph.state import TaskState, GateType, SpecGateError
 from app.graph.gates.base import add_audit_log, check_gate_approval
-
-try:
-    import anthropic
-except ImportError:
-    anthropic = None
+from app.services.llm import LLMClient
 
 
 def parse_raw_input(raw_input: str) -> Tuple[str | None, str | None]:
@@ -71,47 +67,37 @@ def spec_gate(state: TaskState) -> TaskState:
 
     state.current_gate = GateType.SPEC
 
-    api_key = os.getenv("ANTHROPIC_API_KEY")
     ac_list = []
     risk = "medium"
 
-    if api_key and anthropic:
-        try:
-            client = anthropic.Anthropic(api_key=api_key)
-            prompt = (
-                f"You are a software spec validator.\n"
-                f"Task Title: {state.title}\n"
-                f"Project: {state.project}\n\n"
-                f"Respond with a valid JSON object only containing two keys:\n"
-                f'  "acceptance_criteria": list of 2-4 specific testable string criteria\n'
-                f'  "risk": one of "low", "medium", "high"\n'
-            )
-            response = client.messages.create(
-                model="claude-3-haiku-20240307",
-                max_tokens=300,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            content = response.content[0].text
-            # Clean possible markdown block
-            if "```" in content:
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-            parsed = json.loads(content.strip())
-            ac_list = parsed.get("acceptance_criteria", [])
-            risk = parsed.get("risk", "medium")
-        except Exception:
-            ac_list = [
-                f"Implement feature: {state.title}",
-                f"Add unit tests for {state.title}",
-                "Ensure no regressions in project"
-            ]
-            risk = "medium"
-    else:
+    try:
+        llm = LLMClient()
+        prompt = (
+            f"You are a software spec validator.\n"
+            f"Task Title: {state.title}\n"
+            f"Project: {state.project}\n\n"
+            f"Respond with a valid JSON object only containing two keys:\n"
+            f'  "acceptance_criteria": list of 2-4 specific testable string criteria\n'
+            f'  "risk": one of "low", "medium", "high"\n'
+        )
+        content = llm.complete(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=300,
+            temperature=0.3
+        )
+        # Clean possible markdown block
+        if "```" in content:
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+        parsed = json.loads(content.strip())
+        ac_list = parsed.get("acceptance_criteria", [])
+        risk = parsed.get("risk", "medium")
+    except Exception:
         ac_list = [
             f"Implement feature: {state.title}",
             f"Add unit tests for {state.title}",
-            "Ensure code standards are met"
+            "Ensure no regressions in project"
         ]
         risk = "medium"
 

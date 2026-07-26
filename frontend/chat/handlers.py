@@ -1,6 +1,14 @@
 import os
+import sys
 import logging
 from typing import Any, AsyncGenerator, Dict, Optional
+
+# Add backend to path for imports
+backend_path = os.path.join(os.path.dirname(__file__), "..", "..", "backend")
+if backend_path not in sys.path:
+    sys.path.insert(0, backend_path)
+
+from app.services.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -90,73 +98,53 @@ def build_system_context(state: Optional[Dict[str, Any]]) -> str:
 
 async def chat_with_context(message: str, state: Optional[Dict[str, Any]]) -> str:
     """
-    Query Claude LLM with user question and task state context.
-    Falls back to structured context response if API key is not configured.
+    Query LLM with user question and task state context.
+    Falls back to structured context response if no API key is configured.
     """
     context_str = build_system_context(state)
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-
-    if not api_key:
-        return (
-            f"ℹ️ **Task Context**:\n{context_str}\n\n"
-            f"**Question**: {message}\n\n"
-            f"*(Note: ANTHROPIC_API_KEY not configured. Responding with active state context.)*"
-        )
 
     try:
-        import anthropic
-        client = anthropic.AsyncAnthropic(api_key=api_key)
+        llm = LLMClient()
         system_prompt = (
             "You are Control Tower Assistant. Answer user questions concisely based on the following task state context:\n\n"
             f"{context_str}"
         )
-        response = await client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=1000,
-            system=system_prompt,
-            messages=[{"role": "user", "content": message}],
+        response = await llm.complete_async(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message}
+            ],
+            max_tokens=1000
         )
-        return response.content[0].text
+        return response
     except Exception as e:
-        logger.error(f"Error calling Claude API: {e}")
-        return f"Error connecting to Claude: {e}\n\n**Current Context**:\n{context_str}"
+        logger.error(f"Error calling LLM API: {e}")
+        return f"ℹ️ **Task Context**:\n{context_str}\n\n**Question**: {message}\n\n*(LLM error: {e})*"
 
 
 async def chat_with_context_stream(
     message: str, state: Optional[Dict[str, Any]]
 ) -> AsyncGenerator[str, None]:
     """
-    Stream responses from Claude with task state context.
+    Stream responses from LLM with task state context.
     """
     context_str = build_system_context(state)
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-
-    if not api_key:
-        fallback_msg = (
-            f"ℹ️ **Task Context**:\n{context_str}\n\n"
-            f"**Question**: {message}\n\n"
-            f"*(Note: ANTHROPIC_API_KEY not configured. Responding with active state context.)*"
-        )
-        for chunk in fallback_msg.split(" "):
-            yield chunk + " "
-        return
 
     try:
-        import anthropic
-        client = anthropic.AsyncAnthropic(api_key=api_key)
+        llm = LLMClient()
         system_prompt = (
             "You are Control Tower Assistant. Answer user questions concisely based on the following task state context:\n\n"
             f"{context_str}"
         )
-        async with client.messages.stream(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=1000,
-            system=system_prompt,
-            messages=[{"role": "user", "content": message}],
-        ) as stream:
-            async for text in stream.text_stream:
-                yield text
+        async for chunk in llm.stream_async(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message}
+            ],
+            max_tokens=1000
+        ):
+            yield chunk
     except Exception as e:
-        logger.error(f"Error streaming from Claude API: {e}")
-        err_msg = f"Error connecting to Claude: {e}\n\n**Current Context**:\n{context_str}"
+        logger.error(f"Error streaming from LLM API: {e}")
+        err_msg = f"ℹ️ **Task Context**:\n{context_str}\n\n**Question**: {message}\n\n*(LLM error: {e})*"
         yield err_msg
