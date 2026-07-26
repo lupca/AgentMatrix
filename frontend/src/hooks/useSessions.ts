@@ -57,6 +57,11 @@ export function useSessions(context: SessionContext): UseSessionsResult {
 
   const abortRef = useRef<AbortController | null>(null);
 
+  const sessionsRef = useRef<ChatSessionSummary[]>([]);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
   const fetchSessions = useCallback(async () => {
     abortRef.current?.abort();
     const controller = new AbortController();
@@ -119,7 +124,7 @@ export function useSessions(context: SessionContext): UseSessionsResult {
         console.warn('Failed to persist session close, removing locally only:', err);
       }
 
-      const remaining = sessions.filter((s) => s.id !== sessionId);
+      const remaining = sessionsRef.current.filter((s) => s.id !== sessionId);
       setSessions(remaining);
 
       if (activeSessionId !== sessionId) return;
@@ -132,7 +137,7 @@ export function useSessions(context: SessionContext): UseSessionsResult {
         await createSession();
       }
     },
-    [sessions, activeSessionId, createSession],
+    [activeSessionId, createSession],
   );
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null;

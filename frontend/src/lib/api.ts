@@ -54,6 +54,8 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
       return await response.json();
     } catch (error) {
+      if (config.signal?.aborted || (error as any)?.name === 'AbortError') throw error;
+
       lastError = error;
 
       const isTransient = !(error instanceof ApiError) || error.status === 408 || error.status === 429 || error.status >= 500;
