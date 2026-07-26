@@ -1,4 +1,4 @@
-"""SDK-direct coordinator with durable session history and provider routing."""
+"""CLI-backed coordinator with durable PostgreSQL session history."""
 
 from __future__ import annotations
 
@@ -20,6 +20,12 @@ from app.services.llm_client import (
     GOOGLE_MODEL,
     UsageCounts,
     calculate_cost,
+)
+from app.services.cli_dispatcher import (
+    CLIDispatchError,
+    CLIDispatcher,
+    format_history_as_prompt,
+    route_model,
 )
 from app.services.providers import CoordinatorProvider, ProviderResponse
 from app.services.providers.anthropic_adapter import AnthropicAdapter
@@ -97,7 +103,12 @@ DEFAULT_PROVIDER_ROUTER = ProviderRouter()
 
 
 class CoordinatorService:
-    """Own coordinator sessions, canonical history, retries, and telemetry."""
+    """Own coordinator sessions, CLI dispatch, retries, and telemetry.
+
+    The optional provider arguments remain a small compatibility seam for
+    existing callers/tests.  Normal application construction uses the CLI
+    dispatcher and therefore never instantiates an SDK request.
+    """
 
     _session_locks: dict[str, asyncio.Lock] = {}
 
@@ -105,6 +116,8 @@ class CoordinatorService:
         self,
         db: DBSession,
         *,
+        dispatcher: CLIDispatcher | None = None,
+        cli_dispatcher: CLIDispatcher | None = None,
         router: ProviderRouter | None = None,
         providers: Mapping[str, CoordinatorProvider] | None = None,
         max_retries: int = 2,
@@ -113,9 +126,13 @@ class CoordinatorService:
         context_windows: Mapping[str, int] | None = None,
         context_safety_tokens: int = 1024,
     ):
+        if dispatcher is not None and cli_dispatcher is not None:
+            raise ValueError("Pass either dispatcher or cli_dispatcher, not both")
         if router is not None and providers is not None:
             raise ValueError("Pass either router or providers, not both")
         self.db = db
+        self.dispatcher = dispatcher or cli_dispatcher or CLIDispatcher()
+        self._explicit_provider_compatibility = router is not None or providers is not None
         if router is not None:
             self.router = router
         elif providers is not None:
@@ -207,7 +224,7 @@ class CoordinatorService:
         db_session: SessionModel,
         model: str | None,
         provider: str | None,
-    ) -> tuple[str, str, CoordinatorProvider]:
+    ) -> tuple[str, str, CoordinatorProvider | None]:
         requested_model = model
         if requested_model is None and provider is None:
             requested_model = db_session.selected_model
@@ -224,14 +241,25 @@ class CoordinatorService:
             else:
                 requested_model = os.getenv("COORDINATOR_MODEL", ANTHROPIC_MODEL)
 
-        inferred_provider = self.router.provider_name(requested_model)
-        if provider is not None and inferred_provider != provider:
-            raise ValueError(
-                f"Model '{requested_model}' belongs to provider "
-                f"'{inferred_provider}', not '{provider}'."
-            )
-        provider = provider or inferred_provider
-        return provider, requested_model, self.router.get(requested_model, provider)
+        route = route_model(requested_model, provider)
+        provider = provider or route.provider
+        if provider == "codex":
+            provider = "openai"
+
+        # SDK adapters are supported only for the legacy injected-provider
+        # path.  The normal path returns None and always dispatches through a
+        # CLI account login.
+        legacy_adapter: CoordinatorProvider | None = None
+        if self._explicit_provider_compatibility:
+            legacy_adapter = self.router.get(requested_model, provider)
+        else:
+            configured = self.router.providers.get(provider)
+            if configured is not None and not isinstance(
+                configured,
+                (AnthropicAdapter, GoogleAdapter),
+            ):
+                legacy_adapter = configured
+        return provider, requested_model, legacy_adapter
 
     def validate_selection(
         self,
@@ -346,6 +374,16 @@ class CoordinatorService:
                 {
                     "role": message["role"],
                     "content": str(message.get("content", "")),
+                    **{
+                        key: message[key]
+                        for key in (
+                            "name",
+                            "tool_name",
+                            "tool_call_id",
+                            "tool_calls",
+                        )
+                        if key in message
+                    },
                 }
             )
         return messages
@@ -396,6 +434,8 @@ class CoordinatorService:
 
     @staticmethod
     def _retryable(exc: Exception) -> bool:
+        if isinstance(exc, CLIDispatchError):
+            return exc.retryable
         if isinstance(exc, (TimeoutError, ConnectionError)):
             return True
         status_code = getattr(exc, "status_code", None)
@@ -515,6 +555,54 @@ class CoordinatorService:
             cached=True,
         )
 
+    @staticmethod
+    def format_prompt(messages: list[dict[str, Any]]) -> str:
+        """Expose the canonical-to-CLI prompt conversion for callers/tests."""
+
+        return format_history_as_prompt(messages)
+
+    def _cli_response(
+        self,
+        *,
+        provider: str,
+        model: str,
+        content: str,
+        canonical: list[dict[str, Any]],
+    ) -> ProviderResponse:
+        """Normalize CLI output to the existing persistence response shape."""
+
+        return ProviderResponse(
+            provider=provider,
+            model=model,
+            text=content,
+            usage=UsageCounts(
+                input_tokens=sum(self.estimate_tokens(item) for item in canonical),
+                output_tokens=max(0, self.estimate_tokens({"content": content}) - 4),
+                cached_tokens=0,
+            ),
+            request_id=f"cli-{uuid.uuid4()}",
+            stop_reason="stop",
+        )
+
+    async def _complete_cli(
+        self,
+        *,
+        provider: str,
+        model: str,
+        prompt: str,
+        canonical: list[dict[str, Any]],
+    ) -> ProviderResponse:
+        route = route_model(model, provider)
+        chunks: list[str] = []
+        async for chunk in self.dispatcher.spawn(route.cli, model, prompt):
+            chunks.append(chunk)
+        return self._cli_response(
+            provider=provider,
+            model=model,
+            content="".join(chunks),
+            canonical=canonical,
+        )
+
     async def complete_turn(
         self,
         db_session: SessionModel,
@@ -544,16 +632,25 @@ class CoordinatorService:
                 self._canonical_messages(db_session),
                 resolved_model,
             )
+            prompt = self.format_prompt(canonical)
             started = perf_counter()
             for attempt in range(self.max_retries + 1):
                 try:
-                    response = await adapter.complete(
-                        canonical,
-                        resolved_model,
-                        False,
-                        max_tokens=self.max_output_tokens,
-                        temperature=temperature,
-                    )
+                    if adapter is not None:
+                        response = await adapter.complete(
+                            canonical,
+                            resolved_model,
+                            False,
+                            max_tokens=self.max_output_tokens,
+                            temperature=temperature,
+                        )
+                    else:
+                        response = await self._complete_cli(
+                            provider=provider_name,
+                            model=resolved_model,
+                            prompt=prompt,
+                            canonical=canonical,
+                        )
                     return self._persist_success(
                         db_session,
                         turn_id=turn_id,
@@ -603,27 +700,44 @@ class CoordinatorService:
                 self._canonical_messages(db_session),
                 resolved_model,
             )
+            prompt = self.format_prompt(canonical)
             started = perf_counter()
             partial = ""
             for attempt in range(self.max_retries + 1):
                 response: ProviderResponse | None = None
                 try:
-                    response = await adapter.complete(
-                        canonical,
-                        resolved_model,
-                        True,
-                        max_tokens=self.max_output_tokens,
-                        temperature=temperature,
-                    )
-                    if response.chunks is None:
-                        if response.text:
-                            partial += response.text
-                            yield response.text
+                    if adapter is not None:
+                        response = await adapter.complete(
+                            canonical,
+                            resolved_model,
+                            True,
+                            max_tokens=self.max_output_tokens,
+                            temperature=temperature,
+                        )
+                        if response.chunks is None:
+                            if response.text:
+                                partial += response.text
+                                yield response.text
+                        else:
+                            async for chunk in response.chunks:
+                                partial += chunk
+                                yield chunk
+                        response.text = partial or response.text
                     else:
-                        async for chunk in response.chunks:
+                        route = route_model(resolved_model, provider_name)
+                        async for chunk in self.dispatcher.spawn(
+                            route.cli,
+                            resolved_model,
+                            prompt,
+                        ):
                             partial += chunk
                             yield chunk
-                    response.text = partial or response.text
+                        response = self._cli_response(
+                            provider=provider_name,
+                            model=resolved_model,
+                            content=partial,
+                            canonical=canonical,
+                        )
                     self._persist_success(
                         db_session,
                         turn_id=turn_id,
