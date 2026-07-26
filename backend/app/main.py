@@ -1,7 +1,19 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.db.base import Base, engine
-from app.api import tasks, sessions, audit, chat, ws, projects, agents, knowledge, stats
+from app.api import (
+    agents,
+    audit,
+    chat,
+    dispatch,
+    knowledge,
+    projects,
+    sessions,
+    stats,
+    stream,
+    tasks,
+    ws,
+)
 
 # Ensure tables are created
 Base.metadata.create_all(bind=engine)
@@ -35,3 +47,5 @@ app.include_router(chat.router)
 app.include_router(ws.router)
 app.include_router(knowledge.router)
 app.include_router(stats.router)
+app.include_router(dispatch.router)
+app.include_router(stream.router)

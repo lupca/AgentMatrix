@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Text, Integer, Date, DateTime, ForeignKey, JSON, Boolean, CheckConstraint, Float
+from sqlalchemy import Column, String, Text, Integer, Date, DateTime, ForeignKey, JSON, Boolean, CheckConstraint, Float, UniqueConstraint
 from sqlalchemy.orm import validates, relationship
 from sqlalchemy.sql import func
 from app.db.base import Base
@@ -42,6 +42,7 @@ class Task(Base):
 
     sessions = relationship("Session", back_populates="task", cascade="all, delete-orphan")
     gate_records = relationship("GateRecord", back_populates="task", cascade="all, delete-orphan")
+    agent_runs = relationship("AgentRun", back_populates="task", cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint("executor IS NULL OR reviewer IS NULL OR executor <> reviewer", name="ck_tasks_four_eyes"),
@@ -148,6 +149,83 @@ class Agent(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    task_id = Column(
+        String(20),
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    agent_id = Column(String(50), nullable=False)
+    cli = Column(String(20), nullable=False)
+    command = Column(Text, nullable=False)
+
+    status = Column(String(20), nullable=False, default="queued", index=True)
+    pid = Column(Integer, nullable=True)
+    dramatiq_message_id = Column(String(50), nullable=True)
+
+    queued_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    timeout_seconds = Column(Integer, nullable=False, default=14_400)
+
+    exit_code = Column(Integer, nullable=True)
+    result_ref = Column(String(255), nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    output_lines = Column(Integer, nullable=False, default=0)
+    output_bytes = Column(Integer, nullable=False, default=0)
+    attempt = Column(Integer, nullable=False, default=1)
+    max_attempts = Column(Integer, nullable=False, default=3)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    task = relationship("Task", back_populates="agent_runs")
+    output_chunks = relationship(
+        "AgentOutputChunk",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="AgentOutputChunk.chunk_index",
+    )
+
+    __table_args__ = (
+        CheckConstraint("timeout_seconds > 0", name="ck_agent_runs_timeout_positive"),
+        CheckConstraint("attempt > 0", name="ck_agent_runs_attempt_positive"),
+        CheckConstraint("max_attempts > 0", name="ck_agent_runs_max_attempts_positive"),
+    )
+
+
+class AgentOutputChunk(Base):
+    __tablename__ = "agent_output_chunks"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(
+        String(36),
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chunk_index = Column(Integer, nullable=False)
+    content = Column(Text, nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    run = relationship("AgentRun", back_populates="output_chunks")
+
+    __table_args__ = (
+        CheckConstraint("chunk_index >= 0", name="ck_output_chunks_index_nonnegative"),
+        UniqueConstraint("run_id", "chunk_index", name="uq_output_chunks_run_index"),
+    )
+
+
 class KnowledgeItem(Base):
     __tablename__ = "knowledge_items"
 
@@ -160,4 +238,3 @@ class KnowledgeItem(Base):
     author = Column(String(50), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
