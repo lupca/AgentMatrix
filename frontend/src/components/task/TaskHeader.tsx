@@ -21,6 +21,7 @@ interface TaskHeaderProps {
   task: Task;
   onStatusChange?: (newStatus: string) => void;
   onDispatch?: () => void;
+  dispatchControl?: React.ReactNode;
   onApprove?: () => void;
   onRefresh?: () => void;
   isDispatching?: boolean;
@@ -30,6 +31,7 @@ export const TaskHeader: React.FC<TaskHeaderProps> = ({
   task,
   onStatusChange,
   onDispatch,
+  dispatchControl,
   onApprove,
   onRefresh,
   isDispatching = false,
@@ -167,7 +169,7 @@ export const TaskHeader: React.FC<TaskHeaderProps> = ({
             </button>
           )}
 
-          {onDispatch && (
+          {dispatchControl || (onDispatch && (
             <button
               onClick={onDispatch}
               disabled={isDispatching}
@@ -176,7 +178,7 @@ export const TaskHeader: React.FC<TaskHeaderProps> = ({
               <Play className={`w-3.5 h-3.5 ${isDispatching ? 'animate-spin' : ''}`} />
               <span>{isDispatching ? 'Dispatching...' : 'Dispatch Task'}</span>
             </button>
-          )}
+          ))}
         </div>
       </div>
 

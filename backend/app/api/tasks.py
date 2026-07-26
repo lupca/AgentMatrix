@@ -3,7 +3,13 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.db.base import get_db
-from app.db.models import Task as TaskModel, Session as SessionModel, AuditLog as AuditLogModel
+from app.db.models import (
+    AgentRun as AgentRunModel,
+    AuditLog as AuditLogModel,
+    Session as SessionModel,
+    Task as TaskModel,
+)
+from app.api.dispatch import AgentRunResponse
 from app.schemas.task import Task, TaskCreate, TaskUpdate
 from app.schemas.audit import AuditLog
 
@@ -116,6 +122,23 @@ def get_task(id: str, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(db_task)
     return db_task
+
+
+@router.get("/{id}/runs", response_model=list[AgentRunResponse])
+def get_task_runs(id: str, db: Session = Depends(get_db)):
+    db_task = db.query(TaskModel).filter(TaskModel.id == id).first()
+    if not db_task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task '{id}' not found."
+        )
+
+    return (
+        db.query(AgentRunModel)
+        .filter(AgentRunModel.task_id == id)
+        .order_by(AgentRunModel.queued_at.desc())
+        .all()
+    )
 
 
 @router.patch("/{id}", response_model=Task)

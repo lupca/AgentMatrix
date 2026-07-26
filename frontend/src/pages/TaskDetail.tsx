@@ -5,9 +5,10 @@ import { Task } from '../types/task';
 import { TaskHeader } from '../components/task/TaskHeader';
 import { TaskSpec } from '../components/task/TaskSpec';
 import { TaskMeta } from '../components/task/TaskMeta';
+import { DispatchButton, DispatchResponse } from '../components/task/DispatchButton';
+import { RunHistory } from '../components/task/RunHistory';
 import { ChatPanelManager } from '../components/chat/ChatPanelManager';
 import { AlertCircle, RefreshCw } from 'lucide-react';
-import { showSuccess } from '../lib/toast';
 
 export const TaskDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -16,7 +17,7 @@ export const TaskDetailPage: React.FC = () => {
   const [task, setTask] = useState<Task | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
-  const [isDispatching, setIsDispatching] = useState<boolean>(false);
+  const [runHistoryRefreshKey, setRunHistoryRefreshKey] = useState(0);
 
   const fetchTaskDetail = useCallback(async () => {
     if (!id) return;
@@ -60,28 +61,13 @@ export const TaskDetailPage: React.FC = () => {
     }
   };
 
-  const handleDispatch = async () => {
-    if (!task) return;
-    setIsDispatching(true);
-    try {
-      // Use executor from task or default agent
-      const agentId = task.executor || '@gpt-5.6-luna-high';
-      const response = await api.post<{ run_id: string; status: string }>('/dispatch', {
-        task_id: task.id,
-        agent_id: agentId,
-      });
-      setTask((prev) => (prev ? { ...prev, status: 'dispatched' } : null));
-      showSuccess(`Task ${task.id} dispatched (run: ${response.run_id})`);
-    } catch (err: any) {
-      console.error('Failed to dispatch task:', err);
-      // Fallback: just update status
-      try {
-        await api.patch(`/tasks/${task.id}`, { status: 'dispatched' });
-        setTask((prev) => (prev ? { ...prev, status: 'dispatched' } : null));
-      } catch {}
-    } finally {
-      setIsDispatching(false);
-    }
+  const handleDispatched = (response: DispatchResponse) => {
+    setTask((prev) =>
+      prev
+        ? { ...prev, status: 'dispatched', executor: response.agent_id }
+        : null,
+    );
+    setRunHistoryRefreshKey((current) => current + 1);
   };
 
   const handleApprove = async () => {
@@ -135,10 +121,15 @@ export const TaskDetailPage: React.FC = () => {
       <TaskHeader
         task={task}
         onStatusChange={handleStatusChange}
-        onDispatch={handleDispatch}
+        dispatchControl={
+          <DispatchButton
+            taskId={task.id}
+            defaultAgentId={task.executor}
+            onDispatched={handleDispatched}
+          />
+        }
         onApprove={handleApprove}
         onRefresh={fetchTaskDetail}
-        isDispatching={isDispatching}
       />
 
       {/* Main Grid: Left side Task Details, Right side Copilot Chat */}
@@ -147,6 +138,7 @@ export const TaskDetailPage: React.FC = () => {
         <div className="lg:col-span-7 xl:col-span-8 space-y-6">
           <TaskSpec task={task} />
           <TaskMeta task={task} />
+          <RunHistory taskId={task.id} refreshKey={runHistoryRefreshKey} />
         </div>
 
         {/* Right Column (AI Copilot Chat Sidecar) */}

@@ -142,6 +142,7 @@ def get_run_status(run_id: str, db: Session = Depends(get_db)) -> AgentRun:
 
 
 @router.post("/dispatch/{run_id}/cancel")
+@router.post("/runs/{run_id}/cancel")
 def cancel_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
     run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
     if run is None:
