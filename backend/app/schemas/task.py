@@ -38,14 +38,14 @@ class TaskState(BaseModel):
     current_gate: str = "spec"
     status: str = "todo"
     mode: str = "supervised"
-    acceptance_criteria: list[str] = Field(default_factory=list)
-    files: list[str] = Field(default_factory=list)
-    tests: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[Any] = Field(default_factory=list)
+    files: list[Any] = Field(default_factory=list)
+    tests: list[Any] = Field(default_factory=list)
     plan: str | None = None
     executor: str | None = None
     reviewer: str | None = None
     result_ref: str | None = None
-    findings: list[str] = Field(default_factory=list)
+    findings: list[Any] = Field(default_factory=list)
     verdict: str | None = None
     awaiting_approval: bool = False
     approval_prompt: str | None = None
@@ -72,13 +72,13 @@ class TaskCreate(BaseModel):
     risk: str | None = None
     executor: str | None = None
     reviewer: str | None = None
-    acceptance_criteria: list[str] | None = None
-    files: list[str] | None = None
-    tests: list[str] | None = None
-    flows: list[str] | None = None
+    acceptance_criteria: list[Any] | None = None
+    files: list[Any] | None = None
+    tests: list[Any] | None = None
+    flows: list[Any] | None = None
     plan: str | None = None
     result_ref: str | None = None
-    findings: list[str] | None = None
+    findings: list[Any] | None = None
     verdict: str | None = None
     predicted_success: str | None = None
     prediction_factors: dict[str, Any] | None = None
@@ -101,13 +101,13 @@ class TaskUpdate(BaseModel):
     risk: str | None = None
     executor: str | None = None
     reviewer: str | None = None
-    acceptance_criteria: list[str] | None = None
-    files: list[str] | None = None
-    tests: list[str] | None = None
-    flows: list[str] | None = None
+    acceptance_criteria: list[Any] | None = None
+    files: list[Any] | None = None
+    tests: list[Any] | None = None
+    flows: list[Any] | None = None
     plan: str | None = None
     result_ref: str | None = None
-    findings: list[str] | None = None
+    findings: list[Any] | None = None
     verdict: str | None = None
     predicted_success: str | None = None
     prediction_factors: dict[str, Any] | None = None
@@ -132,13 +132,13 @@ class Task(BaseModel):
     risk: str | None = None
     executor: str | None = None
     reviewer: str | None = None
-    acceptance_criteria: list[str] | None = []
-    files: list[str] | None = []
-    tests: list[str] | None = []
-    flows: list[str] | None = []
+    acceptance_criteria: list[Any] | None = []
+    files: list[Any] | None = []
+    tests: list[Any] | None = []
+    flows: list[Any] | None = []
     plan: str | None = None
     result_ref: str | None = None
-    findings: list[str] | None = []
+    findings: list[Any] | None = []
     verdict: str | None = None
     predicted_success: str | None = None
     prediction_factors: dict[str, Any] | None = None

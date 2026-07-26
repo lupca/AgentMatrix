@@ -16,44 +16,51 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        'projects',
-        sa.Column('id', sa.String(length=50), nullable=False),
-        sa.Column('name', sa.String(length=100), nullable=False),
-        sa.Column('description', sa.Text(), nullable=True),
-        sa.Column('status', sa.String(length=20), nullable=False, server_default='active'),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
-        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
-        sa.PrimaryKeyConstraint('id')
-    )
+    conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    tables = inspector.get_table_names()
 
-    op.create_table(
-        'agents',
-        sa.Column('id', sa.String(length=50), nullable=False),
-        sa.Column('name', sa.String(length=100), nullable=False),
-        sa.Column('role', sa.String(length=50), nullable=False),
-        sa.Column('capabilities', sa.JSON(), nullable=True),
-        sa.Column('status', sa.String(length=20), nullable=False, server_default='idle'),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
-        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
-        sa.PrimaryKeyConstraint('id')
-    )
+    if 'projects' not in tables:
+        op.create_table(
+            'projects',
+            sa.Column('id', sa.String(length=50), nullable=False),
+            sa.Column('name', sa.String(length=100), nullable=False),
+            sa.Column('description', sa.Text(), nullable=True),
+            sa.Column('status', sa.String(length=20), nullable=False, server_default='active'),
+            sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
+            sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
+            sa.PrimaryKeyConstraint('id')
+        )
 
-    op.create_table(
-        'knowledge_items',
-        sa.Column('id', sa.String(length=50), nullable=False),
-        sa.Column('title', sa.String(length=200), nullable=False),
-        sa.Column('category', sa.String(length=50), nullable=True, server_default='general'),
-        sa.Column('content', sa.Text(), nullable=False, server_default=''),
-        sa.Column('tags', sa.JSON(), nullable=True),
-        sa.Column('project', sa.String(length=50), nullable=True),
-        sa.Column('author', sa.String(length=50), nullable=True),
-        sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
-        sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
-        sa.PrimaryKeyConstraint('id')
-    )
-    op.create_index('idx_knowledge_category', 'knowledge_items', ['category'])
-    op.create_index('idx_knowledge_project', 'knowledge_items', ['project'])
+    if 'agents' not in tables:
+        op.create_table(
+            'agents',
+            sa.Column('id', sa.String(length=50), nullable=False),
+            sa.Column('name', sa.String(length=100), nullable=False),
+            sa.Column('role', sa.String(length=50), nullable=False),
+            sa.Column('capabilities', sa.JSON(), nullable=True),
+            sa.Column('status', sa.String(length=20), nullable=False, server_default='idle'),
+            sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
+            sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
+            sa.PrimaryKeyConstraint('id')
+        )
+
+    if 'knowledge_items' not in tables:
+        op.create_table(
+            'knowledge_items',
+            sa.Column('id', sa.String(length=50), nullable=False),
+            sa.Column('title', sa.String(length=200), nullable=False),
+            sa.Column('category', sa.String(length=50), nullable=True, server_default='general'),
+            sa.Column('content', sa.Text(), nullable=False, server_default=''),
+            sa.Column('tags', sa.JSON(), nullable=True),
+            sa.Column('project', sa.String(length=50), nullable=True),
+            sa.Column('author', sa.String(length=50), nullable=True),
+            sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
+            sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=True),
+            sa.PrimaryKeyConstraint('id')
+        )
+        op.create_index('idx_knowledge_category', 'knowledge_items', ['category'])
+        op.create_index('idx_knowledge_project', 'knowledge_items', ['project'])
 
 
 def downgrade() -> None:

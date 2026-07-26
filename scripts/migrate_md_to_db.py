@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import yaml
+import json
 import argparse
 from pathlib import Path
 from datetime import datetime
@@ -50,6 +51,7 @@ def parse_project_registry(index_path: Path) -> list[dict]:
                         'id': slug,
                         'name': slug.replace('-', ' ').title(),
                         'repo_root': repo_root,
+                        'status': 'active',
                     })
         elif in_table and not line.strip().startswith('|'):
             break
@@ -94,14 +96,18 @@ def parse_agent_files(agents_dir: Path) -> list[dict]:
         fm = parse_frontmatter(content)
 
         agent_id = fm.get('agent_id', agent_file.stem)
+        name = fm.get('name') or agent_id.lstrip('@').replace('-', ' ').title()
+        role = fm.get('role') or 'Agent'
         agents.append({
             'id': agent_id,
+            'name': name,
+            'role': role,
             'type': fm.get('type', 'ai'),
             'model': fm.get('model'),
             'effort': fm.get('effort'),
             'total_tasks_executed': fm.get('total_tasks_executed', 0),
             'total_tasks_reviewed': fm.get('total_tasks_reviewed', 0),
-            'success_rate': fm.get('success_rate', 1.0),
+            'success_rate': float(fm.get('success_rate', 1.0) or 1.0),
             'strengths': fm.get('strengths', []),
             'weaknesses': fm.get('weaknesses', []),
             'status': 'active' if fm.get('status') != 'deprecated' else 'deprecated',
@@ -149,16 +155,29 @@ def migrate(dry_run: bool = False):
         # Upsert projects
         for p in projects:
             session.execute(text("""
-                INSERT INTO projects (id, name, repo_root)
-                VALUES (:id, :name, :repo_root)
+                INSERT INTO projects (id, name, repo_root, status)
+                VALUES (:id, :name, :repo_root, :status)
                 ON CONFLICT (id) DO UPDATE SET
                     name = EXCLUDED.name,
                     repo_root = EXCLUDED.repo_root,
+                    status = EXCLUDED.status,
                     updated_at = NOW()
-            """), p)
+            """), {
+                **p,
+                'status': p.get('status', 'active'),
+            })
 
         # Upsert tasks
         for t in tasks:
+            executor = t.get('executor')
+            reviewer = t.get('reviewer')
+            if executor and reviewer and executor == reviewer:
+                reviewer = None
+
+            ac = t['acceptance_criteria'] if isinstance(t['acceptance_criteria'], list) else []
+            files = t['files'] if isinstance(t['files'], list) else []
+            tests = t['tests'] if isinstance(t['tests'], list) else []
+
             session.execute(text("""
                 INSERT INTO tasks (id, project, title, status, priority, risk, executor, reviewer, acceptance_criteria, files, tests, plan, deadline)
                 VALUES (:id, :project, :title, :status, :priority, :risk, :executor, :reviewer, :acceptance_criteria, :files, :tests, :plan, :deadline)
@@ -177,31 +196,36 @@ def migrate(dry_run: bool = False):
                     updated_at = NOW()
             """), {
                 **t,
-                'acceptance_criteria': str(t['acceptance_criteria']),
-                'files': str(t['files']),
-                'tests': str(t['tests']),
+                'executor': executor,
+                'reviewer': reviewer,
+                'acceptance_criteria': json.dumps(ac),
+                'files': json.dumps(files),
+                'tests': json.dumps(tests),
             })
 
         # Upsert agents
         for a in agents:
             session.execute(text("""
-                INSERT INTO agents (id, type, model, effort, total_tasks_executed, total_tasks_reviewed, success_rate, strengths, weaknesses, status)
-                VALUES (:id, :type, :model, :effort, :total_tasks_executed, :total_tasks_reviewed, :success_rate, :strengths, :weaknesses, :status)
+                INSERT INTO agents (id, name, role, type, model, effort, success_rate, status)
+                VALUES (:id, :name, :role, :type, :model, :effort, :success_rate, :status)
                 ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    role = EXCLUDED.role,
                     type = EXCLUDED.type,
                     model = EXCLUDED.model,
                     effort = EXCLUDED.effort,
-                    total_tasks_executed = EXCLUDED.total_tasks_executed,
-                    total_tasks_reviewed = EXCLUDED.total_tasks_reviewed,
                     success_rate = EXCLUDED.success_rate,
-                    strengths = EXCLUDED.strengths,
-                    weaknesses = EXCLUDED.weaknesses,
                     status = EXCLUDED.status,
                     updated_at = NOW()
             """), {
-                **a,
-                'strengths': str(a['strengths']),
-                'weaknesses': str(a['weaknesses']),
+                'id': a['id'],
+                'name': a['name'],
+                'role': a['role'],
+                'type': a['type'],
+                'model': a['model'],
+                'effort': a['effort'],
+                'success_rate': a['success_rate'],
+                'status': a['status'],
             })
 
         session.commit()

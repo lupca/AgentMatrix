@@ -30,9 +30,13 @@ def upgrade() -> None:
             sa.Column('graph_status', sa.String(length=20), nullable=True, server_default='idle')
         )
     else:
-        op.add_column('projects', sa.Column('repo_root', sa.String(length=255), nullable=True))
-        op.add_column('projects', sa.Column('task_prefix', sa.String(length=20), nullable=True))
-        op.add_column('projects', sa.Column('graph_status', sa.String(length=20), nullable=True, server_default='idle'))
+        project_cols = [c['name'] for c in inspector.get_columns('projects')]
+        if 'repo_root' not in project_cols:
+            op.add_column('projects', sa.Column('repo_root', sa.String(length=255), nullable=True))
+        if 'task_prefix' not in project_cols:
+            op.add_column('projects', sa.Column('task_prefix', sa.String(length=20), nullable=True))
+        if 'graph_status' not in project_cols:
+            op.add_column('projects', sa.Column('graph_status', sa.String(length=20), nullable=True, server_default='idle'))
 
     if 'agents' not in tables:
         op.create_table(
@@ -47,16 +51,24 @@ def upgrade() -> None:
             sa.Column('success_rate', sa.Float(), nullable=True, server_default='0.0')
         )
     else:
-        op.add_column('agents', sa.Column('type', sa.String(length=50), nullable=True))
-        op.add_column('agents', sa.Column('model', sa.String(length=50), nullable=True))
-        op.add_column('agents', sa.Column('effort', sa.String(length=20), nullable=True))
-        op.add_column('agents', sa.Column('cli', sa.String(length=50), nullable=True))
-        op.add_column('agents', sa.Column('success_rate', sa.Float(), nullable=True, server_default='0.0'))
+        agent_cols = [c['name'] for c in inspector.get_columns('agents')]
+        if 'type' not in agent_cols:
+            op.add_column('agents', sa.Column('type', sa.String(length=50), nullable=True))
+        if 'model' not in agent_cols:
+            op.add_column('agents', sa.Column('model', sa.String(length=50), nullable=True))
+        if 'effort' not in agent_cols:
+            op.add_column('agents', sa.Column('effort', sa.String(length=20), nullable=True))
+        if 'cli' not in agent_cols:
+            op.add_column('agents', sa.Column('cli', sa.String(length=50), nullable=True))
+        if 'success_rate' not in agent_cols:
+            op.add_column('agents', sa.Column('success_rate', sa.Float(), nullable=True, server_default='0.0'))
 
-    try:
-        op.create_foreign_key('fk_tasks_project', 'tasks', 'projects', ['project'], ['id'])
-    except Exception:
-        pass
+    if conn.dialect.name != 'sqlite':
+        fks = [fk.get('name') for fk in inspector.get_foreign_keys('tasks')]
+        if 'fk_tasks_project' not in fks:
+            orphans = conn.execute(sa.text("SELECT COUNT(*) FROM tasks WHERE project NOT IN (SELECT id FROM projects)")).scalar()
+            if orphans == 0:
+                op.create_foreign_key('fk_tasks_project', 'tasks', 'projects', ['project'], ['id'])
 
 
 def downgrade() -> None:
