@@ -54,8 +54,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    # No port mapping - internal only
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -73,8 +72,6 @@ services:
     environment:
       - DATABASE_URL=postgresql://ct:secret@db:5432/control_tower
       - REDIS_URL=redis://redis:6379/0
-    volumes:
-      - /home/lupca/projects:/home/lupca/projects:rw
 
 volumes:
   pgdata:
