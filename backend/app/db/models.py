@@ -1,4 +1,5 @@
 import uuid
+from enum import Enum
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -7,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     Numeric,
@@ -19,6 +21,18 @@ from sqlalchemy.orm import validates, relationship
 from sqlalchemy.sql import func
 from app.db.base import Base
 from app.graph.state import FourEyesViolation
+
+
+class ContextLevel(str, Enum):
+    GLOBAL = "global"
+    PROJECT = "project"
+    TASK = "task"
+
+
+class SessionStatus(str, Enum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+    CLOSED = "closed"
 
 
 class Task(Base):
@@ -170,6 +184,17 @@ class Session(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     task_id = Column(String(20), ForeignKey("tasks.id"), nullable=True, index=True)
+    project_id = Column(
+        String(50),
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    context_level = Column(String(10), nullable=False, default=ContextLevel.GLOBAL.value)
+    title = Column(String(200), nullable=True)
+    status = Column(String(10), nullable=False, default=SessionStatus.ACTIVE.value, index=True)
+    pinned = Column(Boolean, nullable=False, default=False, server_default="false")
+    message_count = Column(Integer, nullable=False, default=0, server_default="0")
     thread_id = Column(String(100), nullable=True, index=True)
     current_gate = Column(String(20), nullable=True)
     checkpoint_id = Column(String(100), nullable=True, index=True)
@@ -179,9 +204,39 @@ class Session(Base):
     messages = Column(JSON, default=list)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    last_activity_at = Column(DateTime(timezone=True), server_default=func.now())
 
     task = relationship("Task", back_populates="sessions")
+    project = relationship("Project", backref="sessions")
     llm_usages = relationship("LLMUsage", back_populates="session")
+
+    __table_args__ = (
+        CheckConstraint(
+            "context_level IN ('global', 'project', 'task')",
+            name="ck_sessions_context_level_valid",
+        ),
+        CheckConstraint(
+            "status IN ('active', 'archived', 'closed')",
+            name="ck_sessions_status_valid",
+        ),
+        CheckConstraint(
+            "(task_id IS NULL) OR (project_id IS NOT NULL)",
+            name="ck_sessions_task_requires_project",
+        ),
+        CheckConstraint(
+            "(context_level = 'global' AND project_id IS NULL AND task_id IS NULL) OR "
+            "(context_level = 'project' AND project_id IS NOT NULL AND task_id IS NULL) OR "
+            "(context_level = 'task' AND project_id IS NOT NULL AND task_id IS NOT NULL)",
+            name="ck_sessions_context_level_consistency",
+        ),
+        Index(
+            "ix_sessions_context_listing",
+            "context_level",
+            "project_id",
+            "status",
+            "last_activity_at",
+        ),
+    )
 
 
 class AuditLog(Base):

@@ -1,6 +1,7 @@
 import os
 import pytest
 from datetime import date
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session as SQLAlchemySession
 
 from app.db.base import engine, SessionLocal
@@ -50,6 +51,8 @@ def test_create_and_query_task():
         # Create session linked to task
         session_obj = Session(
             task_id="CTV2-001",
+            project_id="control-tower-v2",
+            context_level="task",
             thread_id="thread-123",
             current_gate="dispatch",
             messages=[{"role": "user", "content": "Execute task"}]
@@ -82,3 +85,38 @@ def test_create_and_query_task():
         db.query(Task).filter(Task.id == "CTV2-001").delete()
         db.commit()
         db.close()
+
+
+def test_session_valid_context_levels(db_session):
+    global_session = Session(context_level="global")
+    project_session = Session(context_level="project", project_id="proj-1")
+    task_session = Session(context_level="task", project_id="proj-1", task_id="T-1")
+    db_session.add_all([global_session, project_session, task_session])
+    db_session.commit()
+
+    assert global_session.status == "active"
+    assert global_session.pinned is False
+    assert global_session.message_count == 0
+    assert project_session.project_id == "proj-1"
+    assert task_session.task_id == "T-1"
+
+
+def test_session_context_level_consistency_constraint(db_session):
+    db_session.add(Session(context_level="task", task_id=None, project_id=None))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_session_task_requires_project_constraint(db_session):
+    db_session.add(Session(context_level="global", task_id="T-1", project_id=None))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_session_invalid_context_level_value_constraint(db_session):
+    db_session.add(Session(context_level="bogus"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()

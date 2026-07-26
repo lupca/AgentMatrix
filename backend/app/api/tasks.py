@@ -108,6 +108,8 @@ def create_task(task_in: TaskCreate, db: Session = Depends(get_db)):
     db_session = SessionModel(
         id=db_task.session_id,
         task_id=db_task.id,
+        project_id=db_task.project,
+        context_level="task",
         thread_id=db_task.session_id,
         messages=[]
     )
@@ -293,6 +295,8 @@ def get_task_messages(id: str, db: Session = Depends(get_db)):
         db_session = SessionModel(
             id=db_task.session_id,
             task_id=db_task.id,
+            project_id=db_task.project,
+            context_level="task",
             thread_id=db_task.session_id,
             messages=[]
         )

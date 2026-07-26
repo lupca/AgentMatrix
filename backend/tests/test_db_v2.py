@@ -175,6 +175,8 @@ def test_session_checkpoint_and_relationship(db_session):
 
     sess = Session(
         task_id="V2-003",
+        project_id="control-tower-v2",
+        context_level="task",
         thread_id="thread-v2-003",
         current_gate="dispatch",
         checkpoint_id="chk-9999",
@@ -203,7 +205,12 @@ def test_gate_ledger_blocks_parent_task_deletion(db_session):
     db_session.commit()
 
     gate = GateRecord(task_id="V2-CASCADE", gate_type="spec", status="pending")
-    sess = Session(task_id="V2-CASCADE", thread_id="t-cas")
+    sess = Session(
+        task_id="V2-CASCADE",
+        project_id="proj",
+        context_level="task",
+        thread_id="t-cas",
+    )
     db_session.add_all([gate, sess])
     db_session.commit()
 

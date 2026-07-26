@@ -188,6 +188,8 @@ class CoordinatorService:
                 db_session = SessionModel(
                     id=task.session_id,
                     task_id=task.id,
+                    project_id=task.project,
+                    context_level="task",
                     thread_id=task.session_id,
                     messages=[],
                 )

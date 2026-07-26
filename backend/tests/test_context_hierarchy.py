@@ -77,6 +77,8 @@ def test_build_messages_tiered_ordering_and_cache_control(db_session):
     session = SessionModel(
         id="sess-tiered",
         task_id="TASK-001",
+        project_id="proj-tiered",
+        context_level="task",
         messages=[
             {"id": "msg-1", "role": "user", "content": "Hello", "status": "complete"},
             {"id": "msg-2", "role": "assistant", "content": "Hi", "status": "complete"},
@@ -202,6 +204,8 @@ def test_task_context_enriches_with_langgraph_state(db_session):
     session = SessionModel(
         id="sess-graph",
         task_id="GRAPH-1",
+        project_id="proj-graph",
+        context_level="task",
         messages=[],
     )
     db_session.add_all([task, session])
@@ -221,7 +225,13 @@ def test_task_context_enriches_with_langgraph_state(db_session):
 
 def test_task_context_without_graph_is_unaffected(db_session):
     task = Task(id="NOGRAPH-1", project="proj-nograph", title="No Graph Task", status="todo")
-    session = SessionModel(id="sess-nograph", task_id="NOGRAPH-1", messages=[])
+    session = SessionModel(
+        id="sess-nograph",
+        task_id="NOGRAPH-1",
+        project_id="proj-nograph",
+        context_level="task",
+        messages=[],
+    )
     db_session.add_all([task, session])
     db_session.commit()
 

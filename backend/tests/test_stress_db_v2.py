@@ -143,7 +143,14 @@ def test_heavy_cascade_deletion_is_blocked_by_immutable_ledger(db_session):
         for g in range(5):
             db_session.add(GateRecord(task_id=t_id, gate_type=f"gate_{g}", status="pending"))
         for s in range(2):
-            db_session.add(Session(task_id=t_id, thread_id=f"t-{t_id}-{s}"))
+            db_session.add(
+                Session(
+                    task_id=t_id,
+                    project_id="cascade-proj",
+                    context_level="task",
+                    thread_id=f"t-{t_id}-{s}",
+                )
+            )
 
     db_session.commit()
 
