@@ -115,3 +115,26 @@ class AuditLog(Base):
     actor = Column(String(50), nullable=True)
     details = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id = Column(String(50), primary_key=True)
+    name = Column(String(100), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String(20), nullable=False, default="active")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class Agent(Base):
+    __tablename__ = "agents"
+
+    id = Column(String(50), primary_key=True)
+    name = Column(String(100), nullable=False)
+    role = Column(String(50), nullable=False)
+    capabilities = Column(JSON, default=list)
+    status = Column(String(20), nullable=False, default="idle")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
