@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Send, Loader2, Sparkles } from 'lucide-react';
 import { Task } from '../../types/task';
 import { QuickActions } from './QuickActions';
+import { ModelSelector } from './ModelSelector';
 
 interface ChatInputProps {
   onSendMessage: (message: string) => Promise<void> | void;
@@ -10,6 +11,9 @@ interface ChatInputProps {
   isStreaming?: boolean;
   placeholder?: string;
   task?: Task;
+  currentModel?: string | null;
+  onModelChange?: (model: string) => void | Promise<void>;
+  isModelLoading?: boolean;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -19,6 +23,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   isStreaming = false,
   placeholder = 'Ask Control Tower AI assistant...',
   task,
+  currentModel,
+  onModelChange,
+  isModelLoading = false,
 }) => {
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -66,6 +73,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           onSendCommand={onSendMessage}
           onActionComplete={onTaskAction}
           disabled={disabled || isStreaming}
+        />
+      )}
+      {onModelChange && (
+        <ModelSelector
+          currentModel={currentModel}
+          onModelChange={onModelChange}
+          disabled={disabled || isStreaming}
+          isLoading={isModelLoading}
         />
       )}
       {/* Quick Prompts */}

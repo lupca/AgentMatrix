@@ -3,7 +3,14 @@ import { ChatMessage, Message } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { api } from '../../lib/api';
 import { Task } from '../../types/task';
-import { Bot, RefreshCw, Sparkles, Trash2, AlertCircle } from 'lucide-react';
+import { Bot, RefreshCw, Trash2, AlertCircle } from 'lucide-react';
+import {
+  DEFAULT_COORDINATOR_MODEL,
+  MODELS,
+  providerForModel,
+} from './ModelSelector';
+import { ChatSession, useChat } from '../../hooks/useChat';
+import { showSuccess } from '../../lib/toast';
 
 interface ChatPanelProps {
   threadId: string;
@@ -28,6 +35,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [loadingHistory, setLoadingHistory] = useState<boolean>(true);
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_COORDINATOR_MODEL);
+  const [selectedProvider, setSelectedProvider] = useState(
+    providerForModel(DEFAULT_COORDINATOR_MODEL),
+  );
+
+  const { isModelSwitching, updateSessionModel } = useChat(sessionId || threadId);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -52,6 +66,15 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         }
       }
 
+      const session = sessionData as ChatSession | null;
+      setSessionId(session?.id || null);
+      const nextModel = session?.selected_model || DEFAULT_COORDINATOR_MODEL;
+      setSelectedModel(nextModel);
+      setSelectedProvider(
+        (session?.selected_provider as 'anthropic' | 'google' | null) ||
+          providerForModel(nextModel),
+      );
+
       if (sessionData && Array.isArray(sessionData.messages)) {
         const formattedMessages: Message[] = sessionData.messages.map((m: any) => ({
           id: m.id || `msg-${Math.random()}`,
@@ -75,6 +98,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       }
     } catch (err: any) {
       console.warn('Could not fetch chat session history:', err);
+      setSessionId(null);
+      setSelectedModel(DEFAULT_COORDINATOR_MODEL);
+      setSelectedProvider(providerForModel(DEFAULT_COORDINATOR_MODEL));
       setMessages([
         {
           id: 'welcome-1',
@@ -87,6 +113,30 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       setLoadingHistory(false);
     }
   }, [threadId, taskId, taskTitle]);
+
+  const handleModelChange = async (model: string) => {
+    const previousModel = selectedModel;
+    const previousProvider = selectedProvider;
+    setSelectedModel(model);
+    setSelectedProvider(providerForModel(model));
+
+    try {
+      const updatedSession = await updateSessionModel(model);
+      const persistedModel = updatedSession.selected_model || model;
+      setSessionId(updatedSession.id || sessionId || threadId);
+      setSelectedModel(persistedModel);
+      setSelectedProvider(
+        (updatedSession.selected_provider as 'anthropic' | 'google' | null) ||
+          providerForModel(persistedModel),
+      );
+      const modelLabel = MODELS.find((model) => model.value === persistedModel)?.label;
+      showSuccess(`Coordinator switched to ${modelLabel || persistedModel}`);
+    } catch (err) {
+      setSelectedModel(previousModel);
+      setSelectedProvider(previousProvider);
+      console.error('Failed to switch coordinator model:', err);
+    }
+  };
 
   useEffect(() => {
     fetchSessionHistory();
@@ -132,6 +182,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         body: JSON.stringify({
           thread_id: threadId,
           message: userText,
+          model: selectedModel,
+          provider: selectedProvider,
         }),
       });
 
@@ -330,6 +382,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           isStreaming={isStreaming}
           task={task}
           onTaskAction={onTaskAction}
+          currentModel={selectedModel}
+          onModelChange={handleModelChange}
+          isModelLoading={isModelSwitching}
           placeholder={`Message Control Tower AI (${taskId ? `Task ${taskId}` : 'Assistant'})...`}
         />
       </div>
