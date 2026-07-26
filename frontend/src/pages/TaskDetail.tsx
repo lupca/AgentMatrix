@@ -7,6 +7,7 @@ import { TaskSpec } from '../components/task/TaskSpec';
 import { TaskMeta } from '../components/task/TaskMeta';
 import { ChatPanelManager } from '../components/chat/ChatPanelManager';
 import { AlertCircle, RefreshCw } from 'lucide-react';
+import { showSuccess } from '../lib/toast';
 
 export const TaskDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -69,6 +70,7 @@ export const TaskDetailPage: React.FC = () => {
         await api.patch(`/tasks/${task.id}`, { status: 'dispatched' });
       }
       setTask((prev) => (prev ? { ...prev, status: 'dispatched' } : null));
+      showSuccess(`Task ${task.id} dispatched successfully`);
     } catch (err: any) {
       console.error('Failed to dispatch task:', err);
     } finally {

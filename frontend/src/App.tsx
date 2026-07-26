@@ -9,6 +9,8 @@ import AgentDetailPage from './pages/AgentDetail';
 import TasksPage from './pages/Tasks';
 import TaskDetailPage from './pages/TaskDetail';
 import KanbanPage from './pages/Kanban';
+import ErrorBoundary from './components/ErrorBoundary';
+import { Toaster } from 'react-hot-toast';
 
 function Navigation() {
   const location = useLocation();
@@ -95,22 +97,25 @@ function SettingsPage() {
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col font-sans">
-        <Navigation />
-        <main className="flex-1 max-w-7xl w-full mx-auto">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/projects" element={<ProjectsPage />} />
-            <Route path="/projects/:id" element={<ProjectDetailPage />} />
-            <Route path="/agents" element={<AgentsPage />} />
-            <Route path="/agents/:id" element={<AgentDetailPage />} />
-            <Route path="/tasks" element={<TasksPage />} />
-            <Route path="/tasks/:id" element={<TaskDetailPage />} />
-            <Route path="/kanban" element={<KanbanPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
-          </Routes>
-        </main>
-      </div>
+      <ErrorBoundary>
+        <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col font-sans">
+          <Navigation />
+          <main className="flex-1 max-w-7xl w-full mx-auto">
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/projects" element={<ProjectsPage />} />
+              <Route path="/projects/:id" element={<ProjectDetailPage />} />
+              <Route path="/agents" element={<AgentsPage />} />
+              <Route path="/agents/:id" element={<AgentDetailPage />} />
+              <Route path="/tasks" element={<TasksPage />} />
+              <Route path="/tasks/:id" element={<TaskDetailPage />} />
+              <Route path="/kanban" element={<KanbanPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+            </Routes>
+          </main>
+        </div>
+      </ErrorBoundary>
+      <Toaster position="top-right" />
     </BrowserRouter>
   );
 }

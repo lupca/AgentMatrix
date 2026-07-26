@@ -1,4 +1,8 @@
+import { showError } from './toast';
+
 const BASE_URL = '/api';
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 250;
 
 export class ApiError extends Error {
   status: number;
@@ -27,24 +31,45 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     headers,
   };
 
-  const response = await fetch(url, config);
+  let lastError: unknown;
 
-  if (!response.ok) {
-    let errorData: any;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      errorData = await response.json();
-    } catch {
-      errorData = null;
+      const response = await fetch(url, config);
+
+      if (!response.ok) {
+        let errorData: any;
+        try {
+          errorData = await response.json();
+        } catch {
+          errorData = null;
+        }
+        const message = errorData?.detail || errorData?.message || response.statusText || 'API Request failed';
+        throw new ApiError(response.status, message, errorData);
+      }
+
+      if (response.status === 204) {
+        return {} as T;
+      }
+
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+
+      const isTransient = !(error instanceof ApiError) || error.status === 408 || error.status === 429 || error.status >= 500;
+      if (!isTransient || attempt === MAX_ATTEMPTS) {
+        const message = error instanceof Error ? error.message : 'Unable to complete the request';
+        showError(message);
+        throw error;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS * 2 ** (attempt - 1)));
     }
-    const message = errorData?.detail || errorData?.message || response.statusText || 'API Request failed';
-    throw new ApiError(response.status, message, errorData);
   }
 
-  if (response.status === 204) {
-    return {} as T;
-  }
-
-  return response.json();
+  const error = lastError instanceof Error ? lastError : new Error('Unable to complete the request');
+  showError(error.message);
+  throw error;
 }
 
 export const api = {
