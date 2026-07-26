@@ -34,7 +34,7 @@ done
 
 # Set environment
 export DATABASE_URL="postgresql://ct:secret@localhost:5433/control_tower"
-export REDIS_URL="redis://localhost:6379/0"
+export REDIS_URL="redis://localhost:6380/0"
 
 # Install deps if needed
 cd "$BACKEND_DIR"

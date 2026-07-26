@@ -17,37 +17,11 @@ services:
       timeout: 5s
       retries: 5
 
-  backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: control_tower_backend
-    restart: always
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-ct}:${DB_PASSWORD:-secret}@db:5432/${POSTGRES_DB:-control_tower}
-      REDIS_URL: redis://redis:6379/0
-      LLM_PROVIDER: ${LLM_PROVIDER:-siliconflow}
-      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY}
-      SILICONFLOW_MODEL: ${SILICONFLOW_MODEL:-moonshotai/Kimi-K3}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-    ports:
-      - "${BACKEND_PORT:-8001}:8000"
-    volumes:
-      # Mount local CLI tools for coordinator dispatch
-      - ${HOME}/.local/bin/agy:/usr/local/bin/agy:ro
-      - ${HOME}/.local/bin/claude:/usr/local/bin/claude:ro
-      - ${HOME}/.claude:/root/.claude:ro
-      - ${HOME}/.config/agy:/root/.config/agy:ro
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  # Backend runs locally (not in Docker) to access authenticated CLI tools
+  # Use ./scripts/start-backend.sh and ./scripts/stop-backend.sh
+  # backend:
+  #   build: ./backend
+  #   ...
 
   frontend:
     build: ./frontend
@@ -55,16 +29,20 @@ services:
     restart: always
     ports:
       - "${FRONTEND_PORT:-3000}:80"
-    depends_on:
-      backend:
-        condition: service_healthy
+    # Backend runs on host, frontend needs to reach it
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - VITE_API_URL=http://host.docker.internal:8001
 
   redis:
     image: redis:7-alpine
     container_name: control_tower_redis
     restart: unless-stopped
     command: redis-server --appendonly yes
-    # ports removed - internal only, host already has redis on 6379
+    # Port exposed for local backend access
+    ports:
+      - "6380:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -72,24 +50,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  worker:
-    build: ./backend
-    container_name: control_tower_worker
-    restart: unless-stopped
-    command: >
-      dramatiq app.workers.agent_runner
-      --processes 2
-      --threads 4
-    depends_on:
-      redis:
-        condition: service_healthy
-      db:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-ct}:${DB_PASSWORD:-secret}@db:5432/${POSTGRES_DB:-control_tower}
-      REDIS_URL: redis://redis:6379/0
-    # volumes removed temporarily - mount issue
 
 volumes:
   pgdata:
