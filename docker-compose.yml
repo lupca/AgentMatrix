@@ -58,8 +58,7 @@ services:
     container_name: control_tower_redis
     restart: unless-stopped
     command: redis-server --appendonly yes
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    # ports removed - internal only, host already has redis on 6379
     volumes:
       - redis_data:/data
     healthcheck:
@@ -84,8 +83,7 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ct}:${DB_PASSWORD:-secret}@db:5432/${POSTGRES_DB:-control_tower}
       REDIS_URL: redis://redis:6379/0
-    volumes:
-      - ${PROJECTS_ROOT:-/home/lupca/projects}:/home/lupca/projects:rw
+    # volumes removed temporarily - mount issue
 
 volumes:
   pgdata:
