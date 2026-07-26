@@ -1,5 +1,7 @@
 import re
 from typing import Tuple, Optional
+from datetime import datetime
+import uuid
 from app.db.models import Task, Session as SessionModel
 
 COMMANDS = {
@@ -33,6 +35,89 @@ class CommandRouter:
     
     async def _handle_show_help(self, args: str, session_id: str) -> dict:
         return {'commands': list(COMMANDS.keys())}
+
+    async def _handle_create_task(self, args: str, session_id: str) -> dict:
+        import uuid
+        from datetime import datetime
+        
+        # Parse args: 'task title --project name'
+        project = 'default'
+        title = args
+        if '--project' in args:
+            parts = args.split('--project')
+            title = parts[0].strip()
+            project = parts[1].strip().split()[0] if parts[1].strip() else 'default'
+        
+        # Generate task ID
+        prefix = project.upper().replace('-', '')[:4]
+        count = self.db.query(Task).filter(Task.project == project).count() + 1
+        task_id = f'{prefix}-{count:03d}'
+        
+        task = Task(
+            id=task_id,
+            title=title,
+            project=project,
+            status='todo',
+            current_gate='spec',
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        self.db.add(task)
+        self.db.commit()
+        
+        return {'action': 'created', 'task_id': task.id, 'title': title, 'project': project}
+
+    async def _handle_dispatch_task(self, args: str, session_id: str) -> dict:
+        from datetime import datetime
+        from app.workers.agent_runner import run_agent
+        import uuid
+        
+        parts = args.strip().split()
+        if len(parts) < 2:
+            return {'error': 'Usage: /dispatch <task_id> <agent_id>'}
+        
+        task_id, agent_id = parts[0], parts[1]
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return {'error': f'Task {task_id} not found'}
+        
+        run_id = str(uuid.uuid4())
+        command = f'echo "Executing task {task_id} with agent {agent_id}"'
+        repo_root = '/tmp'
+        
+        run_agent.send(run_id, task_id, command, repo_root)
+        
+        task.status = 'dispatched'
+        task.executor = agent_id
+        task.updated_at = datetime.utcnow()
+        self.db.commit()
+        
+        return {'action': 'dispatched', 'task_id': task_id, 'run_id': run_id, 'agent': agent_id}
+
+    async def _handle_verdict(self, args: str, session_id: str) -> dict:
+        from datetime import datetime
+        
+        parts = args.strip().split()
+        if len(parts) < 2:
+            return {'error': 'Usage: /verdict <task_id> <pass|changes>'}
+        
+        task_id, verdict = parts[0], parts[1].lower()
+        if verdict not in ['pass', 'changes']:
+            return {'error': 'Verdict must be pass or changes'}
+        
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return {'error': f'Task {task_id} not found'}
+        
+        if verdict == 'pass':
+            task.status = 'done'
+        else:
+            task.status = 'changes-requested'
+        
+        task.updated_at = datetime.utcnow()
+        self.db.commit()
+        
+        return {'action': 'verdict', 'task_id': task_id, 'verdict': verdict, 'new_status': task.status}
 
     async def _handle_get_status(self, args: str, session_id: str) -> dict:
         if not self.db:
