@@ -1,19 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
 from app.db.base import Base, engine
 from app.api import tasks, sessions, audit, chat, ws
 
 # Ensure tables are created
 Base.metadata.create_all(bind=engine)
-
-# Auto-migration patch: Ensure session_id exists on tasks table
-try:
-    with engine.connect() as conn:
-        conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS session_id VARCHAR(36);"))
-        conn.commit()
-except Exception as err:
-    print(f"Migration notice: {err}")
 
 app = FastAPI(
     title="Control Tower V2 API",
