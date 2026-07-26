@@ -70,3 +70,10 @@ def test_delete_project(client):
 
     get_res = client.get("/api/projects/del-me")
     assert get_res.status_code == 404
+
+
+def test_build_graph(client):
+    res = client.post("/api/projects/proj-graph-test/build-graph")
+    assert res.status_code == 200
+    assert res.json() == {"status": "building", "project_id": "proj-graph-test"}
+

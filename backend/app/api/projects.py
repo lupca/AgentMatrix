@@ -78,3 +78,11 @@ def delete_project(id: str, db: Session = Depends(get_db)):
     db.delete(db_project)
     db.commit()
     return None
+
+
+@router.post("/{id}/build-graph")
+@router.post('/api/projects/{id}/build-graph')
+def build_graph(id: str):
+    # Placeholder for graph building
+    return {'status': 'building', 'project_id': id}
+
