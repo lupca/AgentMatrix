@@ -1,6 +1,21 @@
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from app.db.base import Base
 from app.db.models import KnowledgeItem
 from app.services.knowledge_service import KnowledgeService
+
+
+@pytest.fixture
+def db_session():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 def test_knowledge_service_get_relevant(db_session):
