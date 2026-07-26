@@ -29,6 +29,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
 }) => {
   const [mode, setMode] = useState<'docked' | 'floating' | 'collapsed'>(defaultMode);
   const [isExpandedFull, setIsExpandedFull] = useState<boolean>(false);
+  const [isCreatingSession, setIsCreatingSession] = useState<boolean>(false);
 
   const resolvedProjectId = projectId ?? task?.project ?? null;
   const contextLevel: ContextLevel = taskId ? 'task' : resolvedProjectId ? 'project' : 'global';
@@ -39,6 +40,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
     activeSessionId,
     activeSession,
     loading: sessionsLoading,
+    error: sessionsError,
     createSession,
     switchSession,
     closeSession,
@@ -53,10 +55,14 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
     projectName,
     sessions,
     activeSessionId,
-    sessionsLoading,
+    sessionsLoading: sessionsLoading || isCreatingSession,
     onSwitchSession: switchSession,
     onCreateSession: () => {
-      createSession().catch((err) => console.error('Failed to create session:', err));
+      if (isCreatingSession) return;
+      setIsCreatingSession(true);
+      createSession()
+        .catch((err) => console.error('Failed to create session:', err))
+        .finally(() => setIsCreatingSession(false));
     },
     onCloseSession: closeSession,
   };
@@ -110,6 +116,12 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
             </button>
           </div>
         </div>
+
+        {sessionsError && (
+          <div className="px-3 py-1.5 text-[11px] text-red-400 bg-red-500/10 border-l border-r border-gray-800 shrink-0">
+            Failed to load sessions: {sessionsError}
+          </div>
+        )}
 
         <ChatPanel
           key={activeThreadId}
@@ -166,6 +178,12 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
           </button>
         </div>
       </div>
+
+      {sessionsError && (
+        <div className="px-3 py-1.5 text-[11px] text-red-400 bg-red-500/10 border-b border-gray-800/80 shrink-0">
+          Failed to load sessions: {sessionsError}
+        </div>
+      )}
 
       <ChatPanel
         key={activeThreadId}

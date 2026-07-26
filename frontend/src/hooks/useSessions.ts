@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../lib/api';
 
 export type ContextLevel = 'global' | 'project' | 'task';
@@ -55,27 +55,38 @@ export function useSessions(context: SessionContext): UseSessionsResult {
     return params.toString();
   }, [level, project_id, task_id]);
 
+  const abortRef = useRef<AbortController | null>(null);
+
   const fetchSessions = useCallback(async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setLoading(true);
     setError(null);
     try {
-      const result = await api.get<ChatSessionSummary[]>(`/sessions?${query}`);
+      const result = await api.get<ChatSessionSummary[]>(`/sessions?${query}`, {
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
       const list = Array.isArray(result) ? result : [];
       setSessions(list);
       setActiveSessionId((current) =>
         current && list.some((s) => s.id === current) ? current : list[0]?.id || null,
       );
     } catch (err: any) {
+      if (controller.signal.aborted || err?.name === 'AbortError') return;
       setError(err?.message || 'Failed to load sessions');
       setSessions([]);
       setActiveSessionId(null);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [query]);
 
   useEffect(() => {
     fetchSessions();
+    return () => abortRef.current?.abort();
   }, [fetchSessions]);
 
   const createSession = useCallback(
@@ -100,18 +111,29 @@ export function useSessions(context: SessionContext): UseSessionsResult {
     setActiveSessionId(sessionId);
   }, []);
 
-  const closeSession = useCallback(async (sessionId: string) => {
-    try {
-      await api.patch<ChatSessionSummary>(`/sessions/${sessionId}`, { status: 'closed' });
-    } catch (err) {
-      console.warn('Failed to persist session close, removing locally only:', err);
-    }
-    setSessions((prev) => {
-      const next = prev.filter((s) => s.id !== sessionId);
-      setActiveSessionId((current) => (current === sessionId ? next[0]?.id || null : current));
-      return next;
-    });
-  }, []);
+  const closeSession = useCallback(
+    async (sessionId: string) => {
+      try {
+        await api.patch<ChatSessionSummary>(`/sessions/${sessionId}`, { status: 'closed' });
+      } catch (err) {
+        console.warn('Failed to persist session close, removing locally only:', err);
+      }
+
+      const remaining = sessions.filter((s) => s.id !== sessionId);
+      setSessions(remaining);
+
+      if (activeSessionId !== sessionId) return;
+
+      if (remaining.length > 0) {
+        setActiveSessionId(remaining[0].id);
+      } else {
+        // Closing the last session would otherwise leave the panel writing to a
+        // closed session via the stale threadId fallback, so replace it.
+        await createSession();
+      }
+    },
+    [sessions, activeSessionId, createSession],
+  );
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
 

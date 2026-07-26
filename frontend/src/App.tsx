@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, FolderKanban, Bot, CheckSquare, LayoutGrid, Settings as SettingsIcon, Moon, Sun } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
@@ -11,6 +12,8 @@ import KanbanPage from './pages/Kanban';
 import ErrorBoundary from './components/ErrorBoundary';
 import { Toaster } from 'react-hot-toast';
 import { ThemeProvider, useTheme } from './contexts/ThemeContext';
+import { GlobalChatButton } from './components/chat/GlobalChatButton';
+import { ChatPanelManager } from './components/chat/ChatPanelManager';
 
 function Navigation() {
   const location = useLocation();
@@ -95,6 +98,16 @@ function SettingsPage() {
   );
 }
 
+function GlobalChat() {
+  const [isOpen, setIsOpen] = useState(false);
+
+  if (!isOpen) {
+    return <GlobalChatButton onClick={() => setIsOpen(true)} />;
+  }
+
+  return <ChatPanelManager threadId="global" defaultMode="floating" />;
+}
+
 export default function App() {
   return (
     <ThemeProvider>
@@ -115,6 +128,7 @@ export default function App() {
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
             </main>
+            <GlobalChat />
           </div>
         </ErrorBoundary>
         <Toaster position="top-right" toastOptions={{ className: 'theme-toast' }} />

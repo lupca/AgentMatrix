@@ -12,8 +12,8 @@ interface SessionTabsProps {
   className?: string;
 }
 
-function sessionLabel(session: ChatSessionSummary, index: number): string {
-  return session.title?.trim() || `Session ${index + 1}`;
+function sessionLabel(session: ChatSessionSummary): string {
+  return session.title?.trim() || `Session ${session.id.slice(0, 6)}`;
 }
 
 export const SessionTabs: React.FC<SessionTabsProps> = ({
@@ -29,7 +29,7 @@ export const SessionTabs: React.FC<SessionTabsProps> = ({
     <div
       className={`flex items-center gap-1 px-2 py-1.5 bg-gray-950/60 border-b border-gray-800/80 overflow-x-auto no-scrollbar shrink-0 ${className}`}
     >
-      {sessions.map((session, index) => {
+      {sessions.map((session) => {
         const isActive = session.id === activeSessionId;
         return (
           <div
@@ -47,7 +47,7 @@ export const SessionTabs: React.FC<SessionTabsProps> = ({
               {isActive && (
                 <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
               )}
-              {sessionLabel(session, index)}
+              {sessionLabel(session)}
             </span>
             {onClose && (
               <button

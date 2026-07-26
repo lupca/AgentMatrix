@@ -64,6 +64,15 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const { isModelSwitching, updateSessionModel } = useChat(sessionId || threadId);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
+
+  // Abort any in-flight SSE stream when this panel unmounts (e.g. session switch,
+  // since ChatPanelManager remounts ChatPanel via a key change on activeThreadId).
+  useEffect(() => {
+    return () => {
+      streamAbortRef.current?.abort();
+    };
+  }, []);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -193,6 +202,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setIsStreaming(true);
     setError(null);
 
+    streamAbortRef.current?.abort();
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
+
     try {
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -205,6 +218,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           model: selectedModel || DEFAULT_COORDINATOR_MODEL,
           provider: selectedProvider,
         }),
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -221,6 +235,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       let accumulatedContent = '';
 
       while (true) {
+        if (controller.signal.aborted) break;
         const { value, done } = await reader.read();
         if (done) break;
 
@@ -286,6 +301,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         )
       );
     } catch (err: any) {
+      if (err?.name === 'AbortError') {
+        return;
+      }
       console.error('Error during SSE stream fetch:', err);
       setError(err.message || 'Connection lost to chat SSE endpoint');
       setMessages((prev) =>
@@ -302,7 +320,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         )
       );
     } finally {
-      setIsStreaming(false);
+      if (!controller.signal.aborted) {
+        setIsStreaming(false);
+      }
     }
   };
 
