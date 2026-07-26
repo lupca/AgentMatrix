@@ -7,10 +7,12 @@ def test_stats_overview(client):
     res = client.get("/api/stats/overview")
     assert res.status_code == 200
     data = res.json()
-    assert data["total_tasks"] == 4
-    assert data["done_tasks"] == 2
-    assert data["active_tasks"] == 2
-    assert data["by_status"] == {"todo": 1, "in_progress": 1, "done": 2}
+    assert data == {
+        "totalTasks": 4,
+        "completedTasks": 2,
+        "activeGates": 2,
+        "tasksByStatus": {"todo": 1, "in_progress": 1, "done": 2},
+    }
 
 
 def test_stats_projects(client):

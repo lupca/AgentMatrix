@@ -2,12 +2,12 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.db.models import Task as TaskModel, Project as ProjectModel, Agent as AgentModel
-from app.schemas.stats import OverviewStats, ProjectStats, AgentStats
+from app.schemas.stats import ProjectStats, AgentStats
 
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 
-@router.get("/overview", response_model=OverviewStats)
+@router.get("/overview")
 def get_stats_overview(db: Session = Depends(get_db)):
     tasks = db.query(TaskModel).all()
     total_tasks = len(tasks)
@@ -21,12 +21,12 @@ def get_stats_overview(db: Session = Depends(get_db)):
     inactive_count = done_tasks + by_status.get("cancelled", 0) + by_status.get("failed", 0)
     active_tasks = max(0, total_tasks - inactive_count)
 
-    return OverviewStats(
-        total_tasks=total_tasks,
-        done_tasks=done_tasks,
-        active_tasks=active_tasks,
-        by_status=by_status
-    )
+    return {
+        "totalTasks": total_tasks,
+        "completedTasks": done_tasks,
+        "activeGates": active_tasks,
+        "tasksByStatus": by_status,
+    }
 
 
 @router.get("/projects", response_model=list[ProjectStats])
