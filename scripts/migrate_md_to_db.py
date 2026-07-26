@@ -108,6 +108,7 @@ def parse_agent_files(agents_dir: Path) -> list[dict]:
             'total_tasks_executed': fm.get('total_tasks_executed', 0),
             'total_tasks_reviewed': fm.get('total_tasks_reviewed', 0),
             'success_rate': float(fm.get('success_rate', 1.0) or 1.0),
+            'capabilities': fm.get('strengths', []),
             'strengths': fm.get('strengths', []),
             'weaknesses': fm.get('weaknesses', []),
             'status': 'active' if fm.get('status') != 'deprecated' else 'deprecated',
@@ -206,11 +207,12 @@ def migrate(dry_run: bool = False):
         # Upsert agents
         for a in agents:
             session.execute(text("""
-                INSERT INTO agents (id, name, role, type, model, effort, success_rate, status)
-                VALUES (:id, :name, :role, :type, :model, :effort, :success_rate, :status)
+                INSERT INTO agents (id, name, role, capabilities, type, model, effort, success_rate, status)
+                VALUES (:id, :name, :role, :capabilities, :type, :model, :effort, :success_rate, :status)
                 ON CONFLICT (id) DO UPDATE SET
                     name = EXCLUDED.name,
                     role = EXCLUDED.role,
+                    capabilities = EXCLUDED.capabilities,
                     type = EXCLUDED.type,
                     model = EXCLUDED.model,
                     effort = EXCLUDED.effort,
@@ -221,6 +223,7 @@ def migrate(dry_run: bool = False):
                 'id': a['id'],
                 'name': a['name'],
                 'role': a['role'],
+                'capabilities': json.dumps(a['capabilities']),
                 'type': a['type'],
                 'model': a['model'],
                 'effort': a['effort'],

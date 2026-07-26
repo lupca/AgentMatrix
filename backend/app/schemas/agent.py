@@ -28,3 +28,9 @@ class Agent(BaseModel):
     updated_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AgentSuggestion(BaseModel):
+    agent_id: str
+    score: float = Field(ge=0.0, le=1.0)
+    reason: str

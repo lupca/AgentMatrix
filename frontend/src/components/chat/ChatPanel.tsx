@@ -2,12 +2,14 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { ChatMessage, Message } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { api } from '../../lib/api';
+import { Task } from '../../types/task';
 import { Bot, RefreshCw, Sparkles, Trash2, AlertCircle } from 'lucide-react';
 
 interface ChatPanelProps {
   threadId: string;
   taskId?: string;
   taskTitle?: string;
+  task?: Task;
   onClose?: () => void;
   className?: string;
 }
@@ -16,6 +18,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   threadId,
   taskId,
   taskTitle,
+  task,
   onClose,
   className = '',
 }) => {
@@ -320,6 +323,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         onSendMessage={handleSendMessage}
         disabled={loadingHistory}
         isStreaming={isStreaming}
+        task={task}
         placeholder={`Message Control Tower AI (${taskId ? `Task ${taskId}` : 'Assistant'})...`}
       />
     </div>

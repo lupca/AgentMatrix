@@ -35,6 +35,7 @@ class TaskState(BaseModel):
     task_id: str | None = None
     project: str | None = None
     title: str | None = None
+    tags: list[Any] = Field(default_factory=list)
     current_gate: str = "spec"
     status: str = "todo"
     mode: str = "supervised"
@@ -65,6 +66,7 @@ class TaskCreate(BaseModel):
     project: str
     title: str
     raw_input: str | None = ""
+    tags: list[Any] | None = None
     status: str | None = "todo"
     current_gate: str | None = "spec"
     mode: str | None = "supervised"
@@ -94,6 +96,7 @@ class TaskUpdate(BaseModel):
     project: str | None = None
     title: str | None = None
     raw_input: str | None = None
+    tags: list[Any] | None = None
     status: str | None = None
     current_gate: str | None = None
     mode: str | None = None
@@ -125,6 +128,7 @@ class Task(BaseModel):
     project: str
     title: str
     raw_input: str | None = ""
+    tags: list[Any] | None = []
     status: str
     current_gate: str | None = "spec"
     mode: str | None = "supervised"

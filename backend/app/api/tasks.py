@@ -12,6 +12,8 @@ from app.db.models import (
 from app.api.dispatch import AgentRunResponse
 from app.schemas.task import Task, TaskCreate, TaskUpdate
 from app.schemas.audit import AuditLog
+from app.schemas.agent import AgentSuggestion
+from app.services.agent_matcher import AgentMatcher
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -122,6 +124,21 @@ def get_task(id: str, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(db_task)
     return db_task
+
+
+@router.get("/{id}/suggested-agents", response_model=list[AgentSuggestion])
+def get_suggested_agents(
+    id: str,
+    top_n: int = Query(3, ge=1, le=10),
+    db: Session = Depends(get_db),
+):
+    db_task = db.query(TaskModel).filter(TaskModel.id == id).first()
+    if not db_task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task '{id}' not found.",
+        )
+    return AgentMatcher(db).suggest_agents(db_task, top_n=top_n)
 
 
 @router.get("/{id}/runs", response_model=list[AgentRunResponse])

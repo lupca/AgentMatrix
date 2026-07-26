@@ -1,11 +1,14 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Loader2, Sparkles } from 'lucide-react';
+import { Task } from '../../types/task';
+import { QuickActions } from './QuickActions';
 
 interface ChatInputProps {
   onSendMessage: (message: string) => void;
   disabled?: boolean;
   isStreaming?: boolean;
   placeholder?: string;
+  task?: Task;
 }
 
 export const ChatInput: React.FC<ChatInputProps> = ({
@@ -13,6 +16,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   disabled = false,
   isStreaming = false,
   placeholder = 'Ask Control Tower AI assistant...',
+  task,
 }) => {
   const [input, setInput] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -54,6 +58,13 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   return (
     <div className="p-3 border-t border-gray-800/80 bg-gray-950/90 space-y-2">
+      {task && (
+        <QuickActions
+          task={task}
+          onSendCommand={onSendMessage}
+          disabled={disabled || isStreaming}
+        />
+      )}
       {/* Quick Prompts */}
       <div className="flex flex-wrap items-center gap-1.5 overflow-x-auto pb-1 no-scrollbar">
         <span className="text-[10px] uppercase font-semibold tracking-wider text-gray-500 flex items-center gap-1 mr-1">

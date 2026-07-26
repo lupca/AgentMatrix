@@ -147,6 +147,7 @@ export const TaskDetailPage: React.FC = () => {
             threadId={threadId}
             taskId={task.id}
             taskTitle={task.title}
+            task={task}
             defaultMode="docked"
           />
         </div>

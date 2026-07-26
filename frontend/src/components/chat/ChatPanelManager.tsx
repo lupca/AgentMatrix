@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import { ChatPanel } from './ChatPanel';
+import { Task } from '../../types/task';
 import { MessageSquare, Minimize2, Maximize2, X, PanelRightClose, PanelRightOpen } from 'lucide-react';
 
 interface ChatPanelManagerProps {
   threadId: string;
   taskId?: string;
   taskTitle?: string;
+  task?: Task;
   defaultMode?: 'docked' | 'floating' | 'collapsed';
   className?: string;
 }
@@ -14,6 +16,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
   threadId,
   taskId,
   taskTitle,
+  task,
   defaultMode = 'docked',
   className = '',
 }) => {
@@ -74,6 +77,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
           threadId={threadId}
           taskId={taskId}
           taskTitle={taskTitle}
+          task={task}
           className="rounded-t-none h-full border-t-0"
         />
       </div>
@@ -126,6 +130,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
         threadId={threadId}
         taskId={taskId}
         taskTitle={taskTitle}
+        task={task}
         className="border-0 rounded-t-none flex-1 min-h-[500px]"
       />
     </div>

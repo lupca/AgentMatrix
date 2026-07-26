@@ -13,6 +13,7 @@ class Task(Base):
     project = Column(String(50), ForeignKey("projects.id"), nullable=False, index=True)
     title = Column(Text, nullable=False)
     raw_input = Column(Text, nullable=True)
+    tags = Column(JSON, default=list)
     status = Column(String(20), nullable=False, default="todo", index=True)
     current_gate = Column(String(20), nullable=False, default="spec", index=True)
     mode = Column(String(20), nullable=False, default="supervised")

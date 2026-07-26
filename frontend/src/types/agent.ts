@@ -8,6 +8,12 @@ export interface Agent {
   updated_at?: string | null;
 }
 
+export interface AgentSuggestion {
+  agent_id: string;
+  score: number;
+  reason: string;
+}
+
 export interface AgentStats {
   agent_id: string;
   name: string;

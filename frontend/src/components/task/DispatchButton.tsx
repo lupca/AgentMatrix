@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Bot, Loader2, Play } from 'lucide-react';
 import { api } from '../../lib/api';
 import { showError, showSuccess } from '../../lib/toast';
-import { Agent } from '../../types/agent';
+import { Agent, AgentSuggestion } from '../../types/agent';
 
 export interface DispatchResponse {
   run_id: string;
@@ -24,6 +24,7 @@ export const DispatchButton: React.FC<DispatchButtonProps> = ({
   onDispatched,
 }) => {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [suggestions, setSuggestions] = useState<AgentSuggestion[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState(defaultAgentId || '');
   const [loadingAgents, setLoadingAgents] = useState(true);
   const [isDispatching, setIsDispatching] = useState(false);
@@ -34,20 +35,37 @@ export const DispatchButton: React.FC<DispatchButtonProps> = ({
     const loadAgents = async () => {
       setLoadingAgents(true);
       try {
+        const rankedSuggestions = await api.get<AgentSuggestion[]>(
+          `/tasks/${taskId}/suggested-agents`,
+        );
         const availableAgents = await api.get<Agent[]>('/agents');
         if (!mounted) return;
 
         const nextAgents = availableAgents || [];
+        const nextSuggestions = (rankedSuggestions || []).filter((suggestion) =>
+          nextAgents.some((agent) => agent.id === suggestion.agent_id),
+        );
         setAgents(nextAgents);
-        setSelectedAgentId((current) => {
-          if (current && nextAgents.some((agent) => agent.id === current)) return current;
-          if (defaultAgentId && nextAgents.some((agent) => agent.id === defaultAgentId)) {
-            return defaultAgentId;
-          }
-          return nextAgents[0]?.id || '';
-        });
+        setSuggestions(nextSuggestions);
+        setSelectedAgentId(
+          nextSuggestions[0]?.agent_id ||
+            (defaultAgentId && nextAgents.some((agent) => agent.id === defaultAgentId)
+              ? defaultAgentId
+              : nextAgents[0]?.id || ''),
+        );
       } catch (error) {
-        console.error('Failed to load agents for dispatch:', error);
+        // Keep dispatch usable when the suggestion endpoint is unavailable.
+        try {
+          const availableAgents = await api.get<Agent[]>('/agents');
+          if (!mounted) return;
+          setAgents(availableAgents || []);
+          setSuggestions([]);
+          setSelectedAgentId(
+            defaultAgentId || availableAgents?.[0]?.id || '',
+          );
+        } catch (fallbackError) {
+          console.error('Failed to load agents for dispatch:', fallbackError);
+        }
       } finally {
         if (mounted) setLoadingAgents(false);
       }
@@ -57,7 +75,7 @@ export const DispatchButton: React.FC<DispatchButtonProps> = ({
     return () => {
       mounted = false;
     };
-  }, [defaultAgentId]);
+  }, [defaultAgentId, taskId]);
 
   const handleDispatch = async () => {
     if (!selectedAgentId) {
@@ -100,14 +118,32 @@ export const DispatchButton: React.FC<DispatchButtonProps> = ({
           {agents.length === 0 ? (
             <option value="">No agents available</option>
           ) : (
-            agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name || agent.id} ({agent.id})
-              </option>
-            ))
+            (suggestions.length > 0
+              ? suggestions.map((suggestion) => {
+                  const agent = agents.find((item) => item.id === suggestion.agent_id);
+                  return (
+                    <option
+                      key={suggestion.agent_id}
+                      value={suggestion.agent_id}
+                      title={suggestion.reason}
+                    >
+                      {agent?.name || suggestion.agent_id} · {Math.round(suggestion.score * 100)}% — {suggestion.reason}
+                    </option>
+                  );
+                })
+              : agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name || agent.id} ({agent.id})
+                  </option>
+                )))
           )}
         </select>
       </div>
+      {suggestions.length > 0 && (
+        <span className="max-w-64 truncate text-[10px] text-gray-500" title={suggestions.find((item) => item.agent_id === selectedAgentId)?.reason}>
+          {suggestions.find((item) => item.agent_id === selectedAgentId)?.reason}
+        </span>
+      )}
       <button
         type="button"
         onClick={handleDispatch}

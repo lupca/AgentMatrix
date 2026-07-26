@@ -9,6 +9,7 @@ COMMANDS = {
     '/dispatch': 'dispatch_task',
     '/verdict': 'verdict',
     '/status': 'get_status',
+    '/cancel': 'cancel_task',
     '/help': 'show_help',
 }
 
@@ -71,15 +72,26 @@ class CommandRouter:
         from datetime import datetime
         from app.workers.agent_runner import run_agent
         import uuid
-        
+        from app.db.models import Agent
+        from app.services.agent_matcher import AgentMatcher
+
         parts = args.strip().split()
-        if len(parts) < 2:
-            return {'error': 'Usage: /dispatch <task_id> <agent_id>'}
-        
-        task_id, agent_id = parts[0], parts[1]
+        if not parts:
+            return {'error': 'Usage: /dispatch <task_id> [agent_id]'}
+
+        task_id = parts[0]
         task = self.db.query(Task).filter(Task.id == task_id).first()
         if not task:
             return {'error': f'Task {task_id} not found'}
+
+        agent_id = parts[1] if len(parts) > 1 else task.executor
+        if not agent_id:
+            suggestions = AgentMatcher(self.db).suggest_agents(task, top_n=1)
+            agent_id = suggestions[0].agent_id if suggestions else None
+        if not agent_id:
+            return {'error': 'No available agent found for this task'}
+        if not self.db.query(Agent).filter(Agent.id == agent_id).first():
+            return {'error': f'Agent {agent_id} not found'}
         
         run_id = str(uuid.uuid4())
         command = f'echo "Executing task {task_id} with agent {agent_id}"'
@@ -93,6 +105,43 @@ class CommandRouter:
         self.db.commit()
         
         return {'action': 'dispatched', 'task_id': task_id, 'run_id': run_id, 'agent': agent_id}
+
+    async def _handle_cancel_task(self, args: str, session_id: str) -> dict:
+        from datetime import datetime, timezone
+        from app.db.models import AgentRun
+        from app.workers.output_streamer import publish_status, request_cancel
+
+        task_id = args.strip()
+        if not task_id:
+            return {'error': 'Usage: /cancel <task_id>'}
+
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return {'error': f'Task {task_id} not found'}
+
+        run = (
+            self.db.query(AgentRun)
+            .filter(
+                AgentRun.task_id == task_id,
+                AgentRun.status.in_(['queued', 'running']),
+            )
+            .first()
+        )
+        if not run:
+            return {'error': f'Task {task_id} has no active run'}
+
+        try:
+            request_cancel(run.id, ttl_seconds=max(run.timeout_seconds + 300, 3_600))
+        except Exception as exc:
+            return {'error': f'Could not signal cancellation: {exc}'}
+
+        run.status = 'cancelled'
+        run.error_message = 'Cancelled by user'
+        run.completed_at = datetime.now(timezone.utc)
+        task.status = 'todo'
+        self.db.commit()
+        publish_status(run.id, 'cancelled', error=run.error_message)
+        return {'action': 'cancelled', 'task_id': task_id, 'run_id': run.id, 'status': 'cancelled'}
 
     async def _handle_verdict(self, args: str, session_id: str) -> dict:
         from datetime import datetime
