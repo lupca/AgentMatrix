@@ -1,7 +1,11 @@
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { useAppStore } from './lib/store';
-import { LayoutDashboard, CheckSquare, LayoutGrid, Settings as SettingsIcon, Moon, Sun } from 'lucide-react';
+import { LayoutDashboard, FolderKanban, Bot, CheckSquare, LayoutGrid, Settings as SettingsIcon, Moon, Sun } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
+import ProjectsPage from './pages/Projects';
+import ProjectDetailPage from './pages/ProjectDetail';
+import AgentsPage from './pages/Agents';
+import AgentDetailPage from './pages/AgentDetail';
 import TasksPage from './pages/Tasks';
 import KanbanPage from './pages/Kanban';
 
@@ -11,6 +15,8 @@ function Navigation() {
 
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
+    { path: '/projects', label: 'Projects', icon: FolderKanban },
+    { path: '/agents', label: 'Agents', icon: Bot },
     { path: '/tasks', label: 'Tasks', icon: CheckSquare },
     { path: '/kanban', label: 'Kanban', icon: LayoutGrid },
     { path: '/settings', label: 'Settings', icon: SettingsIcon },
@@ -31,7 +37,9 @@ function Navigation() {
           <nav className="flex space-x-1">
             {navItems.map((item) => {
               const Icon = item.icon;
-              const isActive = location.pathname === item.path;
+              const isActive =
+                location.pathname === item.path ||
+                (item.path !== '/' && location.pathname.startsWith(item.path));
               return (
                 <Link
                   key={item.path}
@@ -63,8 +71,6 @@ function Navigation() {
   );
 }
 
-
-
 function SettingsPage() {
   return (
     <div className="p-6 space-y-4">
@@ -93,6 +99,10 @@ export default function App() {
         <main className="flex-1 max-w-7xl w-full mx-auto">
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/projects" element={<ProjectsPage />} />
+            <Route path="/projects/:id" element={<ProjectDetailPage />} />
+            <Route path="/agents" element={<AgentsPage />} />
+            <Route path="/agents/:id" element={<AgentDetailPage />} />
             <Route path="/tasks" element={<TasksPage />} />
             <Route path="/kanban" element={<KanbanPage />} />
             <Route path="/settings" element={<SettingsPage />} />
@@ -102,4 +112,3 @@ export default function App() {
     </BrowserRouter>
   );
 }
-
