@@ -42,47 +42,15 @@ services:
       timeout: 5s
       retries: 5
 
-  chat:
-    build:
-      context: .
-      dockerfile: frontend/chat/Dockerfile
-    container_name: control_tower_chat
+  frontend:
+    build: ./frontend
+    container_name: control_tower_frontend
     restart: always
-    environment:
-      BACKEND_URL: http://backend:8000
-      LLM_PROVIDER: ${LLM_PROVIDER:-siliconflow}
-      SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY}
-      SILICONFLOW_MODEL: ${SILICONFLOW_MODEL:-moonshotai/Kimi-K3}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     ports:
-      - "${CHAT_PORT:-8081}:8080"
+      - "${FRONTEND_PORT:-3000}:80"
     depends_on:
       backend:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  dashboard:
-    build:
-      context: ./frontend/dashboard
-      dockerfile: Dockerfile
-    container_name: control_tower_dashboard
-    restart: always
-    environment:
-      BACKEND_URL: http://backend:8000
-    ports:
-      - "${DASHBOARD_PORT:-8502}:8501"
-    depends_on:
-      backend:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
 volumes:
   pgdata:

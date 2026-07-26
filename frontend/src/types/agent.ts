@@ -1,0 +1,20 @@
+export interface Agent {
+  id: string;
+  name: string;
+  role: string;
+  capabilities?: string[] | any[] | null;
+  status: 'idle' | 'busy' | 'offline' | string;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface AgentStats {
+  agent_id: string;
+  name: string;
+  role: string;
+  tasks_executed: number;
+  tasks_reviewed: number;
+  tasks_completed: number;
+  success_rate: number;
+  active_tasks: number;
+}
