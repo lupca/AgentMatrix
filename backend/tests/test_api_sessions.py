@@ -56,6 +56,40 @@ def test_patch_session(client):
     assert updated["messages"][0]["content"] == "Updated"
 
 
+def test_session_model_selection_is_persisted_and_validated(client):
+    session = client.post(
+        "/api/sessions",
+        json={
+            "thread_id": "model-session",
+            "selected_model": "claude-sonnet-4",
+        },
+    )
+
+    assert session.status_code == 201
+    assert session.json()["selected_provider"] == "anthropic"
+    session_id = session.json()["id"]
+
+    switched = client.patch(
+        f"/api/sessions/{session_id}",
+        json={
+            "selected_provider": "google",
+            "selected_model": "gemini-2.5-flash",
+        },
+    )
+    assert switched.status_code == 200
+    assert switched.json()["selected_provider"] == "google"
+    assert switched.json()["selected_model"] == "gemini-2.5-flash"
+
+    invalid = client.patch(
+        f"/api/sessions/{session_id}",
+        json={
+            "selected_provider": "anthropic",
+            "selected_model": "gemini-2.5-flash",
+        },
+    )
+    assert invalid.status_code == 422
+
+
 def test_get_session_404(client):
     res = client.get("/api/sessions/nonexistent-id")
     assert res.status_code == 404

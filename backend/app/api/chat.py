@@ -1,15 +1,14 @@
 import json
 import uuid
 import logging
-from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 from app.db.base import get_db
-from app.db.models import Task as TaskModel, Session as SessionModel
-from app.services.llm import llm
+from app.db.models import Session as SessionModel
 from app.services.command_router import CommandRouter
+from app.services.coordinator import CoordinatorService
 
 logger = logging.getLogger(__name__)
 
@@ -19,73 +18,29 @@ router = APIRouter(prefix="/api", tags=["chat"])
 class ChatRequest(BaseModel):
     thread_id: str
     message: str
+    model: str | None = None
+    provider: str | None = None
+    idempotency_key: str | None = None
 
 
 def get_or_create_session(thread_id: str, db: DBSession) -> SessionModel:
-    # 1. Try finding session by ID or thread_id
-    db_session = db.query(SessionModel).filter(
-        (SessionModel.id == thread_id) | (SessionModel.thread_id == thread_id)
-    ).first()
+    """Backward-compatible helper used by older API tests and callers."""
 
-    if db_session:
-        return db_session
-
-    # 2. Try finding task by ID or session_id
-    db_task = db.query(TaskModel).filter(
-        (TaskModel.id == thread_id) | (TaskModel.session_id == thread_id)
-    ).first()
-
-    if db_task:
-        if not db_task.session_id:
-            db_task.session_id = str(uuid.uuid4())
-            db.commit()
-            db.refresh(db_task)
-
-        db_session = db.query(SessionModel).filter(SessionModel.task_id == db_task.id).first()
-        if not db_session:
-            db_session = SessionModel(
-                id=db_task.session_id,
-                task_id=db_task.id,
-                thread_id=db_task.session_id,
-                messages=[]
-            )
-            db.add(db_session)
-            db.commit()
-            db.refresh(db_session)
-        return db_session
-
-    # 3. Fallback: Create standalone session
-    db_session = SessionModel(
-        id=thread_id,
-        thread_id=thread_id,
-        messages=[]
-    )
-    db.add(db_session)
-    db.commit()
-    db.refresh(db_session)
-    return db_session
+    return CoordinatorService(db).get_or_create_session(thread_id)
 
 
 @router.post("/chat")
-async def chat_endpoint(req: ChatRequest, db: DBSession = Depends(get_db)):
+async def chat_endpoint(
+    req: ChatRequest,
+    db: DBSession = Depends(get_db),
+    idempotency_header: str | None = Header(None, alias="Idempotency-Key"),
+):
     if not req.message or not req.message.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    db_session = get_or_create_session(req.thread_id, db)
-
-    user_msg_id = f"msg-{uuid.uuid4()}"
-    now_iso = datetime.now(timezone.utc).isoformat()
-    user_msg = {
-        "id": user_msg_id,
-        "role": "user",
-        "content": req.message,
-        "timestamp": now_iso
-    }
-
-    current_messages = list(db_session.messages or [])
-    current_messages.append(user_msg)
-    db_session.messages = current_messages
-    db.commit()
+    coordinator = CoordinatorService(db)
+    db_session = coordinator.get_or_create_session(req.thread_id)
+    turn_id = req.idempotency_key or idempotency_header or str(uuid.uuid4())
 
     command_router = CommandRouter(db)
     cmd, args = command_router.parse(req.message)
@@ -93,46 +48,49 @@ async def chat_endpoint(req: ChatRequest, db: DBSession = Depends(get_db)):
     assistant_msg_id = f"msg-{uuid.uuid4()}"
 
     if cmd:
+        coordinator.ensure_user_message(db_session, req.message, turn_id)
+        completed_command = coordinator.completed_turn(db_session, turn_id)
+
         async def stream_command_response():
             start_payload = json.dumps({"type": "start", "id": assistant_msg_id})
             yield f"data: {start_payload}\n\n"
 
-            cmd_result = await command_router.execute(cmd, args, db_session.id)
-            full_content = json.dumps(cmd_result)
+            if completed_command is not None:
+                full_content = str(completed_command.get("content", ""))
+            else:
+                cmd_result = await command_router.execute(cmd, args, db_session.id)
+                full_content = json.dumps(cmd_result)
 
             chunk_payload = json.dumps({"type": "chunk", "content": full_content})
             yield f"data: {chunk_payload}\n\n"
 
-            end_iso = datetime.now(timezone.utc).isoformat()
-            assistant_msg = {
-                "id": assistant_msg_id,
-                "role": "assistant",
-                "content": full_content,
-                "timestamp": end_iso
-            }
-
-            try:
-                db_session.messages = list(db_session.messages or []) + [assistant_msg]
-                db.commit()
-            except Exception as db_err:
-                logger.error("Failed to persist assistant message: %s", db_err)
+            if completed_command is None:
+                try:
+                    coordinator.append_message(
+                        db_session,
+                        role="assistant",
+                        content=full_content,
+                        message_id=assistant_msg_id,
+                        turn_id=turn_id,
+                        idempotency_key=turn_id,
+                        status="complete",
+                    )
+                except Exception as db_err:
+                    logger.error("Failed to persist assistant message: %s", db_err)
 
             done_payload = json.dumps({"type": "done", "id": assistant_msg_id, "content": full_content})
             yield f"data: {done_payload}\n\n"
 
         return StreamingResponse(stream_command_response(), media_type="text/event-stream")
 
-    llm_messages = []
-    if db_session.task_id:
-        task = db.query(TaskModel).filter(TaskModel.id == db_session.task_id).first()
-        if task:
-            sys_content = f"You are Control Tower AI Assistant helping with Task [{task.id}]: '{task.title}'. Project: '{task.project}', Status: '{task.status}'."
-            if task.plan:
-                sys_content += f"\nTask Plan:\n{task.plan}"
-            llm_messages.append({"role": "system", "content": sys_content})
-
-    for msg in current_messages:
-        llm_messages.append({"role": msg["role"], "content": msg["content"]})
+    try:
+        coordinator.validate_selection(
+            db_session,
+            model=req.model,
+            provider=req.provider,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     async def stream_response():
         full_content = ""
@@ -140,12 +98,12 @@ async def chat_endpoint(req: ChatRequest, db: DBSession = Depends(get_db)):
         yield f"data: {start_payload}\n\n"
 
         try:
-            async for chunk in llm.stream_async(
-                llm_messages,
-                operation="chat",
-                session_id=db_session.id,
-                task_id=db_session.task_id,
-                db_session=db,
+            async for chunk in coordinator.stream_turn(
+                db_session,
+                req.message,
+                model=req.model,
+                provider=req.provider,
+                idempotency_key=turn_id,
             ):
                 full_content += chunk
                 chunk_payload = json.dumps({"type": "chunk", "content": chunk})
@@ -154,20 +112,7 @@ async def chat_endpoint(req: ChatRequest, db: DBSession = Depends(get_db)):
             logger.error("Error streaming from LLM: %s", e)
             err_payload = json.dumps({"type": "error", "content": str(e)})
             yield f"data: {err_payload}\n\n"
-
-        end_iso = datetime.now(timezone.utc).isoformat()
-        assistant_msg = {
-            "id": assistant_msg_id,
-            "role": "assistant",
-            "content": full_content,
-            "timestamp": end_iso
-        }
-
-        try:
-            db_session.messages = list(db_session.messages or []) + [assistant_msg]
-            db.commit()
-        except Exception as db_err:
-            logger.error("Failed to persist assistant message: %s", db_err)
+            return
 
         done_payload = json.dumps({"type": "done", "id": assistant_msg_id, "content": full_content})
         yield f"data: {done_payload}\n\n"

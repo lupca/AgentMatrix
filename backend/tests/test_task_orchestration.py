@@ -130,3 +130,30 @@ def test_gate_records_are_append_only(orchestration, db_session):
         db_session.commit()
     db_session.rollback()
 
+
+def test_decide_gate_idempotent_retry_preserves_dispatch_context(orchestration, db_session):
+    task = _task(db_session, "GATE-005")
+    pending = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-5",
+    )
+
+    decide_args = dict(
+        gate_record_id=pending.gate_record.id,
+        decision="approved",
+        actor="@supervisor",
+        idempotency_key="dispatch-5:approval",
+    )
+
+    first = orchestration.decide_gate(**decide_args)
+    second = orchestration.decide_gate(**decide_args)
+
+    assert first.status == "approved"
+    assert second.status == "approved"
+    assert first.agent_run.id == second.agent_run.id
+    assert second.context is not None
+    assert second.context.get("repo_root") == "/tmp"
+
+

@@ -690,6 +690,7 @@ class TaskOrchestrationService:
         record: GateRecord,
     ) -> TransitionResult:
         effective = record
+        payload_source = record
         if record.status == "pending":
             decision = (
                 self.db.query(GateRecord)
@@ -699,6 +700,11 @@ class TaskOrchestrationService:
             )
             if decision is not None:
                 effective = decision
+        elif record.parent_id is not None:
+            parent = self.db.get(GateRecord, record.parent_id)
+            if parent is not None:
+                payload_source = parent
+
         run = (
             self.db.get(AgentRun, effective.output_ref)
             if effective.gate_type == "dispatch" and effective.output_ref
@@ -709,7 +715,7 @@ class TaskOrchestrationService:
             gate_record=effective,
             applied=effective.status == "approved",
             agent_run=run,
-            context=record.input_payload if run is not None else None,
+            context=payload_source.input_payload if run is not None else None,
         )
 
     def _ledger_record(

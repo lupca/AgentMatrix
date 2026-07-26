@@ -174,6 +174,8 @@ class Session(Base):
     current_gate = Column(String(20), nullable=True)
     checkpoint_id = Column(String(100), nullable=True, index=True)
     state_payload = Column(JSON, nullable=True)
+    selected_provider = Column(String(30), nullable=True)
+    selected_model = Column(String(100), nullable=True)
     messages = Column(JSON, default=list)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
