@@ -1,5 +1,6 @@
 import React from 'react';
 import { Bot, User, Copy, Check, AlertCircle } from 'lucide-react';
+import MessageContent from './MessageContent';
 
 export interface Message {
   id: string;
@@ -82,8 +83,8 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
           </div>
         </div>
 
-        <div className="whitespace-pre-wrap leading-relaxed font-sans text-xs sm:text-sm">
-          {message.content}
+        <div className="font-sans text-xs sm:text-sm">
+          <MessageContent content={message.content} />
           {message.isStreaming && (
             <span className="inline-block w-2 h-4 ml-1 bg-indigo-400 animate-pulse align-middle" />
           )}
