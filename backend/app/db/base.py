@@ -1,15 +1,13 @@
 import os
 from typing import Generator
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker, DeclarativeBase, Session
 
-load_dotenv(override=True)
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", "..", ".env"), override=True)
-
+# In Docker: DATABASE_URL is set by docker-compose
+# Local dev: set DATABASE_URL env var or use default
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:postgrespassword@localhost:5433/control_tower"
+    "postgresql://ct:secret@localhost:5433/control_tower"
 )
 
 engine = create_engine(

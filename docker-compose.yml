@@ -41,8 +41,8 @@ services:
 
   chat:
     build:
-      context: ./frontend/chat
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: frontend/chat/Dockerfile
     container_name: control_tower_chat
     restart: always
     environment:
