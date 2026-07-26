@@ -1,6 +1,7 @@
 from app.graph.state import TaskState, GateType
 from app.graph.gates.base import add_audit_log, check_gate_approval
 from app.services.llm import LLMClient
+from app.core.compression import compress_file_list, compress_test_list
 
 
 def plan_gate(state: TaskState) -> TaskState:
@@ -9,6 +10,7 @@ def plan_gate(state: TaskState) -> TaskState:
     - Calls LLM to generate implementation plan based on title, AC, files, tests.
     - Sets state.plan.
     - Adds audit log and checks approval.
+    - Uses Headroom compression for large file/test lists when enabled.
     """
     state.current_gate = GateType.PLAN
 
@@ -16,12 +18,15 @@ def plan_gate(state: TaskState) -> TaskState:
 
     try:
         llm = LLMClient()
+        files_str = compress_file_list(state.files) if state.files else "None specified"
+        tests_str = compress_test_list(state.tests) if state.tests else "None specified"
+
         prompt = (
             f"You are a technical lead creating an implementation plan.\n"
             f"Title: {state.title or 'Untitled Task'}\n"
             f"Acceptance Criteria:\n" + "\n".join(f"- {ac}" for ac in state.acceptance_criteria) + "\n"
-            f"Target Files: {', '.join(state.files) if state.files else 'None specified'}\n"
-            f"Target Tests: {', '.join(state.tests) if state.tests else 'None specified'}\n\n"
+            f"Target Files: {files_str}\n"
+            f"Target Tests: {tests_str}\n\n"
             f"Write a concise step-by-step implementation plan."
         )
         plan_text = llm.complete(
