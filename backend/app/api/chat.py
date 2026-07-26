@@ -110,8 +110,11 @@ async def chat_endpoint(
                 provider=req.provider,
                 idempotency_key=turn_id,
             ):
-                full_content += chunk
-                chunk_payload = json.dumps({"type": "chunk", "content": chunk})
+                if isinstance(chunk, dict):
+                    chunk_payload = json.dumps(chunk, ensure_ascii=False, default=str)
+                else:
+                    full_content += chunk
+                    chunk_payload = json.dumps({"type": "chunk", "content": chunk})
                 yield f"data: {chunk_payload}\n\n"
         except Exception as e:
             logger.error("Error streaming from LLM: %s", e)

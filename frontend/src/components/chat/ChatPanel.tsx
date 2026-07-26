@@ -7,13 +7,12 @@ import { api } from '../../lib/api';
 import { Task } from '../../types/task';
 import { Bot, RefreshCw, Trash2, AlertCircle } from 'lucide-react';
 import {
-  DEFAULT_COORDINATOR_MODEL,
   CoordinatorProvider,
   providerForModel,
 } from './ModelSelector';
 import { ChatSession, useChat } from '../../hooks/useChat';
 import { ChatSessionSummary, ContextLevel } from '../../hooks/useSessions';
-import { showSuccess } from '../../lib/toast';
+import { showError, showSuccess } from '../../lib/toast';
 
 interface ChatPanelProps {
   threadId: string;
@@ -57,9 +56,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
-  const [selectedProvider, setSelectedProvider] = useState(
-    providerForModel(DEFAULT_COORDINATOR_MODEL),
-  );
+  const [selectedProvider, setSelectedProvider] = useState<CoordinatorProvider | null>(null);
 
   const { isModelSwitching, updateSessionModel } = useChat(sessionId || threadId);
 
@@ -98,11 +95,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       const session = sessionData as ChatSession | null;
       setSessionId(session?.id || null);
       const nextModel = session?.selected_model || null;
-      setSelectedModel(nextModel);
-      setSelectedProvider(
-        (session?.selected_provider as CoordinatorProvider | null) ||
-          providerForModel(nextModel || DEFAULT_COORDINATOR_MODEL),
-      );
+      // A session may not have a persisted model yet. In that case, keep a
+      // model already supplied by ModelSelector while the two API requests
+      // settle in either order.
+      if (nextModel) {
+        setSelectedModel(nextModel);
+        setSelectedProvider(
+          (session?.selected_provider as CoordinatorProvider | null) ||
+            providerForModel(nextModel),
+        );
+      }
 
       if (sessionData && Array.isArray(sessionData.messages)) {
         const formattedMessages: Message[] = sessionData.messages.map((m: any) => ({
@@ -128,8 +130,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     } catch (err: any) {
       console.warn('Could not fetch chat session history:', err);
       setSessionId(null);
-      setSelectedModel(DEFAULT_COORDINATOR_MODEL);
-      setSelectedProvider(providerForModel(DEFAULT_COORDINATOR_MODEL));
       setMessages([
         {
           id: 'welcome-1',
@@ -180,6 +180,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   // Handle SSE streaming chat message send
   const handleSendMessage = async (userText: string) => {
     if (!userText.trim() || isStreaming) return;
+    if (!selectedModel) {
+      const modelError = 'Chat is still loading the default coordinator model. Please try again shortly.';
+      setError(modelError);
+      showError(modelError);
+      return;
+    }
 
     const userMessageId = `user-${Date.now()}`;
     const userMessage: Message = {
@@ -215,7 +221,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         body: JSON.stringify({
           thread_id: threadId,
           message: userText,
-          model: selectedModel || DEFAULT_COORDINATOR_MODEL,
+          model: selectedModel,
           provider: selectedProvider,
         }),
         signal: controller.signal,
@@ -440,7 +446,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       <div className="shrink-0">
         <ChatInput
           onSendMessage={handleSendMessage}
-          disabled={loadingHistory}
+          disabled={loadingHistory || selectedModel === null}
           isStreaming={isStreaming}
           task={task}
           onTaskAction={onTaskAction}

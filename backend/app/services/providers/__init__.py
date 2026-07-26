@@ -22,6 +22,7 @@ class ProviderResponse:
     usage: UsageCounts = field(default_factory=UsageCounts)
     request_id: str | None = None
     stop_reason: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
     raw_response: Any = None
     chunks: AsyncIterator[str] | None = None
 

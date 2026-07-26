@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.services.llm_client import extract_usage
@@ -16,14 +17,14 @@ class OpenAIAdapter:
     def __init__(
         self,
         *,
-        api_key: str,
+        api_key: str | None = None,
         base_url: str | None = None,
         client: Any | None = None,
     ):
-        if not api_key or not api_key.strip():
+        if client is None and (not api_key or not api_key.strip()):
             raise ValueError("OpenAI adapter requires an API key")
         self._client = client
-        self._api_key = api_key
+        self._api_key = api_key or ""
         self._base_url = base_url
 
     def _get_client(self):
@@ -162,6 +163,55 @@ class OpenAIAdapter:
         )
 
     @staticmethod
+    def _tool_calls(response: Any) -> list[dict[str, Any]]:
+        """Extract OpenAI tool calls in the canonical coordinator shape."""
+        choices = response.get("choices", []) if isinstance(response, dict) else getattr(response, "choices", [])
+        if not choices:
+            return []
+        choice = choices[0]
+        message = choice.get("message", {}) if isinstance(choice, dict) else getattr(choice, "message", None)
+        calls = message.get("tool_calls", []) if isinstance(message, dict) else getattr(message, "tool_calls", [])
+        return OpenAIAdapter._normalize_tool_calls(calls)
+
+    @staticmethod
+    def _normalize_tool_calls(calls: Any) -> list[dict[str, Any]]:
+        if not isinstance(calls, (list, tuple)):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for call in calls:
+            function = call.get("function", {}) if isinstance(call, dict) else getattr(call, "function", None)
+            if isinstance(function, dict):
+                name = function.get("name", "")
+                arguments = function.get("arguments", "{}")
+            else:
+                name = getattr(function, "name", "")
+                arguments = getattr(function, "arguments", "{}")
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    # Preserve malformed provider output rather than dropping
+                    # a call that may still be useful to the coordinator.
+                    pass
+            normalized.append(
+                {
+                    "id": str(call.get("id", "") if isinstance(call, dict) else getattr(call, "id", "")),
+                    "name": str(name),
+                    "input": arguments,
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _chunk_tool_calls(chunk: Any) -> list[Any]:
+        choices = chunk.get("choices", []) if isinstance(chunk, dict) else getattr(chunk, "choices", [])
+        if not choices:
+            return []
+        choice = choices[0]
+        delta = choice.get("delta", {}) if isinstance(choice, dict) else getattr(choice, "delta", None)
+        return delta.get("tool_calls", []) if isinstance(delta, dict) else getattr(delta, "tool_calls", []) or []
+
+    @staticmethod
     def _stop_reason(response: Any) -> str | None:
         choices = response.get("choices", []) if isinstance(response, dict) else getattr(response, "choices", [])
         if not choices:
@@ -204,6 +254,7 @@ class OpenAIAdapter:
             response = await client.chat.completions.create(**request)
             normalized.raw_response = response
             normalized.text = self._text(response)
+            normalized.tool_calls = self._tool_calls(response) or None
             normalized.usage = extract_usage(response, self.name)
             normalized.request_id = response_request_id(response)
             normalized.stop_reason = self._stop_reason(response)
@@ -214,6 +265,7 @@ class OpenAIAdapter:
 
         async def iter_chunks():
             pieces: list[str] = []
+            tool_call_parts: dict[int, dict[str, Any]] = {}
             final_chunk: Any = None
             usage_response: Any = None
             async for chunk in await client.chat.completions.create(**request):
@@ -229,11 +281,41 @@ class OpenAIAdapter:
                 if text:
                     pieces.append(text)
                     yield text
+                for position, call in enumerate(self._chunk_tool_calls(chunk)):
+                    index = call.get("index", position) if isinstance(call, dict) else getattr(call, "index", position)
+                    try:
+                        index = int(index)
+                    except (TypeError, ValueError):
+                        index = position
+                    function = call.get("function", {}) if isinstance(call, dict) else getattr(call, "function", None)
+                    if isinstance(function, dict):
+                        name = function.get("name")
+                        arguments = function.get("arguments")
+                    else:
+                        name = getattr(function, "name", None)
+                        arguments = getattr(function, "arguments", None)
+                    current = tool_call_parts.setdefault(
+                        index,
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+                    call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+                    if call_id:
+                        current["id"] = str(call_id)
+                    if name:
+                        current["name"] = str(name)
+                    if arguments:
+                        current["arguments"] += str(arguments)
                 stop_reason = self._stop_reason(chunk)
                 if stop_reason is not None:
                     normalized.stop_reason = stop_reason
             normalized.raw_response = final_chunk
             normalized.text = "".join(pieces)
+            normalized.tool_calls = self._normalize_tool_calls(
+                [
+                    {"id": part["id"], "function": {"name": part["name"], "arguments": part["arguments"]}}
+                    for _, part in sorted(tool_call_parts.items())
+                ]
+            ) or None
             normalized.usage = extract_usage(usage_response or final_chunk or {}, self.name)
 
         normalized.chunks = iter_chunks()

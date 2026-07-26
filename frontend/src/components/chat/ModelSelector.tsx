@@ -11,9 +11,6 @@ export interface CoordinatorModelOption {
   provider: CoordinatorProvider;
 }
 
-// No hardcoded fallback - fetch from API only
-export const DEFAULT_COORDINATOR_MODEL = 'claude-sonnet-4-20250514';
-
 export function providerForModel(model: string): CoordinatorProvider {
   const normalized = model.toLowerCase();
   if (normalized.includes('gemini')) return 'google';

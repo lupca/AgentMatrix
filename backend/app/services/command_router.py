@@ -1,7 +1,8 @@
 import re
 import hashlib
 import json
-from typing import Tuple, Optional
+from collections.abc import Mapping
+from typing import Any, Tuple, Optional
 from app.db.models import AgentRun, Task, Session as SessionModel
 from app.services.task_orchestration import (
     OrchestrationError,
@@ -39,6 +40,73 @@ class CommandRouter:
         if not handler:
             return {'error': f'Unknown command: {command}'}
         return await handler(args, session_id)
+
+    async def execute_tool(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any] | None,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """Execute a model tool using the existing slash-command handlers.
+
+        The LLM-facing schemas use structured JSON while the original chat
+        router uses command strings. Keeping this translation here gives both
+        entry points the same gate and persistence behavior.
+        """
+
+        if not isinstance(arguments, Mapping):
+            return {'error': 'Tool arguments must be a JSON object'}
+
+        args = dict(arguments)
+        if tool_name == 'pm_create_task':
+            title = str(args.get('title', '')).strip()
+            if not title:
+                return {'error': 'title is required'}
+            project = str(args.get('project', '')).strip()
+            command_args = title + (f' --project {project}' if project else '')
+        elif tool_name == 'get_status':
+            command_args = str(args.get('task_id', '') or '')
+        elif tool_name == 'dispatch_task':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            executor = str(args.get('executor', '') or '').strip()
+            command_args = ' '.join(part for part in (task_id, executor) if part)
+        elif tool_name == 'record_verdict':
+            task_id = str(args.get('task_id', '')).strip()
+            verdict = str(args.get('verdict', '')).strip().lower()
+            if not task_id or not verdict:
+                return {'error': 'task_id and verdict are required'}
+            findings = args.get('findings', [])
+            command_args = f'{task_id} {verdict} {json.dumps(findings, ensure_ascii=False)}'
+        elif tool_name == 'approve_gate':
+            gate_id = args.get('gate_record_id', args.get('task_id'))
+            if gate_id is None:
+                return {'error': 'gate_record_id is required'}
+            command_args = str(gate_id)
+        elif tool_name == 'cancel_task':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            command_args = task_id
+        elif tool_name == 'compact_context':
+            command_args = ''
+        else:
+            return {'error': f'Unknown tool: {tool_name}'}
+
+        return await self.execute(
+            {
+                'pm_create_task': 'create_task',
+                'get_status': 'get_status',
+                'dispatch_task': 'dispatch_task',
+                'record_verdict': 'verdict',
+                'approve_gate': 'approve_gate',
+                'cancel_task': 'cancel_task',
+                'compact_context': 'compact_context',
+            }[tool_name],
+            command_args,
+            session_id,
+        )
     
     async def _handle_show_help(self, args: str, session_id: str) -> dict:
         return {'commands': list(COMMANDS.keys())}

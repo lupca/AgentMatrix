@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session as DBSession
@@ -39,10 +40,10 @@ class ContextHierarchy:
 
     def _load_global(self) -> list[dict[str, Any]]:
         """Load global system prompt + gate rules."""
-        global_file = os.path.join("app", "prompts", "global_context.md")
+        global_file = Path(__file__).resolve().parents[1] / "prompts" / "global_context.md"
         if os.path.exists(global_file):
             try:
-                with open(global_file, "r", encoding="utf-8") as f:
+                with global_file.open("r", encoding="utf-8") as f:
                     content = f.read()
                 return [{"role": "system", "content": content}]
             except Exception as e:

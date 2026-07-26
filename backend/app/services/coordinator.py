@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -30,6 +31,8 @@ from app.services.cli_dispatcher import (
 )
 from app.services.context_hierarchy import ContextHierarchy
 from app.services.crypto import decrypt_api_key
+from app.services.command_router import CommandRouter
+from app.graph.context import invalidate_context_snapshot
 from app.services.providers import CoordinatorProvider, ProviderResponse
 from app.services.providers.anthropic_adapter import AnthropicAdapter
 from app.services.providers.google_adapter import GoogleAdapter
@@ -149,6 +152,7 @@ class CoordinatorService:
         max_output_tokens: int = 2048,
         context_windows: Mapping[str, int] | None = None,
         context_safety_tokens: int = 1024,
+        max_tool_iterations: int = 5,
         graph: Any | None = None,
     ):
         if dispatcher is not None and cli_dispatcher is not None:
@@ -173,6 +177,7 @@ class CoordinatorService:
         self.max_output_tokens = max(1, max_output_tokens)
         self.context_windows = dict(context_windows or DEFAULT_CONTEXT_WINDOWS)
         self.context_safety_tokens = max(0, context_safety_tokens)
+        self.max_tool_iterations = max(1, max_tool_iterations)
 
     @staticmethod
     def _now() -> str:
@@ -446,6 +451,7 @@ class CoordinatorService:
                 message.get("turn_id") == turn_id
                 and message.get("role") == "assistant"
                 and message.get("status", "complete") == "complete"
+                and not message.get("tool_calls")
             ):
                 return message
         return None
@@ -479,6 +485,81 @@ class CoordinatorService:
             idempotency_key=turn_id,
             status="complete",
         )
+
+    @staticmethod
+    def _tool_arguments(tool_call: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Decode the normalized adapter input while tolerating bad JSON."""
+
+        arguments = tool_call.get("input", {})
+        if isinstance(arguments, Mapping):
+            return arguments
+        if isinstance(arguments, str):
+            try:
+                decoded = json.loads(arguments)
+            except json.JSONDecodeError:
+                return {}
+            return decoded if isinstance(decoded, Mapping) else {}
+        return {}
+
+    async def _execute_tools(
+        self,
+        tool_calls: list[dict[str, Any]],
+        db_session: SessionModel,
+    ) -> list[dict[str, Any]]:
+        """Execute normalized adapter tool calls and return OpenAI messages."""
+
+        router = CommandRouter(self.db)
+        results: list[dict[str, Any]] = []
+        for position, tool_call in enumerate(tool_calls):
+            name = str(tool_call.get("name", ""))
+            call_id = str(tool_call.get("id") or f"tool-call-{position}")
+            result = await router.execute_tool(
+                name,
+                self._tool_arguments(tool_call),
+                db_session.id,
+            )
+            results.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": name,
+                    "content": json.dumps(result, ensure_ascii=False, default=str),
+                }
+            )
+        return results
+
+    def _persist_tool_exchange(
+        self,
+        db_session: SessionModel,
+        *,
+        turn_id: str,
+        response: ProviderResponse,
+        results: list[dict[str, Any]],
+    ) -> None:
+        """Persist the assistant call envelope and each tool result."""
+
+        self.append_message(
+            db_session,
+            role="assistant",
+            content=response.text or "",
+            turn_id=turn_id,
+            status="complete",
+            provider=response.provider,
+            model=response.model,
+            provider_response_id=response.request_id,
+            stop_reason=response.stop_reason,
+            tool_calls=response.tool_calls or [],
+        )
+        for result in results:
+            self.append_message(
+                db_session,
+                turn_id=turn_id,
+                status="complete",
+                **result,
+            )
+        # Mutating tools can change the structured context snapshot used by
+        # the next provider request in this turn and by the next user turn.
+        invalidate_context_snapshot(self.db, project_id=db_session.project_id)
 
     @staticmethod
     def _retryable(exc: Exception) -> bool:
@@ -684,16 +765,49 @@ class CoordinatorService:
             )
             prompt = self.format_prompt(canonical)
             started = perf_counter()
+            tool_activity = False
             for attempt in range(self.max_retries + 1):
                 try:
                     if adapter is not None:
-                        response = await adapter.complete(
-                            canonical,
-                            resolved_model,
-                            False,
-                            max_tokens=self.max_output_tokens,
-                            temperature=temperature,
-                            tools=ctx.get_tool_definitions(),
+                        for _ in range(self.max_tool_iterations):
+                            response = await adapter.complete(
+                                canonical,
+                                resolved_model,
+                                False,
+                                max_tokens=self.max_output_tokens,
+                                temperature=temperature,
+                                tools=ctx.get_tool_definitions(),
+                            )
+                            if not response.tool_calls:
+                                return self._persist_success(
+                                    db_session,
+                                    turn_id=turn_id,
+                                    response=response,
+                                    latency_ms=round((perf_counter() - started) * 1000),
+                                )
+
+                            tool_activity = True
+                            canonical.append(
+                                {
+                                    "role": "assistant",
+                                    "content": response.text or "",
+                                    "tool_calls": response.tool_calls,
+                                }
+                            )
+                            tool_results = await self._execute_tools(
+                                response.tool_calls,
+                                db_session,
+                            )
+                            canonical.extend(tool_results)
+                            self._persist_tool_exchange(
+                                db_session,
+                                turn_id=turn_id,
+                                response=response,
+                                results=tool_results,
+                            )
+                        raise RuntimeError(
+                            "Coordinator tool execution loop exceeded "
+                            f"{self.max_tool_iterations} iterations"
                         )
                     else:
                         response = await self._complete_cli(
@@ -709,7 +823,11 @@ class CoordinatorService:
                         latency_ms=round((perf_counter() - started) * 1000),
                     )
                 except Exception as exc:
-                    if attempt < self.max_retries and self._retryable(exc):
+                    if (
+                        not tool_activity
+                        and attempt < self.max_retries
+                        and self._retryable(exc)
+                    ):
                         await self._retry_delay(attempt)
                         continue
                     self._persist_failure(
@@ -732,8 +850,8 @@ class CoordinatorService:
         provider: str | None = None,
         idempotency_key: str | None = None,
         temperature: float = 0.7,
-    ) -> AsyncIterator[str]:
-        """Stream normalized text chunks and persist one logical response."""
+    ) -> AsyncIterator[str | dict[str, Any]]:
+        """Stream text and tool progress, then persist one logical response."""
 
         turn_id = idempotency_key or str(uuid.uuid4())
         lock = self._session_locks.setdefault(db_session.id, asyncio.Lock())
@@ -756,27 +874,72 @@ class CoordinatorService:
             prompt = self.format_prompt(canonical)
             started = perf_counter()
             partial = ""
+            tool_activity = False
             for attempt in range(self.max_retries + 1):
                 response: ProviderResponse | None = None
                 try:
                     if adapter is not None:
-                        response = await adapter.complete(
-                            canonical,
-                            resolved_model,
-                            True,
-                            max_tokens=self.max_output_tokens,
-                            temperature=temperature,
-                            tools=ctx.get_tool_definitions(),
-                        )
-                        if response.chunks is None:
-                            if response.text:
-                                partial += response.text
-                                yield response.text
+                        for _ in range(self.max_tool_iterations):
+                            response = await adapter.complete(
+                                canonical,
+                                resolved_model,
+                                True,
+                                max_tokens=self.max_output_tokens,
+                                temperature=temperature,
+                                tools=ctx.get_tool_definitions(),
+                            )
+                            if response.chunks is None:
+                                if response.text:
+                                    partial += response.text
+                                    yield response.text
+                            else:
+                                async for chunk in response.chunks:
+                                    partial += chunk
+                                    yield chunk
+
+                            if not response.tool_calls:
+                                break
+
+                            tool_activity = True
+                            canonical.append(
+                                {
+                                    "role": "assistant",
+                                    "content": response.text or "",
+                                    "tool_calls": response.tool_calls,
+                                }
+                            )
+                            for position, tool_call in enumerate(response.tool_calls):
+                                yield {
+                                    "type": "tool_call",
+                                    "tool_call_id": str(
+                                        tool_call.get("id") or f"tool-call-{position}"
+                                    ),
+                                    "name": str(tool_call.get("name", "")),
+                                    "input": dict(self._tool_arguments(tool_call)),
+                                }
+                            tool_results = await self._execute_tools(
+                                response.tool_calls,
+                                db_session,
+                            )
+                            canonical.extend(tool_results)
+                            self._persist_tool_exchange(
+                                db_session,
+                                turn_id=turn_id,
+                                response=response,
+                                results=tool_results,
+                            )
+                            for result in tool_results:
+                                yield {
+                                    "type": "tool_result",
+                                    "tool_call_id": result["tool_call_id"],
+                                    "name": result["name"],
+                                    "content": result["content"],
+                                }
                         else:
-                            async for chunk in response.chunks:
-                                partial += chunk
-                                yield chunk
-                        response.text = partial or response.text
+                            raise RuntimeError(
+                                "Coordinator tool execution loop exceeded "
+                                f"{self.max_tool_iterations} iterations"
+                            )
                     else:
                         route = route_model(resolved_model, provider_name)
                         async for chunk in self.dispatcher.spawn(
@@ -804,6 +967,7 @@ class CoordinatorService:
                     # output, so retries are safe only before the first chunk.
                     if (
                         not partial
+                        and not tool_activity
                         and attempt < self.max_retries
                         and self._retryable(exc)
                     ):

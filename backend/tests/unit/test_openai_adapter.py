@@ -18,7 +18,16 @@ class _Completions:
                         id="stream-request",
                         choices=[
                             SimpleNamespace(
-                                delta=SimpleNamespace(content="Hello "),
+                                delta=SimpleNamespace(
+                                    content="Hello ",
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id="call-stream",
+                                            function=SimpleNamespace(name="status", arguments='{"sta'),
+                                        )
+                                    ],
+                                ),
                                 finish_reason=None,
                             )
                         ],
@@ -28,7 +37,16 @@ class _Completions:
                         id="stream-request",
                         choices=[
                             SimpleNamespace(
-                                delta=SimpleNamespace(content="world"),
+                                delta=SimpleNamespace(
+                                    content="world",
+                                    tool_calls=[
+                                        SimpleNamespace(
+                                            index=0,
+                                            id=None,
+                                            function=SimpleNamespace(name=None, arguments='tus":true}'),
+                                        )
+                                    ],
+                                ),
                                 finish_reason="stop",
                             )
                         ],
@@ -128,7 +146,7 @@ def test_render_messages_and_tools_converts_canonical_shapes():
 @pytest.mark.asyncio
 async def test_complete_extracts_text_usage_and_request_options():
     client = _OpenAIClient()
-    adapter = OpenAIAdapter(client=client)
+    adapter = OpenAIAdapter(api_key="test-key", client=client)
 
     response = await adapter.complete(
         [{"role": "system", "content": "Rules"}, {"role": "user", "content": "Hi"}],
@@ -140,6 +158,7 @@ async def test_complete_extracts_text_usage_and_request_options():
     assert response.text == "Hello from OpenAI"
     assert response.request_id == "response-id"
     assert response.stop_reason == "stop"
+    assert response.tool_calls is None
     assert response.usage.input_tokens == 100
     assert response.usage.output_tokens == 25
     assert response.usage.cached_tokens == 30
@@ -150,7 +169,7 @@ async def test_complete_extracts_text_usage_and_request_options():
 @pytest.mark.asyncio
 async def test_complete_normalizes_streaming_and_usage():
     client = _OpenAIClient()
-    adapter = OpenAIAdapter(client=client)
+    adapter = OpenAIAdapter(api_key="test-key", client=client)
 
     response = await adapter.complete([{"role": "user", "content": "Hi"}], "gpt-4o", stream=True)
     chunks = [chunk async for chunk in response.chunks]
@@ -159,10 +178,49 @@ async def test_complete_normalizes_streaming_and_usage():
     assert response.text == "Hello world"
     assert response.request_id == "stream-request"
     assert response.stop_reason == "stop"
+    assert response.tool_calls == [
+        {"id": "call-stream", "name": "status", "input": {"status": True}}
+    ]
     assert response.usage.input_tokens == 80
     assert response.usage.output_tokens == 12
     assert response.usage.cached_tokens == 20
     assert client.chat.completions.requests[0]["stream_options"] == {"include_usage": True}
+
+
+def test_tool_calls_extracts_dict_and_object_response_shapes():
+    assert OpenAIAdapter._tool_calls(
+        {
+            "choices": [
+                {
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call-dict",
+                                "function": {"name": "status", "arguments": '{"verbose":true}'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    ) == [{"id": "call-dict", "name": "status", "input": {"verbose": True}}]
+
+    assert OpenAIAdapter._tool_calls(
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        tool_calls=[
+                            SimpleNamespace(
+                                id="call-object",
+                                function=SimpleNamespace(name="status", arguments="{}"),
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+    ) == [{"id": "call-object", "name": "status", "input": {}}]
 
 
 @pytest.mark.asyncio
@@ -175,7 +233,7 @@ async def test_complete_propagates_openai_api_errors():
             raise RateLimitError("rate limit")
 
     client = SimpleNamespace(chat=SimpleNamespace(completions=ErrorCompletions()))
-    adapter = OpenAIAdapter(client=client)
+    adapter = OpenAIAdapter(api_key="test-key", client=client)
 
     with pytest.raises(RateLimitError):
         await adapter.complete([{"role": "user", "content": "Hi"}], "gpt-4o")
