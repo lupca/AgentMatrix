@@ -211,7 +211,13 @@ class CLIDispatcher:
             while True:
                 kind, value = await events.get()
                 if kind == "output":
-                    yield str(value)
+                    # ProcessManager intentionally exposes output one line at
+                    # a time without its delimiter.  Restore that delimiter
+                    # before forwarding text to the coordinator; otherwise
+                    # Markdown blocks are concatenated (for example
+                    # ``---`` + ``### Heading``).
+                    output = str(value)
+                    yield output if output.endswith(("\n", "\r")) else f"{output}\n"
                 elif kind == "result":
                     result = value
                     if isinstance(result, ProcessResult) and result.status != ProcessStatus.COMPLETED:

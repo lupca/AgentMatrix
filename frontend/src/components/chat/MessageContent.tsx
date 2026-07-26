@@ -148,16 +148,31 @@ interface MessageContentProps {
   content: string;
 }
 
-export const MessageContent: React.FC<MessageContentProps> = ({ content }) => (
-  <div className="markdown-content leading-relaxed whitespace-pre-wrap">
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm, remarkBreaks]}
-      rehypePlugins={[rehypeSanitize]}
-      components={components}
-    >
-      {content}
-    </ReactMarkdown>
-  </div>
-);
+/**
+ * Recover line endings from payloads that were escaped before reaching the
+ * browser (for example, a literal ``\\n`` instead of a newline character).
+ * Normal JSON/SSE payloads already contain real newlines and are unchanged.
+ */
+export const normalizeMarkdownContent = (content: string): string =>
+  content
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r');
+
+export const MessageContent: React.FC<MessageContentProps> = ({ content }) => {
+  const normalizedContent = normalizeMarkdownContent(content);
+
+  return (
+    <div className="markdown-content leading-relaxed whitespace-pre-wrap">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        rehypePlugins={[rehypeSanitize]}
+        components={components}
+      >
+        {normalizedContent}
+      </ReactMarkdown>
+    </div>
+  );
+};
 
 export default MessageContent;

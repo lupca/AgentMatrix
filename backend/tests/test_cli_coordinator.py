@@ -65,11 +65,38 @@ async def test_cli_dispatcher_forwards_process_output_and_raises_failures(monkey
         async for chunk in dispatcher.spawn("claude", "claude-sonnet-4", "prompt")
     ]
 
-    assert chunks == ["first", "second"]
+    assert chunks == ["first\n", "second\n"]
     command, cwd = manager.run_with_streaming.call_args.args
     assert command.startswith("claude --model claude-sonnet-4 -p")
     assert cwd == "/tmp"
     manager.terminate.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cli_dispatcher_restores_markdown_line_boundaries(monkeypatch):
+    manager = MagicMock()
+    manager.run_with_streaming.return_value = iter(
+        [
+            "### Header",
+            "",
+            "* Item 1",
+            "* Item 2",
+            ProcessResult(ProcessStatus.COMPLETED, 0, None),
+        ]
+    )
+    monkeypatch.setattr(
+        "app.services.cli_dispatcher.ProcessManager",
+        MagicMock(return_value=manager),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in CLIDispatcher(working_directory="/tmp").spawn(
+            "claude", "claude-sonnet-4", "prompt"
+        )
+    ]
+
+    assert "".join(chunks) == "### Header\n\n* Item 1\n* Item 2\n"
 
 
 @pytest.mark.asyncio

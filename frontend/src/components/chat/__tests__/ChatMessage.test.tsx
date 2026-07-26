@@ -86,4 +86,12 @@ describe('ChatMessage Markdown rendering', () => {
     expect(container.querySelector('.markdown-content')?.className).toContain('whitespace-pre-wrap');
     expect(container.querySelector('strong')?.textContent).toBe('Summary');
   });
+
+  it('normalizes escaped newlines from double-encoded Markdown payloads', () => {
+    renderMessage('### Header\\n\\n* Item 1\\n* Item 2');
+
+    expect(container.querySelector('h3')?.textContent).toBe('Header');
+    expect(container.querySelectorAll('ul > li')).toHaveLength(2);
+    expect(container.querySelectorAll('ul > li')[1]?.textContent).toBe('Item 2');
+  });
 });
