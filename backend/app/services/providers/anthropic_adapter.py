@@ -70,14 +70,17 @@ class AnthropicAdapter:
                 msg = {"role": role, "content": content}
             provider_messages.append(msg)
 
-        system = [
-            {
-                "type": "text",
-                "text": block["text"],
-                "cache_control": block.get("cache_control", {"type": "ephemeral"}),
-            }
-            for block in system_parts
-        ]
+        # Only carry cache_control through when the canonical message set it
+        # (ContextHierarchy tags exactly the Global/Project tier boundaries).
+        # Defaulting every system block to ephemeral would also cache the
+        # dynamic per-task system header emitted by the Task tier, which
+        # defeats the tier-boundary caching this adapter is meant to honor.
+        system = []
+        for block in system_parts:
+            rendered = {"type": "text", "text": block["text"]}
+            if "cache_control" in block:
+                rendered["cache_control"] = block["cache_control"]
+            system.append(rendered)
         return system, provider_messages
 
     async def complete(
@@ -88,6 +91,7 @@ class AnthropicAdapter:
         *,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ProviderResponse:
         system, provider_messages = self.render_messages(messages)
         request: dict[str, Any] = {
@@ -95,10 +99,11 @@ class AnthropicAdapter:
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": provider_messages,
-            "cache_control": {"type": "ephemeral"},
         }
         if system:
             request["system"] = system
+        if tools:
+            request["tools"] = tools
 
         normalized = ProviderResponse(provider=self.name, model=model)
         client = self._get_client()

@@ -39,6 +39,7 @@ class CoordinatorProvider(Protocol):
         *,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ProviderResponse:
         """Complete a canonical message list, optionally as normalized chunks."""
 

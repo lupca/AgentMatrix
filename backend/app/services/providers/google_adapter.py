@@ -61,7 +61,11 @@ class GoogleAdapter:
         *,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        tools: list[dict[str, Any]] | None = None,
     ) -> ProviderResponse:
+        # Gemini uses a different tool-declaration schema; the coordinator's
+        # Anthropic-style tool definitions are not translated here.
+        del tools
         contents, system = self.render_messages(messages)
         config: dict[str, Any] = {
             "max_output_tokens": max_tokens,

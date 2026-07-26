@@ -1,7 +1,7 @@
 import pytest
 import os
 from app.db.models import Project, Session as SessionModel, Task, LLMUsage
-from app.services.context_hierarchy import ContextHierarchy
+from app.services.context_hierarchy import ContextHierarchy, PROJECT_CONTEXT_MAX_CHARS
 from app.services.coordinator import CoordinatorService
 from app.services.command_router import CommandRouter
 from app.services.providers import ProviderResponse
@@ -127,6 +127,109 @@ def test_context_compaction(db_session):
     assert len(session.messages) == 11  # 1 summary msg + 10 kept
     assert session.messages[0]["role"] == "system"
     assert "Context Compaction" in session.messages[0]["content"]
+
+
+def test_get_tool_definitions_marks_rare_tools_deferred(db_session):
+    hierarchy = ContextHierarchy(db_session)
+    tools = hierarchy.get_tool_definitions()
+
+    names_eager = {t["name"] for t in tools if not t.get("defer_loading")}
+    names_deferred = {t["name"] for t in tools if t.get("defer_loading")}
+
+    assert "pm_create_task" in names_eager
+    assert "get_status" in names_eager
+    assert "dispatch_task" in names_deferred
+    assert "compact_context" in names_deferred
+
+    # The tool-search tool itself must never be deferred, and must be present
+    # whenever any tool is deferred.
+    search_tools = [t for t in tools if t["name"] == "tool_search_tool_regex"]
+    assert len(search_tools) == 1
+    assert not search_tools[0].get("defer_loading")
+
+
+def test_project_context_auto_memory_from_recent_tasks(db_session):
+    project = Project(id="proj-memory", name="Memory Project", description="Desc")
+    tasks = [
+        Task(
+            id=f"MEM-{i}",
+            project="proj-memory",
+            title=f"Completed task {i}",
+            status="done",
+            verdict="pass",
+            executor="@claude",
+            reviewer="@opus",
+            result_ref=f"ref-{i}",
+        )
+        for i in range(3)
+    ]
+    db_session.add(project)
+    db_session.add_all(tasks)
+    db_session.commit()
+
+    hierarchy = ContextHierarchy(db_session)
+    proj_ctx = hierarchy.get_project_context("proj-memory")
+
+    assert len(proj_ctx) == 1
+    content = proj_ctx[0]["content"]
+    assert "[Project Memory: recent completed tasks]" in content
+    assert "MEM-0" in content
+    assert "verdict: pass" in content
+
+
+def test_project_context_capped_at_25kb(db_session):
+    project = Project(
+        id="proj-huge",
+        name="Huge Project",
+        description="x" * 40_000,
+    )
+    db_session.add(project)
+    db_session.commit()
+
+    hierarchy = ContextHierarchy(db_session)
+    proj_ctx = hierarchy.get_project_context("proj-huge")
+
+    assert len(proj_ctx) == 1
+    assert len(proj_ctx[0]["content"]) <= PROJECT_CONTEXT_MAX_CHARS
+    assert "truncated" in proj_ctx[0]["content"]
+
+
+def test_task_context_enriches_with_langgraph_state(db_session):
+    from app.graph.builder import build_graph
+    from langgraph.checkpoint.memory import MemorySaver
+
+    task = Task(id="GRAPH-1", project="proj-graph", title="Graph Task", status="dispatched")
+    session = SessionModel(
+        id="sess-graph",
+        task_id="GRAPH-1",
+        messages=[],
+    )
+    db_session.add_all([task, session])
+    db_session.commit()
+
+    graph = build_graph(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "GRAPH-1"}}
+    graph.invoke({"raw_input": "ship it", "task_id": "GRAPH-1"}, config=config)
+
+    hierarchy = ContextHierarchy(db_session, graph=graph)
+    task_ctx = hierarchy.get_task_context(session)
+
+    assert len(task_ctx) == 1
+    assert "[LangGraph State]" in task_ctx[0]["content"]
+    assert "verdict=pass" in task_ctx[0]["content"]
+
+
+def test_task_context_without_graph_is_unaffected(db_session):
+    task = Task(id="NOGRAPH-1", project="proj-nograph", title="No Graph Task", status="todo")
+    session = SessionModel(id="sess-nograph", task_id="NOGRAPH-1", messages=[])
+    db_session.add_all([task, session])
+    db_session.commit()
+
+    hierarchy = ContextHierarchy(db_session)
+    task_ctx = hierarchy.get_task_context(session)
+
+    assert len(task_ctx) == 1
+    assert "[LangGraph State]" not in task_ctx[0]["content"]
 
 
 @pytest.mark.asyncio

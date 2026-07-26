@@ -29,6 +29,7 @@ class _FakeProvider:
         *,
         max_tokens=2048,
         temperature=0.7,
+        tools=None,
     ):
         self.calls.append((model, messages))
         if self.failures:

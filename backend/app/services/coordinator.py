@@ -126,6 +126,7 @@ class CoordinatorService:
         max_output_tokens: int = 2048,
         context_windows: Mapping[str, int] | None = None,
         context_safety_tokens: int = 1024,
+        graph: Any | None = None,
     ):
         if dispatcher is not None and cli_dispatcher is not None:
             raise ValueError("Pass either dispatcher or cli_dispatcher, not both")
@@ -133,6 +134,10 @@ class CoordinatorService:
             raise ValueError("Pass either router or providers, not both")
         self.db = db
         self.dispatcher = dispatcher or cli_dispatcher or CLIDispatcher()
+        # Optional compiled LangGraph pipeline (see app.graph.builder.build_graph).
+        # When provided, ContextHierarchy enriches Task-tier context with live
+        # gate state read from the graph's checkpointer.
+        self.graph = graph
         self._explicit_provider_compatibility = router is not None or providers is not None
         if router is not None:
             self.router = router
@@ -365,12 +370,15 @@ class CoordinatorService:
         selected_recent.reverse()
         return selected_prefix + selected_recent
 
+    def _context_hierarchy(self) -> ContextHierarchy:
+        return ContextHierarchy(self.db, graph=self.graph)
+
     def _canonical_messages(
         self,
         db_session: SessionModel,
         project_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        return ContextHierarchy(self.db).build_messages(db_session, project_id=project_id)
+        return self._context_hierarchy().build_messages(db_session, project_id=project_id)
 
     @staticmethod
     def completed_turn(
@@ -612,9 +620,10 @@ class CoordinatorService:
             provider_name, resolved_model, adapter = self._resolve_selection(
                 db_session, model, provider
             )
-            ContextHierarchy(self.db).compact_context(db_session)
+            ctx = self._context_hierarchy()
+            ctx.compact_context(db_session)
             canonical = self.budget_messages(
-                self._canonical_messages(db_session),
+                ctx.build_messages(db_session),
                 resolved_model,
             )
             prompt = self.format_prompt(canonical)
@@ -628,6 +637,7 @@ class CoordinatorService:
                             False,
                             max_tokens=self.max_output_tokens,
                             temperature=temperature,
+                            tools=ctx.get_tool_definitions(),
                         )
                     else:
                         response = await self._complete_cli(
@@ -681,9 +691,10 @@ class CoordinatorService:
             provider_name, resolved_model, adapter = self._resolve_selection(
                 db_session, model, provider
             )
-            ContextHierarchy(self.db).compact_context(db_session)
+            ctx = self._context_hierarchy()
+            ctx.compact_context(db_session)
             canonical = self.budget_messages(
-                self._canonical_messages(db_session),
+                ctx.build_messages(db_session),
                 resolved_model,
             )
             prompt = self.format_prompt(canonical)
@@ -699,6 +710,7 @@ class CoordinatorService:
                             True,
                             max_tokens=self.max_output_tokens,
                             temperature=temperature,
+                            tools=ctx.get_tool_definitions(),
                         )
                         if response.chunks is None:
                             if response.text:

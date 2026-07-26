@@ -74,7 +74,12 @@ async def test_anthropic_adapter_translates_messages_and_usage():
 
     response = await adapter.complete(
         [
-            {"role": "system", "content": "Stable instructions"},
+            {
+                "role": "system",
+                "content": "Stable instructions",
+                "cache_control": {"type": "ephemeral"},
+            },
+            {"role": "system", "content": "Dynamic per-task header"},
             {"role": "user", "content": "Hello"},
             {"role": "assistant", "content": "Hi"},
             {"role": "tool", "content": "tool output"},
@@ -87,9 +92,13 @@ async def test_anthropic_adapter_translates_messages_and_usage():
     assert response.usage.input_tokens == 150
     assert response.usage.cached_tokens == 40
     request = client.messages.request
-    assert request["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in request
     assert request["system"][0]["text"] == "Stable instructions"
     assert request["system"][0]["cache_control"] == {"type": "ephemeral"}
+    # A system block without an explicit tier marker (e.g. the Task tier's
+    # dynamic per-task header) must not be cached by default.
+    assert request["system"][1]["text"] == "Dynamic per-task header"
+    assert "cache_control" not in request["system"][1]
     assert request["messages"][-1] == {
         "role": "user",
         "content": "[tool result]\ntool output",
@@ -111,6 +120,31 @@ async def test_anthropic_adapter_normalizes_streaming():
     assert response.text == "Claude stream"
     assert response.usage.input_tokens == 40
     assert response.usage.cached_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_anthropic_adapter_omits_tools_when_not_provided():
+    client = _AnthropicClient()
+    adapter = AnthropicAdapter(client=client)
+
+    await adapter.complete([{"role": "user", "content": "Hello"}], "claude-sonnet-4")
+
+    assert "tools" not in client.messages.request
+
+
+@pytest.mark.asyncio
+async def test_anthropic_adapter_forwards_tools():
+    client = _AnthropicClient()
+    adapter = AnthropicAdapter(client=client)
+    tools = [{"name": "get_status", "description": "...", "input_schema": {"type": "object"}}]
+
+    await adapter.complete(
+        [{"role": "user", "content": "Hello"}],
+        "claude-sonnet-4",
+        tools=tools,
+    )
+
+    assert client.messages.request["tools"] == tools
 
 
 class _GoogleModels:

@@ -9,16 +9,32 @@ from typing import Any
 from sqlalchemy.orm import Session as DBSession
 
 from app.db.models import Project, Session as SessionModel, Task
+from app.services import tool_definitions as _tool_definitions
 
 logger = logging.getLogger(__name__)
 
+# Project context (description + context.md + auto-memory) is capped so a
+# large project doesn't dominate the cached prefix.
+PROJECT_CONTEXT_MAX_CHARS = 25_000
+_TRUNCATION_NOTICE = "\n\n[... project context truncated to fit 25KB cap ...]"
+
+# Auto-memory: how many recently completed tasks to summarize per project.
+PROJECT_MEMORY_TASK_LIMIT = 5
+
 
 class ContextHierarchy:
-    """Compose 3-tiered prompt context (Global -> Project -> Task) with Anthropic prompt caching markers."""
+    """Compose 3-tiered prompt context (Global -> Project -> Task) with Anthropic prompt caching markers.
 
-    def __init__(self, db: DBSession):
+    Optionally integrates with a compiled LangGraph pipeline (see
+    ``app.graph.builder.build_graph``): when ``graph`` is provided, the Task
+    tier enriches its system message with the gate pipeline's live state
+    (current gate, verdict, findings) read via the graph's checkpointer.
+    """
+
+    def __init__(self, db: DBSession, graph: Any | None = None):
         self.db = db
         self._global_context: list[dict[str, Any]] | None = None
+        self.graph = graph
 
     def _load_global(self) -> list[dict[str, Any]]:
         """Load global system prompt + gate rules."""
@@ -48,8 +64,35 @@ class ContextHierarchy:
             self._global_context = self._load_global()
         return [dict(m) for m in self._global_context]
 
+    def get_tool_definitions(self) -> list[dict[str, Any]]:
+        """Tool schemas that belong to the global context, alongside the system prompt.
+
+        Rarely-used tools are marked ``defer_loading`` (see
+        ``app.services.tool_definitions``) so their schemas are appended on
+        demand instead of always occupying context.
+        """
+        return _tool_definitions.get_tool_definitions()
+
+    def _project_memory(self, project_id: str) -> str | None:
+        """Auto-memory: summarize recently completed tasks for this project.
+
+        Lets the project tier "learn" from prior sessions without an LLM
+        call, using structured outcomes already recorded on ``Task``.
+        """
+        tasks = (
+            self.db.query(Task)
+            .filter(Task.project == project_id, Task.status == "done")
+            .order_by(Task.updated_at.desc())
+            .limit(PROJECT_MEMORY_TASK_LIMIT)
+            .all()
+        )
+        if not tasks:
+            return None
+        lines = [f"- [{t.id}] {t.title} (verdict: {t.verdict or 'n/a'})" for t in tasks]
+        return "[Project Memory: recent completed tasks]\n" + "\n".join(lines)
+
     def get_project_context(self, project_id: str | None) -> list[dict[str, Any]]:
-        """Project description + context.md. Cached per session/request."""
+        """Project description + context.md + auto-memory, capped at 25KB. Cached per session/request."""
         if not project_id:
             return []
         project = self.db.query(Project).filter(Project.id == project_id).first()
@@ -71,15 +114,52 @@ class ContextHierarchy:
                 except Exception as e:
                     logger.warning("Failed to read context file for %s: %s", project_id, e)
 
+        memory = self._project_memory(project_id)
+        if memory:
+            parts.append(memory)
+
         if not parts:
             return []
+
+        content = "\n\n".join(parts)
+        if len(content) > PROJECT_CONTEXT_MAX_CHARS:
+            keep = PROJECT_CONTEXT_MAX_CHARS - len(_TRUNCATION_NOTICE)
+            content = content[: max(0, keep)] + _TRUNCATION_NOTICE
 
         return [
             {
                 "role": "user",
-                "content": "\n\n".join(parts),
+                "content": content,
             }
         ]
+
+    def _graph_state_summary(self, task_id: str | None) -> str | None:
+        """Read live gate-pipeline state for ``task_id`` from the LangGraph checkpointer."""
+        if not self.graph or not task_id:
+            return None
+        try:
+            snapshot = self.graph.get_state({"configurable": {"thread_id": task_id}})
+        except Exception as e:
+            logger.warning("Failed to read LangGraph checkpoint for task %s: %s", task_id, e)
+            return None
+
+        values = getattr(snapshot, "values", None) if snapshot else None
+        if not values:
+            return None
+
+        parts: list[str] = []
+        gate = values.get("current_gate")
+        if gate is not None:
+            parts.append(f"current_gate={getattr(gate, 'value', gate)}")
+        verdict = values.get("verdict")
+        if verdict:
+            parts.append(f"verdict={verdict}")
+        findings = values.get("findings")
+        if findings:
+            parts.append(f"findings={'; '.join(findings)}")
+        if not parts:
+            return None
+        return "[LangGraph State] " + ", ".join(parts)
 
     def get_task_context(self, session: SessionModel) -> list[dict[str, Any]]:
         """Session messages for current task."""
@@ -94,6 +174,9 @@ class ContextHierarchy:
                 )
                 if task.plan:
                     content += f"\nTask Plan:\n{task.plan}"
+                graph_summary = self._graph_state_summary(session.task_id)
+                if graph_summary:
+                    content += f"\n{graph_summary}"
                 messages.append({"role": "system", "content": content})
 
         for message in list(session.messages or []):
