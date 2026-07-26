@@ -172,3 +172,113 @@ class TestErrorHandling:
                 result = compress_for_prompt(data)
                 # Should return original JSON on error
                 assert result == json.dumps(data, ensure_ascii=False)
+
+
+class TestGraphClientIntegration:
+    """Integration tests for graph_client compression."""
+
+    @pytest.mark.asyncio
+    async def test_get_impact_radius_compress_output(self):
+        """Test compress_output parameter in get_impact_radius."""
+        from app.services.graph_client import get_impact_radius
+
+        # Mock MCPClient
+        with patch("app.services.graph_client.MCPClient") as MockMCP:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = MagicMock(return_value=mock_client)
+            mock_client.__aexit__ = MagicMock(return_value=None)
+            mock_client.call_tool = MagicMock(return_value={
+                "impacted_files": ["file1.py", "file2.py", "file3.py"]
+            })
+            MockMCP.return_value = mock_client
+
+            # Without compression - returns list
+            result = await get_impact_radius("/repo", "main.py", use_cache=False)
+            assert isinstance(result, list)
+            assert "file1.py" in result
+
+            # With compression - returns string
+            result = await get_impact_radius("/repo", "main.py", use_cache=False, compress_output=True)
+            assert isinstance(result, str)
+            assert "file1.py" in result
+
+    @pytest.mark.asyncio
+    async def test_query_tests_for_compress_output(self):
+        """Test compress_output parameter in query_tests_for."""
+        from app.services.graph_client import query_tests_for
+
+        with patch("app.services.graph_client.MCPClient") as MockMCP:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = MagicMock(return_value=mock_client)
+            mock_client.__aexit__ = MagicMock(return_value=None)
+            mock_client.call_tool = MagicMock(return_value={
+                "results": [{"file_path": "test_main.py"}, {"file_path": "test_utils.py"}]
+            })
+            MockMCP.return_value = mock_client
+
+            # Without compression
+            result = await query_tests_for("/repo", "main.py", use_cache=False)
+            assert isinstance(result, list)
+
+            # With compression
+            result = await query_tests_for("/repo", "main.py", use_cache=False, compress_output=True)
+            assert isinstance(result, str)
+
+    @pytest.mark.asyncio
+    async def test_get_affected_flows_compress_output(self):
+        """Test compress_output parameter in get_affected_flows."""
+        from app.services.graph_client import get_affected_flows
+
+        with patch("app.services.graph_client.MCPClient") as MockMCP:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = MagicMock(return_value=mock_client)
+            mock_client.__aexit__ = MagicMock(return_value=None)
+            mock_client.call_tool = MagicMock(return_value={
+                "affected_flows": [{"name": "user-login"}, {"name": "task-create"}]
+            })
+            MockMCP.return_value = mock_client
+
+            # Without compression
+            result = await get_affected_flows("/repo", ["main.py"], use_cache=False)
+            assert isinstance(result, list)
+
+            # With compression
+            result = await get_affected_flows("/repo", ["main.py"], use_cache=False, compress_output=True)
+            assert isinstance(result, str)
+
+    @pytest.mark.asyncio
+    async def test_full_gate_flow_with_compression(self):
+        """Integration test: full gate flow with compression enabled."""
+        from app.services.graph_client import get_impact_radius, query_tests_for, get_affected_flows
+
+        with patch("app.services.graph_client.MCPClient") as MockMCP:
+            mock_client = MagicMock()
+            mock_client.__aenter__ = MagicMock(return_value=mock_client)
+            mock_client.__aexit__ = MagicMock(return_value=None)
+
+            # Simulate large MCP responses
+            large_files = [f"path/to/module_{i}/file_{i}.py" for i in range(50)]
+            large_tests = [{"file_path": f"tests/test_{i}.py"} for i in range(30)]
+            large_flows = [{"name": f"flow-{i}"} for i in range(20)]
+
+            mock_client.call_tool = MagicMock(side_effect=[
+                {"impacted_files": large_files},
+                {"results": large_tests},
+                {"affected_flows": large_flows},
+            ])
+            MockMCP.return_value = mock_client
+
+            # Simulate gate flow: fetch all data with compression
+            files = await get_impact_radius("/repo", "main.py", use_cache=False, compress_output=True)
+            tests = await query_tests_for("/repo", "main.py", use_cache=False, compress_output=True)
+            flows = await get_affected_flows("/repo", ["main.py"], use_cache=False, compress_output=True)
+
+            # All results should be compressed strings
+            assert isinstance(files, str)
+            assert isinstance(tests, str)
+            assert isinstance(flows, str)
+
+            # Data should still be present in compressed output
+            assert "module_0" in files
+            assert "test_0" in tests
+            assert "flow-0" in flows

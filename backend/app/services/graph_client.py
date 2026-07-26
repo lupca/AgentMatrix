@@ -2,6 +2,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, Union
 from app.services.mcp import MCPClient
+from app.core.compression import compress_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +54,18 @@ async def get_impact_radius(
     file: str,
     timeout: float = DEFAULT_TIMEOUT,
     use_cache: bool = True,
-) -> List[str]:
-    """Get files affected by changes to given file."""
+    compress_output: bool = False,
+) -> Union[List[str], str]:
+    """Get files affected by changes to given file.
+
+    Args:
+        compress_output: If True, return compressed string for prompt usage.
+    """
     cache_key = _make_cache_key("get_impact_radius", repo_root, file=file)
     if use_cache:
         cached = graph_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return compress_for_prompt(cached) if compress_output else cached
 
     try:
         async with MCPClient(repo_root=repo_root) as client:
@@ -90,10 +96,10 @@ async def get_impact_radius(
 
         if use_cache:
             graph_cache.set(cache_key, result)
-        return result
+        return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("get_impact_radius failed with fallback to []: %s", e)
-        return []
+        return compress_for_prompt([]) if compress_output else []
 
 
 async def semantic_search(
@@ -102,13 +108,18 @@ async def semantic_search(
     limit: int = 10,
     timeout: float = DEFAULT_TIMEOUT,
     use_cache: bool = True,
-) -> List[Dict[str, Any]]:
-    """Search nodes by semantic similarity."""
+    compress_output: bool = False,
+) -> Union[List[Dict[str, Any]], str]:
+    """Search nodes by semantic similarity.
+
+    Args:
+        compress_output: If True, return compressed string for prompt usage.
+    """
     cache_key = _make_cache_key("semantic_search", repo_root, query=query, limit=limit)
     if use_cache:
         cached = graph_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return compress_for_prompt(cached) if compress_output else cached
 
     try:
         async with MCPClient(repo_root=repo_root) as client:
@@ -131,10 +142,10 @@ async def semantic_search(
 
         if use_cache:
             graph_cache.set(cache_key, result)
-        return result
+        return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("semantic_search failed with fallback to []: %s", e)
-        return []
+        return compress_for_prompt([]) if compress_output else []
 
 
 async def query_tests_for(
@@ -142,13 +153,18 @@ async def query_tests_for(
     target: str,
     timeout: float = DEFAULT_TIMEOUT,
     use_cache: bool = True,
-) -> List[str]:
-    """Find test files covering a target file/function."""
+    compress_output: bool = False,
+) -> Union[List[str], str]:
+    """Find test files covering a target file/function.
+
+    Args:
+        compress_output: If True, return compressed string for prompt usage.
+    """
     cache_key = _make_cache_key("query_tests_for", repo_root, target=target)
     if use_cache:
         cached = graph_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return compress_for_prompt(cached) if compress_output else cached
 
     try:
         async with MCPClient(repo_root=repo_root) as client:
@@ -176,10 +192,10 @@ async def query_tests_for(
 
         if use_cache:
             graph_cache.set(cache_key, result)
-        return result
+        return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("query_tests_for failed with fallback to []: %s", e)
-        return []
+        return compress_for_prompt([]) if compress_output else []
 
 
 async def get_affected_flows(
@@ -187,13 +203,18 @@ async def get_affected_flows(
     files: List[str],
     timeout: float = DEFAULT_TIMEOUT,
     use_cache: bool = True,
-) -> List[str]:
-    """Get business flows affected by file changes."""
+    compress_output: bool = False,
+) -> Union[List[str], str]:
+    """Get business flows affected by file changes.
+
+    Args:
+        compress_output: If True, return compressed string for prompt usage.
+    """
     cache_key = _make_cache_key("get_affected_flows", repo_root, files=tuple(files))
     if use_cache:
         cached = graph_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return compress_for_prompt(cached) if compress_output else cached
 
     try:
         async with MCPClient(repo_root=repo_root) as client:
@@ -222,10 +243,10 @@ async def get_affected_flows(
 
         if use_cache:
             graph_cache.set(cache_key, result)
-        return result
+        return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("get_affected_flows failed with fallback to []: %s", e)
-        return []
+        return compress_for_prompt([]) if compress_output else []
 
 
 async def query_graph(
