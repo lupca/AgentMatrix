@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Text, Integer, Date, DateTime, ForeignKey, JSON, Boolean, CheckConstraint
+from sqlalchemy import Column, String, Text, Integer, Date, DateTime, ForeignKey, JSON, Boolean, CheckConstraint, Float
 from sqlalchemy.orm import validates, relationship
 from sqlalchemy.sql import func
 from app.db.base import Base
@@ -10,7 +10,7 @@ class Task(Base):
     __tablename__ = "tasks"
 
     id = Column(String(20), primary_key=True)
-    project = Column(String(50), nullable=False, index=True)
+    project = Column(String(50), ForeignKey("projects.id"), nullable=False, index=True)
     title = Column(Text, nullable=False)
     raw_input = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="todo", index=True)
@@ -124,6 +124,9 @@ class Project(Base):
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="active")
+    repo_root = Column(String(255), nullable=True)
+    task_prefix = Column(String(20), nullable=True)
+    graph_status = Column(String(20), nullable=True, default="idle")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -136,6 +139,11 @@ class Agent(Base):
     role = Column(String(50), nullable=False)
     capabilities = Column(JSON, default=list)
     status = Column(String(20), nullable=False, default="idle")
+    type = Column(String(50), nullable=True)
+    model = Column(String(50), nullable=True)
+    effort = Column(String(20), nullable=True)
+    cli = Column(String(50), nullable=True)
+    success_rate = Column(Float, nullable=True, default=0.0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
