@@ -14,6 +14,7 @@ export interface AgentFormData {
   agent_type: AgentType;
   provider?: AgentProvider;
   api_key?: string;
+  base_url?: string;
   is_default: boolean;
 }
 
@@ -52,6 +53,7 @@ export const AgentForm: React.FC<AgentFormProps> = ({
   const [agentType, setAgentType] = useState<AgentType>('cli');
   const [provider, setProvider] = useState<AgentProvider>('anthropic');
   const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
   const [showApiKey, setShowApiKey] = useState(false);
   const [validationError, setValidationError] = useState('');
   const [isDefault, setIsDefault] = useState(false);
@@ -68,6 +70,7 @@ export const AgentForm: React.FC<AgentFormProps> = ({
     setAgentType(agent?.agent_type || (agent?.provider ? 'api' : 'cli'));
     setProvider(agent?.provider || 'anthropic');
     setApiKey('');
+    setBaseUrl(agent?.base_url || '');
     setShowApiKey(false);
     setValidationError('');
     setIsDefault(Boolean(agent?.is_default));
@@ -100,6 +103,7 @@ export const AgentForm: React.FC<AgentFormProps> = ({
       agent_type: agentType,
       provider: agentType === 'api' ? provider : undefined,
       api_key: agentType === 'api' ? apiKey.trim() || undefined : undefined,
+      base_url: agentType === 'api' ? baseUrl.trim() : undefined,
       is_default: role === 'coordinator' && isDefault,
     });
   };
@@ -207,6 +211,18 @@ export const AgentForm: React.FC<AgentFormProps> = ({
                 {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
               </button>
             </div>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-semibold uppercase tracking-wider text-gray-300">API Base URL (optional)</label>
+            <input
+              type="url"
+              value={baseUrl}
+              onChange={(event) => setBaseUrl(event.target.value)}
+              className={inputClass}
+              placeholder="https://api.siliconflow.cn/v1"
+              autoComplete="url"
+            />
+            <p className="mt-1 text-[11px] text-gray-500">Leave empty for OpenAI, or enter a URL for an OpenAI-compatible API.</p>
           </div>
         </div>
       )}

@@ -13,6 +13,7 @@ export interface Agent {
   cli?: string | null;
   agent_type: AgentType;
   provider?: AgentProvider | null;
+  base_url?: string | null;
   has_api_key?: boolean;
   is_default?: boolean;
   created_at?: string | null;

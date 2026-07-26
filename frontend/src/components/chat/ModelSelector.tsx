@@ -31,9 +31,9 @@ export function providerForModel(model: string): CoordinatorProvider {
 
 function optionForAgent(agent: Agent): CoordinatorModelOption | null {
   if (!agent.model) return null;
-  const provider = agent.cli?.toLowerCase() === 'agy'
+  const provider = agent.provider || (agent.cli?.toLowerCase() === 'agy'
     ? 'google'
-    : providerForModel(agent.model);
+    : providerForModel(agent.model));
   return { label: agent.name, value: agent.model, provider };
 }
 
@@ -59,8 +59,8 @@ const ProviderBadge: React.FC<ProviderBadgeProps> = ({ provider }) => (
 
 export interface ModelSelectorProps {
   currentModel?: string | null;
-  onModelChange: (model: string) => void | Promise<void>;
-  onDefaultModelChange?: (model: string) => void;
+  onModelChange: (model: string, provider?: CoordinatorProvider) => void | Promise<void>;
+  onDefaultModelChange?: (model: string, provider?: CoordinatorProvider) => void;
   disabled?: boolean;
   isLoading?: boolean;
   className?: string;
@@ -105,7 +105,10 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
             : options;
           setModels(orderedOptions);
           if (!currentModelRef.current && defaultAgent?.model) {
-            onDefaultModelChange?.(defaultAgent.model);
+            onDefaultModelChange?.(
+              defaultAgent.model,
+              optionForAgent(defaultAgent)?.provider,
+            );
           }
         }
       })
@@ -161,7 +164,17 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
           id="coordinator-model-selector"
           data-testid="model-selector"
           value={selectedModel}
-          onChange={(event) => onModelChange(event.target.value)}
+          onChange={(event) => {
+            const model = event.target.value;
+            const selected = models.find((option) => option.value === model);
+            const selectedProvider = selected?.provider;
+            onModelChange(
+              model,
+              selectedProvider && selectedProvider !== providerForModel(model)
+                ? selectedProvider
+                : undefined,
+            );
+          }}
           disabled={isDisabled}
           aria-label="Select coordinator model"
           aria-busy={isLoading}

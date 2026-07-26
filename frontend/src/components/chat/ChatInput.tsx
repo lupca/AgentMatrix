@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Send, Loader2, Sparkles } from 'lucide-react';
 import { Task } from '../../types/task';
 import { QuickActions } from './QuickActions';
-import { ModelSelector } from './ModelSelector';
+import { CoordinatorProvider, ModelSelector } from './ModelSelector';
 
 interface ChatInputProps {
   onSendMessage: (message: string) => Promise<void> | void;
@@ -12,8 +12,8 @@ interface ChatInputProps {
   placeholder?: string;
   task?: Task;
   currentModel?: string | null;
-  onModelChange?: (model: string) => void | Promise<void>;
-  onDefaultModelChange?: (model: string) => void;
+  onModelChange?: (model: string, provider?: CoordinatorProvider) => void | Promise<void>;
+  onDefaultModelChange?: (model: string, provider?: CoordinatorProvider) => void;
   isModelLoading?: boolean;
 }
 

@@ -143,20 +143,21 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     }
   }, [threadId, taskId, taskTitle]);
 
-  const handleModelChange = async (model: string) => {
+  const handleModelChange = async (model: string, provider?: CoordinatorProvider) => {
     const previousModel = selectedModel;
     const previousProvider = selectedProvider;
+    const nextProvider = provider || providerForModel(model);
     setSelectedModel(model);
-    setSelectedProvider(providerForModel(model));
+    setSelectedProvider(nextProvider);
 
     try {
-      const updatedSession = await updateSessionModel(model);
+      const updatedSession = await updateSessionModel(model, nextProvider);
       const persistedModel = updatedSession.selected_model || model;
       setSessionId(updatedSession.id || sessionId || threadId);
       setSelectedModel(persistedModel);
       setSelectedProvider(
         (updatedSession.selected_provider as CoordinatorProvider | null) ||
-          providerForModel(persistedModel),
+          nextProvider,
       );
       showSuccess(`Coordinator switched to ${persistedModel}`);
     } catch (err) {
@@ -445,9 +446,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           onTaskAction={onTaskAction}
           currentModel={selectedModel}
           onModelChange={handleModelChange}
-          onDefaultModelChange={(model) => {
+          onDefaultModelChange={(model, provider) => {
             setSelectedModel(model);
-            setSelectedProvider(providerForModel(model));
+            setSelectedProvider(provider || providerForModel(model));
           }}
           isModelLoading={isModelSwitching}
           placeholder={`Message Control Tower AI (${taskId ? `Task ${taskId}` : 'Assistant'})...`}

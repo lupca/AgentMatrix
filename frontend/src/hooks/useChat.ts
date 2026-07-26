@@ -1,6 +1,7 @@
 import { useCallback, useState } from 'react';
 import { api } from '../lib/api';
 import {
+  CoordinatorProvider,
   CoordinatorModelOption,
   providerForModel,
 } from '../components/chat/ModelSelector';
@@ -21,6 +22,7 @@ export function modelOptionForValue(model: string): CoordinatorModelOption {
 export async function updateSessionModel(
   sessionId: string,
   model: string,
+  provider: CoordinatorProvider = providerForModel(model),
 ): Promise<ChatSession> {
   if (!sessionId) {
     throw new Error('A session is required before selecting a coordinator model.');
@@ -28,7 +30,7 @@ export async function updateSessionModel(
 
   return api.patch<ChatSession>(`/sessions/${encodeURIComponent(sessionId)}`, {
     selected_model: model,
-    selected_provider: providerForModel(model),
+    selected_provider: provider,
   });
 }
 
@@ -36,10 +38,10 @@ export function useChat(sessionId?: string) {
   const [isModelSwitching, setIsModelSwitching] = useState(false);
 
   const persistModel = useCallback(
-    async (model: string) => {
+    async (model: string, provider?: CoordinatorProvider) => {
       setIsModelSwitching(true);
       try {
-        return await updateSessionModel(sessionId || '', model);
+        return await updateSessionModel(sessionId || '', model, provider);
       } finally {
         setIsModelSwitching(false);
       }
