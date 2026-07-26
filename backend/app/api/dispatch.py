@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
-from app.db.models import Agent, AgentRun, Project, Task
-from app.services.command_builder import build_dispatch_command
+from app.db.models import Agent, AgentRun, Task
+from app.services.task_orchestration import (
+    ModeViolationError,
+    OrchestrationError,
+    PrerequisiteError,
+    TaskNotFoundError,
+    TaskOrchestrationService,
+    TransitionConflictError,
+    TransitionResult,
+)
 from app.workers.agent_runner import run_agent
 from app.workers.output_streamer import publish_status, request_cancel
 
@@ -21,14 +30,23 @@ class DispatchRequest(BaseModel):
     task_id: str
     agent_id: str
     timeout_seconds: int = Field(default=14_400, ge=1, le=14_400)
+    actor: str = "api"
+    idempotency_key: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
 
 class DispatchResponse(BaseModel):
-    run_id: str
+    run_id: str | None = None
     task_id: str
     agent_id: str
-    command: str
+    command: str | None = None
     status: str
+    gate_record_id: int
+
+
+class GateDecisionRequest(BaseModel):
+    decision: str
+    actor: str
+    idempotency_key: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
 
 class AgentRunResponse(BaseModel):
@@ -65,72 +83,112 @@ def dispatch_agent(req: DispatchRequest, db: Session = Depends(get_db)) -> Dispa
     if agent is None:
         raise HTTPException(status_code=404, detail=f"Agent {req.agent_id} not found")
 
-    active_run = (
-        db.query(AgentRun)
-        .filter(
-            AgentRun.task_id == req.task_id,
-            AgentRun.status.in_(["queued", "running"]),
-        )
-        .first()
-    )
-    if active_run is not None:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Task {req.task_id} already has active run: {active_run.id}",
-        )
-
-    project = db.query(Project).filter(Project.id == task.project).first()
+    service = TaskOrchestrationService(db)
     try:
-        command, repo_root, cli = build_dispatch_command(task, agent, project)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        result = service.request_dispatch(
+            task_id=req.task_id,
+            agent_id=req.agent_id,
+            actor=req.actor,
+            idempotency_key=req.idempotency_key,
+            timeout_seconds=req.timeout_seconds,
+        )
+    except OrchestrationError as exc:
+        _raise_orchestration_http(exc)
+    if result.agent_run is not None:
+        _enqueue_dispatch(result, service)
+    return _dispatch_response(result, req.agent_id)
 
-    run = AgentRun(
-        task_id=req.task_id,
-        agent_id=req.agent_id,
-        cli=cli,
-        command=command,
-        status="queued",
-        timeout_seconds=req.timeout_seconds,
+
+@router.post("/gates/{gate_record_id}/decision", response_model=DispatchResponse)
+def decide_gate(
+    gate_record_id: int,
+    req: GateDecisionRequest,
+    db: Session = Depends(get_db),
+) -> DispatchResponse:
+    service = TaskOrchestrationService(db)
+    try:
+        result = service.decide_gate(
+            gate_record_id=gate_record_id,
+            decision=req.decision,
+            actor=req.actor,
+            idempotency_key=req.idempotency_key,
+        )
+    except OrchestrationError as exc:
+        _raise_orchestration_http(exc)
+    if result.agent_run is not None:
+        _enqueue_dispatch(result, service)
+    agent_id = (
+        result.agent_run.agent_id
+        if result.agent_run is not None
+        else str((result.gate_record.input_payload or {}).get("agent_id", ""))
     )
-    task.status = "dispatched"
-    task.executor = req.agent_id
-    task.dispatched_at = datetime.now(timezone.utc)
-    db.add(run)
-    db.commit()
-    db.refresh(run)
+    return _dispatch_response(result, agent_id)
 
+
+def _dispatch_response(
+    result: TransitionResult,
+    agent_id: str,
+) -> DispatchResponse:
+    return DispatchResponse(
+        run_id=result.agent_run.id if result.agent_run is not None else None,
+        task_id=result.task.id,
+        agent_id=agent_id,
+        command=result.agent_run.command if result.agent_run is not None else None,
+        status=(
+            result.agent_run.status
+            if result.agent_run is not None
+            else result.gate_record.status
+        ),
+        gate_record_id=result.gate_record.id,
+    )
+
+
+def _enqueue_dispatch(
+    result: TransitionResult,
+    service: TaskOrchestrationService,
+) -> None:
+    run = result.agent_run
+    context = result.context or {}
+    if run is None:
+        return
     try:
         message = run_agent.send(
             run.id,
-            req.task_id,
-            command,
-            repo_root,
-            req.timeout_seconds,
+            run.task_id,
+            run.command,
+            str(context["repo_root"]),
+            run.timeout_seconds,
         )
         message_id = getattr(message, "message_id", None)
         if message_id:
             run.dramatiq_message_id = str(message_id)
-            db.commit()
+            service.db.commit()
     except Exception as exc:
-        run.status = "failed"
-        run.error_message = f"Could not queue run: {exc}"
-        run.completed_at = datetime.now(timezone.utc)
-        task.status = "todo"
-        task.error = run.error_message
-        db.commit()
+        error = f"Could not queue run: {exc}"
+        service.record_dispatch_queue_failure(
+            run_id=run.id,
+            error=error,
+            actor="system:dispatch-queue",
+            idempotency_key=f"{result.gate_record.idempotency_key}:queue-failure",
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=run.error_message,
+            detail=error,
         ) from exc
 
-    return DispatchResponse(
-        run_id=run.id,
-        task_id=req.task_id,
-        agent_id=req.agent_id,
-        command=command,
-        status="queued",
-    )
+
+def _raise_orchestration_http(exc: OrchestrationError) -> None:
+    if isinstance(exc, TaskNotFoundError):
+        code = status.HTTP_404_NOT_FOUND
+    elif isinstance(exc, TransitionConflictError):
+        code = status.HTTP_409_CONFLICT
+    elif isinstance(exc, ModeViolationError):
+        code = status.HTTP_403_FORBIDDEN
+    elif isinstance(exc, PrerequisiteError):
+        code = status.HTTP_422_UNPROCESSABLE_ENTITY
+    else:
+        code = status.HTTP_409_CONFLICT
+    raise HTTPException(status_code=code, detail=str(exc)) from exc
 
 
 @router.get("/dispatch/{run_id}", response_model=AgentRunResponse)
@@ -161,9 +219,14 @@ def cancel_run(run_id: str, db: Session = Depends(get_db)) -> dict[str, str]:
             detail=f"Could not signal cancellation: {exc}",
         ) from exc
 
-    run.status = "cancelled"
-    run.error_message = "Cancelled by user"
-    run.completed_at = datetime.now(timezone.utc)
-    db.commit()
+    service = TaskOrchestrationService(db)
+    try:
+        service.cancel_run(
+            run_id=run_id,
+            actor="api",
+            idempotency_key=f"cancel:{run_id}",
+        )
+    except OrchestrationError as exc:
+        _raise_orchestration_http(exc)
     publish_status(run_id, "cancelled", error=run.error_message)
     return {"run_id": run_id, "status": "cancelled"}

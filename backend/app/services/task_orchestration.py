@@ -1,0 +1,835 @@
+"""Authoritative task lifecycle transitions and gate decision ledger."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Literal
+
+from sqlalchemy.orm import Session
+
+from app.db.models import Agent, AgentRun, AuditLog, GateRecord, Project, Task
+from app.services.command_builder import build_dispatch_command
+
+GateDecision = Literal["approved", "rejected"]
+
+
+class OrchestrationError(RuntimeError):
+    """Base error for a rejected orchestration intent."""
+
+
+class TaskNotFoundError(OrchestrationError):
+    pass
+
+
+class TransitionConflictError(OrchestrationError):
+    pass
+
+
+class ModeViolationError(OrchestrationError):
+    pass
+
+
+class PrerequisiteError(OrchestrationError):
+    pass
+
+
+class IdempotencyConflictError(OrchestrationError):
+    pass
+
+
+@dataclass(frozen=True)
+class TransitionResult:
+    task: Task
+    gate_record: GateRecord
+    applied: bool
+    agent_run: AgentRun | None = None
+    context: dict[str, Any] | None = None
+
+    @property
+    def status(self) -> str:
+        return self.gate_record.status
+
+
+class TaskOrchestrationService:
+    """The only application service allowed to mutate task lifecycle fields."""
+
+    MODES = {"supervised", "plan-only", "bypass"}
+    GATED_ACTIONS = {"dispatch", "review_order", "verdict"}
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def transition(self, action: str, **kwargs: Any) -> TransitionResult:
+        """Generic entry point used by adapters that select an action dynamically."""
+        handlers = {
+            "dispatch": self.request_dispatch,
+            "review_order": self.request_review,
+            "verdict": self.request_verdict,
+            "execution_succeeded": self.record_execution_success,
+            "execution_failed": self.record_execution_failure,
+            "cancel": self.cancel_run,
+            "decide": self.decide_gate,
+        }
+        try:
+            handler = handlers[action]
+        except KeyError as exc:
+            raise OrchestrationError(f"Unknown transition action: {action}") from exc
+        return handler(**kwargs)
+
+    def request_dispatch(
+        self,
+        *,
+        task_id: str,
+        agent_id: str,
+        actor: str,
+        idempotency_key: str,
+        timeout_seconds: int = 14_400,
+        expected_status: str = "todo",
+    ) -> TransitionResult:
+        task = self._task(task_id)
+        agent = self.db.get(Agent, agent_id)
+        if agent is None:
+            raise PrerequisiteError(f"Agent {agent_id} not found")
+        project = self.db.get(Project, task.project)
+        try:
+            command, repo_root, cli = build_dispatch_command(task, agent, project)
+        except ValueError as exc:
+            raise PrerequisiteError(str(exc)) from exc
+
+        return self._request_gate(
+            task=task,
+            gate_type="dispatch",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            expected_status=expected_status,
+            payload={
+                "agent_id": agent_id,
+                "command": command,
+                "repo_root": repo_root,
+                "cli": cli,
+                "timeout_seconds": timeout_seconds,
+            },
+        )
+
+    def request_review(
+        self,
+        *,
+        task_id: str,
+        reviewer: str,
+        actor: str,
+        idempotency_key: str,
+        expected_status: str = "awaiting-review",
+    ) -> TransitionResult:
+        task = self._task(task_id)
+        if not task.result_ref or not task.result_ref.strip():
+            raise PrerequisiteError("result_ref is required before review")
+        if not reviewer or not reviewer.strip():
+            raise PrerequisiteError("reviewer is required")
+        self._require_independent(task.executor, reviewer)
+        return self._request_gate(
+            task=task,
+            gate_type="review_order",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            expected_status=expected_status,
+            payload={"reviewer": reviewer, "result_ref": task.result_ref},
+        )
+
+    def request_verdict(
+        self,
+        *,
+        task_id: str,
+        verdict: str,
+        ac_results: Any,
+        actor: str,
+        idempotency_key: str,
+        findings: list[Any] | None = None,
+        expected_status: str = "in-review",
+    ) -> TransitionResult:
+        task = self._task(task_id)
+        normalized_verdict = verdict.strip().lower()
+        if normalized_verdict not in {"pass", "changes"}:
+            raise PrerequisiteError("Verdict must be pass or changes")
+        self._validate_verdict_prerequisites(
+            task,
+            actor=actor,
+            verdict=normalized_verdict,
+            ac_results=ac_results,
+        )
+        return self._request_gate(
+            task=task,
+            gate_type="verdict",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            expected_status=expected_status,
+            payload={
+                "verdict": normalized_verdict,
+                "ac_results": ac_results,
+                "findings": findings or [],
+                "result_ref": task.result_ref,
+                "reviewer": task.reviewer,
+            },
+        )
+
+    def decide_gate(
+        self,
+        *,
+        gate_record_id: int,
+        decision: GateDecision,
+        actor: str,
+        idempotency_key: str,
+    ) -> TransitionResult:
+        if decision not in {"approved", "rejected"}:
+            raise PrerequisiteError("Decision must be approved or rejected")
+        pending = (
+            self.db.query(GateRecord)
+            .filter(GateRecord.id == gate_record_id)
+            .with_for_update()
+            .first()
+        )
+        if pending is None or pending.status != "pending":
+            raise TransitionConflictError(
+                f"Pending gate record {gate_record_id} not found"
+            )
+        task = self._task(pending.task_id)
+        decision_payload = {
+            "pending_id": pending.id,
+            "decision": decision,
+            "gate_type": pending.gate_type,
+        }
+        input_hash = self._input_hash(decision_payload)
+        existing = self._idempotent_record(task.id, idempotency_key, input_hash)
+        if existing is not None:
+            return self._result_for_record(task, existing)
+
+        prior_decision = (
+            self.db.query(GateRecord)
+            .filter(
+                GateRecord.parent_id == pending.id,
+                GateRecord.status.in_(["approved", "rejected"]),
+            )
+            .first()
+        )
+        if prior_decision is not None:
+            raise TransitionConflictError(
+                f"Gate record {pending.id} was already {prior_decision.status}"
+            )
+
+        effective_decision = decision
+        reason: str | None = None
+        if task.mode == "plan-only" and pending.gate_type in {"dispatch", "verdict"}:
+            effective_decision = "rejected"
+            reason = "plan-only mode blocks this transition"
+
+        run: AgentRun | None = None
+        output_ref: str | None = None
+        if effective_decision == "approved":
+            run, output_ref = self._apply_gate(
+                task,
+                pending.gate_type,
+                pending.input_payload or {},
+            )
+
+        record = self._ledger_record(
+            task=task,
+            gate_type=pending.gate_type,
+            status=effective_decision,
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=decision_payload,
+            output_ref=output_ref,
+            output_payload=self._gate_output(task, pending.gate_type),
+            error_message=reason,
+            parent_id=pending.id,
+        )
+        task.awaiting_approval = False
+        task.approval_prompt = None
+        self._audit(task, record, reason=reason)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        if run is not None:
+            self.db.refresh(run)
+        return TransitionResult(
+            task=task,
+            gate_record=record,
+            applied=effective_decision == "approved",
+            agent_run=run,
+            context=(pending.input_payload or {}) if run is not None else None,
+        )
+
+    def record_execution_success(
+        self,
+        *,
+        task_id: str,
+        result_ref: str | None,
+        actor: str,
+        idempotency_key: str,
+        expected_status: str = "dispatched",
+        run_id: str | None = None,
+    ) -> TransitionResult:
+        task = self._task(task_id)
+        payload = {
+            "expected_status": expected_status,
+            "result_ref": result_ref,
+            "run_id": run_id,
+        }
+        input_hash = self._input_hash(payload)
+        existing = self._idempotent_record(task_id, idempotency_key, input_hash)
+        if existing is not None:
+            return self._result_for_record(task, existing)
+        self._assert_status(task, expected_status)
+        now = datetime.now(timezone.utc)
+        task.status = "awaiting-review"
+        task.current_gate = "review_order"
+        task.result_ref = result_ref
+        task.error = None
+        task.updated_at = now
+        record = self._ledger_record(
+            task=task,
+            gate_type="execution",
+            status="approved",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=payload,
+            output_ref=result_ref or run_id,
+            output_payload={"status": "awaiting-review", "run_id": run_id},
+        )
+        self._audit(task, record)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        return TransitionResult(task, record, True)
+
+    def record_execution_failure(
+        self,
+        *,
+        task_id: str,
+        error: str,
+        actor: str,
+        idempotency_key: str,
+        expected_status: str = "dispatched",
+        run_id: str | None = None,
+    ) -> TransitionResult:
+        task = self._task(task_id)
+        payload = {
+            "expected_status": expected_status,
+            "error": error,
+            "run_id": run_id,
+        }
+        input_hash = self._input_hash(payload)
+        existing = self._idempotent_record(task_id, idempotency_key, input_hash)
+        if existing is not None:
+            return self._result_for_record(task, existing)
+        self._assert_status(task, expected_status)
+        task.status = "failed"
+        task.error = error
+        task.updated_at = datetime.now(timezone.utc)
+        record = self._ledger_record(
+            task=task,
+            gate_type="execution",
+            status="rejected",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=payload,
+            output_ref=run_id,
+            error_message=error,
+        )
+        self._audit(task, record, reason=error)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        return TransitionResult(task, record, True)
+
+    def record_dispatch_queue_failure(
+        self,
+        *,
+        run_id: str,
+        error: str,
+        actor: str,
+        idempotency_key: str,
+    ) -> TransitionResult:
+        run = self.db.get(AgentRun, run_id)
+        if run is None:
+            raise TransitionConflictError(f"Run {run_id} not found")
+        task = self._task(run.task_id)
+        payload = {"run_id": run_id, "error": error}
+        input_hash = self._input_hash(payload)
+        existing = self._idempotent_record(task.id, idempotency_key, input_hash)
+        if existing is not None:
+            return self._result_for_record(task, existing)
+        self._assert_status(task, "dispatched")
+        now = datetime.now(timezone.utc)
+        run.status = "failed"
+        run.error_message = error
+        run.completed_at = now
+        task.status = "todo"
+        task.error = error
+        task.updated_at = now
+        record = self._ledger_record(
+            task=task,
+            gate_type="dispatch_queue",
+            status="rejected",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=payload,
+            output_ref=run_id,
+            error_message=error,
+        )
+        self._audit(task, record, reason=error)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        return TransitionResult(task, record, True, agent_run=run)
+
+    def cancel_run(
+        self,
+        *,
+        run_id: str,
+        actor: str,
+        idempotency_key: str,
+    ) -> TransitionResult:
+        run = self.db.get(AgentRun, run_id)
+        if run is None:
+            raise TransitionConflictError(f"Run {run_id} not found")
+        task = self._task(run.task_id)
+        payload = {"run_id": run_id}
+        input_hash = self._input_hash(payload)
+        existing = self._idempotent_record(task.id, idempotency_key, input_hash)
+        if existing is not None:
+            return self._result_for_record(task, existing)
+        if run.status not in {"queued", "running"}:
+            raise TransitionConflictError(
+                f"Cannot cancel run in status: {run.status}"
+            )
+        now = datetime.now(timezone.utc)
+        run.status = "cancelled"
+        run.error_message = "Cancelled by user"
+        run.completed_at = now
+        if task.status == "dispatched":
+            task.status = "todo"
+        task.updated_at = now
+        record = self._ledger_record(
+            task=task,
+            gate_type="cancellation",
+            status="approved",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=payload,
+            output_ref=run_id,
+            output_payload={"run_status": "cancelled", "task_status": task.status},
+        )
+        self._audit(task, record)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        return TransitionResult(task, record, True, agent_run=run)
+
+    def _request_gate(
+        self,
+        *,
+        task: Task,
+        gate_type: str,
+        actor: str,
+        idempotency_key: str,
+        expected_status: str,
+        payload: dict[str, Any],
+    ) -> TransitionResult:
+        self._validate_common(task, actor, idempotency_key)
+        request_payload = {
+            **payload,
+            "expected_status": expected_status,
+            "gate_type": gate_type,
+        }
+        input_hash = self._input_hash(request_payload)
+        existing = self._idempotent_record(task.id, idempotency_key, input_hash)
+        if existing is not None:
+            return self._result_for_record(task, existing)
+        self._assert_status(task, expected_status)
+        if gate_type == "dispatch":
+            active_run = (
+                self.db.query(AgentRun)
+                .filter(
+                    AgentRun.task_id == task.id,
+                    AgentRun.status.in_(["queued", "running"]),
+                )
+                .first()
+            )
+            if active_run is not None:
+                raise TransitionConflictError(
+                    f"Task {task.id} already has active run: {active_run.id}"
+                )
+
+        if task.mode == "plan-only" and gate_type in {"dispatch", "verdict"}:
+            record = self._ledger_record(
+                task=task,
+                gate_type=gate_type,
+                status="rejected",
+                actor=actor,
+                idempotency_key=idempotency_key,
+                input_hash=input_hash,
+                payload=request_payload,
+                error_message="plan-only mode blocks this transition",
+            )
+            self._audit(task, record, reason=record.error_message)
+            self.db.commit()
+            raise ModeViolationError(record.error_message)
+
+        if task.mode == "supervised":
+            record = self._ledger_record(
+                task=task,
+                gate_type=gate_type,
+                status="pending",
+                actor=actor,
+                idempotency_key=idempotency_key,
+                input_hash=input_hash,
+                payload=request_payload,
+            )
+            task.awaiting_approval = True
+            task.approval_prompt = (
+                f"Approve {gate_type} gate for task {task.id} "
+                f"(request {idempotency_key})?"
+            )
+            self._audit(task, record)
+            self.db.commit()
+            self.db.refresh(task)
+            self.db.refresh(record)
+            return TransitionResult(task, record, False)
+
+        run, output_ref = self._apply_gate(task, gate_type, request_payload)
+        record = self._ledger_record(
+            task=task,
+            gate_type=gate_type,
+            status="approved",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=request_payload,
+            output_ref=output_ref,
+            output_payload=self._gate_output(task, gate_type),
+        )
+        self._audit(task, record)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        if run is not None:
+            self.db.refresh(run)
+        return TransitionResult(
+            task,
+            record,
+            True,
+            agent_run=run,
+            context=request_payload if run is not None else None,
+        )
+
+    def _apply_gate(
+        self,
+        task: Task,
+        gate_type: str,
+        payload: dict[str, Any],
+    ) -> tuple[AgentRun | None, str | None]:
+        self._assert_status(task, str(payload["expected_status"]))
+        now = datetime.now(timezone.utc)
+        if gate_type == "dispatch":
+            run_id = str(uuid.uuid4())
+            run = AgentRun(
+                id=run_id,
+                task_id=task.id,
+                agent_id=str(payload["agent_id"]),
+                cli=str(payload["cli"]),
+                command=str(payload["command"]),
+                status="queued",
+                timeout_seconds=int(payload["timeout_seconds"]),
+            )
+            self.db.add(run)
+            task.status = "dispatched"
+            task.current_gate = "dispatch"
+            task.executor = str(payload["agent_id"])
+            task.dispatched_at = now
+            task.error = None
+            task.awaiting_approval = False
+            task.approval_prompt = None
+            return run, run_id
+        if gate_type == "review_order":
+            reviewer = str(payload["reviewer"])
+            if not task.result_ref or not task.result_ref.strip():
+                raise PrerequisiteError("result_ref is required before review")
+            self._require_independent(task.executor, reviewer)
+            task.reviewer = reviewer
+            task.status = "in-review"
+            task.current_gate = "verdict"
+            task.awaiting_approval = False
+            task.approval_prompt = None
+            return None, task.result_ref
+        if gate_type == "verdict":
+            verdict = str(payload["verdict"])
+            self._validate_verdict_prerequisites(
+                task,
+                actor=str(payload["reviewer"]),
+                verdict=verdict,
+                ac_results=payload["ac_results"],
+            )
+            task.verdict = verdict
+            task.findings = payload.get("findings") or []
+            task.current_gate = "verdict"
+            task.awaiting_approval = False
+            task.approval_prompt = None
+            if verdict == "pass":
+                task.status = "done"
+                task.completed_at = now
+            else:
+                task.status = "changes-requested"
+                task.completed_at = None
+            return None, verdict
+        raise OrchestrationError(f"Unsupported gate type: {gate_type}")
+
+    def _validate_verdict_prerequisites(
+        self,
+        task: Task,
+        *,
+        actor: str,
+        verdict: str,
+        ac_results: Any,
+    ) -> None:
+        self._assert_status(task, "in-review")
+        if not task.executor or not task.executor.strip():
+            raise PrerequisiteError("executor is required for verdict")
+        if not task.reviewer or not task.reviewer.strip():
+            raise PrerequisiteError("reviewer is required for verdict")
+        self._require_independent(task.executor, task.reviewer)
+        if self._principal(actor) != self._principal(task.reviewer):
+            raise PrerequisiteError("Only the assigned reviewer may submit a verdict")
+        if not task.result_ref or not task.result_ref.strip():
+            raise PrerequisiteError("result_ref is required for verdict")
+        evaluations = self._evaluation_results(ac_results)
+        required_count = max(1, len(task.acceptance_criteria or []))
+        if len(evaluations) < required_count:
+            raise PrerequisiteError(
+                "Acceptance-criteria evaluation results are incomplete"
+            )
+        if verdict == "pass" and not all(evaluations):
+            raise PrerequisiteError(
+                "A passing verdict requires every acceptance criterion to pass"
+            )
+
+    @staticmethod
+    def _evaluation_results(ac_results: Any) -> list[bool]:
+        if isinstance(ac_results, dict):
+            values = list(ac_results.values())
+        elif isinstance(ac_results, list):
+            values = ac_results
+        else:
+            raise PrerequisiteError(
+                "Acceptance-criteria evaluation results are required"
+            )
+        if not values:
+            raise PrerequisiteError(
+                "Acceptance-criteria evaluation results are required"
+            )
+        results: list[bool] = []
+        for value in values:
+            if isinstance(value, bool):
+                results.append(value)
+                continue
+            if isinstance(value, dict):
+                if isinstance(value.get("passed"), bool):
+                    results.append(value["passed"])
+                    continue
+                status = str(value.get("status", "")).strip().lower()
+                if status in {"pass", "passed", "met", "fail", "failed", "unmet"}:
+                    results.append(status in {"pass", "passed", "met"})
+                    continue
+            raise PrerequisiteError(
+                "Each acceptance-criteria result needs a boolean passed value"
+            )
+        return results
+
+    def _task(self, task_id: str) -> Task:
+        task = (
+            self.db.query(Task)
+            .filter(Task.id == task_id)
+            .with_for_update()
+            .first()
+        )
+        if task is None:
+            raise TaskNotFoundError(f"Task {task_id} not found")
+        return task
+
+    def _idempotent_record(
+        self,
+        task_id: str,
+        idempotency_key: str,
+        input_hash: str,
+    ) -> GateRecord | None:
+        record = (
+            self.db.query(GateRecord)
+            .filter(
+                GateRecord.task_id == task_id,
+                GateRecord.idempotency_key == idempotency_key,
+            )
+            .first()
+        )
+        if record is not None and record.input_hash != input_hash:
+            raise IdempotencyConflictError(
+                f"Idempotency key {idempotency_key!r} was reused with different input"
+            )
+        return record
+
+    def _result_for_record(
+        self,
+        task: Task,
+        record: GateRecord,
+    ) -> TransitionResult:
+        effective = record
+        if record.status == "pending":
+            decision = (
+                self.db.query(GateRecord)
+                .filter(GateRecord.parent_id == record.id)
+                .order_by(GateRecord.id.desc())
+                .first()
+            )
+            if decision is not None:
+                effective = decision
+        run = (
+            self.db.get(AgentRun, effective.output_ref)
+            if effective.gate_type == "dispatch" and effective.output_ref
+            else None
+        )
+        return TransitionResult(
+            task=task,
+            gate_record=effective,
+            applied=effective.status == "approved",
+            agent_run=run,
+            context=record.input_payload if run is not None else None,
+        )
+
+    def _ledger_record(
+        self,
+        *,
+        task: Task,
+        gate_type: str,
+        status: str,
+        actor: str,
+        idempotency_key: str,
+        input_hash: str,
+        payload: dict[str, Any],
+        output_ref: str | None = None,
+        output_payload: dict[str, Any] | None = None,
+        error_message: str | None = None,
+        parent_id: int | None = None,
+    ) -> GateRecord:
+        record = GateRecord(
+            task_id=task.id,
+            gate_type=gate_type,
+            status=status,
+            actor=actor,
+            mode=task.mode,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            output_ref=output_ref,
+            parent_id=parent_id,
+            executor=task.executor,
+            reviewer=task.reviewer,
+            input_payload=payload,
+            output_payload=output_payload,
+            error_message=error_message,
+        )
+        self.db.add(record)
+        return record
+
+    def _audit(
+        self,
+        task: Task,
+        record: GateRecord,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        self.db.flush()
+        self.db.add(
+            AuditLog(
+                task_id=task.id,
+                action=f"transition:{record.gate_type}:{record.status}",
+                actor=record.actor,
+                details={
+                    "gate_record_id": record.id,
+                    "idempotency_key": record.idempotency_key,
+                    "input_hash": record.input_hash,
+                    "mode": record.mode,
+                    "status": task.status,
+                    "reason": reason,
+                },
+            )
+        )
+
+    @staticmethod
+    def _gate_output(task: Task, gate_type: str) -> dict[str, Any]:
+        return {
+            "gate_type": gate_type,
+            "task_status": task.status,
+            "current_gate": task.current_gate,
+            "executor": task.executor,
+            "reviewer": task.reviewer,
+            "result_ref": task.result_ref,
+            "verdict": task.verdict,
+        }
+
+    @classmethod
+    def _validate_common(
+        cls,
+        task: Task,
+        actor: str,
+        idempotency_key: str,
+    ) -> None:
+        if task.mode not in cls.MODES:
+            raise ModeViolationError(f"Unsupported task mode: {task.mode}")
+        if not actor or not actor.strip():
+            raise PrerequisiteError("actor is required")
+        if not idempotency_key or not idempotency_key.strip():
+            raise PrerequisiteError("idempotency_key is required")
+        if len(idempotency_key) > 100:
+            raise PrerequisiteError("idempotency_key must be at most 100 characters")
+
+    @staticmethod
+    def _assert_status(task: Task, expected_status: str) -> None:
+        if task.status != expected_status:
+            raise TransitionConflictError(
+                f"Task {task.id} expected status {expected_status!r}, "
+                f"found {task.status!r}"
+            )
+
+    @classmethod
+    def _require_independent(
+        cls,
+        executor: str | None,
+        reviewer: str | None,
+    ) -> None:
+        if not executor or not executor.strip():
+            raise PrerequisiteError("executor is required")
+        if not reviewer or not reviewer.strip():
+            raise PrerequisiteError("reviewer is required")
+        if cls._principal(executor) == cls._principal(reviewer):
+            raise PrerequisiteError("Reviewer must differ from executor")
+
+    @staticmethod
+    def _principal(value: str) -> str:
+        return value.strip().casefold()
+
+    @staticmethod
+    def _input_hash(payload: dict[str, Any]) -> str:
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()

@@ -1,5 +1,20 @@
 import uuid
-from sqlalchemy import Column, String, Text, Integer, Date, DateTime, ForeignKey, JSON, Boolean, CheckConstraint, Float, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    JSON,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    event,
+)
 from sqlalchemy.orm import validates, relationship
 from sqlalchemy.sql import func
 from app.db.base import Base
@@ -44,16 +59,33 @@ class Task(Base):
     sessions = relationship("Session", back_populates="task", cascade="all, delete-orphan")
     gate_records = relationship("GateRecord", back_populates="task", cascade="all, delete-orphan")
     agent_runs = relationship("AgentRun", back_populates="task", cascade="all, delete-orphan")
+    llm_usages = relationship("LLMUsage", back_populates="task")
 
     __table_args__ = (
-        CheckConstraint("executor IS NULL OR reviewer IS NULL OR executor <> reviewer", name="ck_tasks_four_eyes"),
+        CheckConstraint(
+            "executor IS NULL OR reviewer IS NULL "
+            "OR lower(trim(executor)) <> lower(trim(reviewer))",
+            name="ck_tasks_four_eyes",
+        ),
+        CheckConstraint(
+            "status <> 'done' OR ("
+            "executor IS NOT NULL AND reviewer IS NOT NULL "
+            "AND lower(trim(executor)) <> lower(trim(reviewer)) "
+            "AND result_ref IS NOT NULL AND trim(result_ref) <> ''"
+            ")",
+            name="ck_tasks_done_invariants",
+        ),
     )
 
     @validates("executor", "reviewer")
     def validate_four_eyes(self, key, value):
         other_key = "reviewer" if key == "executor" else "executor"
         other_val = getattr(self, other_key, None)
-        if value and other_val and value == other_val:
+        if (
+            value
+            and other_val
+            and value.strip().casefold() == other_val.strip().casefold()
+        ):
             raise FourEyesViolation(
                 f"Four-eyes violation: reviewer '{value}' cannot be the same as executor '{other_val}'."
             )
@@ -67,6 +99,16 @@ class GateRecord(Base):
     task_id = Column(String(20), ForeignKey("tasks.id"), nullable=False, index=True)
     gate_type = Column(String(20), nullable=False, index=True)
     status = Column(String(20), nullable=False, default="pending")
+    actor = Column(String(50), nullable=False, default="system")
+    mode = Column(String(20), nullable=False, default="supervised")
+    idempotency_key = Column(
+        String(100),
+        nullable=False,
+        default=lambda: str(uuid.uuid4()),
+    )
+    input_hash = Column(String(64), nullable=False, default="0" * 64)
+    output_ref = Column(String(255), nullable=True)
+    parent_id = Column(Integer, ForeignKey("gate_records.id"), nullable=True, index=True)
     executor = Column(String(50), nullable=True)
     reviewer = Column(String(50), nullable=True)
     input_payload = Column(JSON, nullable=True)
@@ -78,18 +120,49 @@ class GateRecord(Base):
     task = relationship("Task", back_populates="gate_records")
 
     __table_args__ = (
-        CheckConstraint("executor IS NULL OR reviewer IS NULL OR executor <> reviewer", name="ck_gate_records_four_eyes"),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected')",
+            name="ck_gate_records_status",
+        ),
+        CheckConstraint(
+            "mode IN ('supervised', 'plan-only', 'bypass')",
+            name="ck_gate_records_mode",
+        ),
+        CheckConstraint(
+            "executor IS NULL OR reviewer IS NULL "
+            "OR lower(trim(executor)) <> lower(trim(reviewer))",
+            name="ck_gate_records_four_eyes",
+        ),
+        UniqueConstraint(
+            "task_id",
+            "idempotency_key",
+            name="uq_gate_records_task_idempotency",
+        ),
     )
 
     @validates("executor", "reviewer")
     def validate_four_eyes(self, key, value):
         other_key = "reviewer" if key == "executor" else "executor"
         other_val = getattr(self, other_key, None)
-        if value and other_val and value == other_val:
+        if (
+            value
+            and other_val
+            and value.strip().casefold() == other_val.strip().casefold()
+        ):
             raise FourEyesViolation(
                 f"Four-eyes violation: reviewer '{value}' cannot be the same as executor '{other_val}'."
             )
         return value
+
+
+@event.listens_for(GateRecord, "before_update")
+def _gate_records_are_append_only(*_args) -> None:
+    raise ValueError("GateRecord is append-only and cannot be updated")
+
+
+@event.listens_for(GateRecord, "before_delete")
+def _gate_records_cannot_be_deleted(*_args) -> None:
+    raise ValueError("GateRecord is immutable and cannot be deleted")
 
 
 class Session(Base):
@@ -106,6 +179,7 @@ class Session(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     task = relationship("Task", back_populates="sessions")
+    llm_usages = relationship("LLMUsage", back_populates="session")
 
 
 class AuditLog(Base):
@@ -197,6 +271,7 @@ class AgentRun(Base):
         cascade="all, delete-orphan",
         order_by="AgentOutputChunk.chunk_index",
     )
+    llm_usages = relationship("LLMUsage", back_populates="agent_run")
 
     __table_args__ = (
         CheckConstraint("timeout_seconds > 0", name="ck_agent_runs_timeout_positive"),
@@ -224,6 +299,53 @@ class AgentOutputChunk(Base):
     __table_args__ = (
         CheckConstraint("chunk_index >= 0", name="ck_output_chunks_index_nonnegative"),
         UniqueConstraint("run_id", "chunk_index", name="uq_output_chunks_run_index"),
+    )
+
+
+class LLMUsage(Base):
+    """Immutable token and cost ledger for one provider request."""
+
+    __tablename__ = "llm_usage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(
+        String(36),
+        ForeignKey("sessions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    task_id = Column(
+        String(20),
+        ForeignKey("tasks.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    agent_run_id = Column(
+        String(36),
+        ForeignKey("agent_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    model = Column(String(100), nullable=False, index=True)
+    provider = Column(String(30), nullable=False, index=True)
+    operation = Column(String(30), nullable=False, index=True)
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cached_tokens = Column(Integer, nullable=False, default=0)
+    cost_usd = Column(Numeric(14, 8), nullable=False, default=0)
+    latency_ms = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    session = relationship("Session", back_populates="llm_usages")
+    task = relationship("Task", back_populates="llm_usages")
+    agent_run = relationship("AgentRun", back_populates="llm_usages")
+
+    __table_args__ = (
+        CheckConstraint("input_tokens >= 0", name="ck_llm_usage_input_nonnegative"),
+        CheckConstraint("output_tokens >= 0", name="ck_llm_usage_output_nonnegative"),
+        CheckConstraint("cached_tokens >= 0", name="ck_llm_usage_cached_nonnegative"),
+        CheckConstraint("cost_usd >= 0", name="ck_llm_usage_cost_nonnegative"),
+        CheckConstraint("latency_ms >= 0", name="ck_llm_usage_latency_nonnegative"),
     )
 
 

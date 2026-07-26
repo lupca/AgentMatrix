@@ -83,7 +83,9 @@ def spec_gate(state: TaskState) -> TaskState:
         content = llm.complete(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=300,
-            temperature=0.3
+            temperature=0.3,
+            operation="spec",
+            task_id=state.task_id,
         )
         # Clean possible markdown block
         if "```" in content:

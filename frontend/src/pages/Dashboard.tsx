@@ -6,7 +6,7 @@ import StatusChart, { TaskStatusCounts, GateCounts } from '../components/dashboa
 import ProjectCards, { ProjectProgress } from '../components/dashboard/ProjectCards';
 import RecentActivity, { AuditItem } from '../components/dashboard/RecentActivity';
 import { Project, ProjectStats } from '../types/project';
-import { RefreshCw, LayoutDashboard, AlertCircle, ShieldAlert, Sparkles } from 'lucide-react';
+import { RefreshCw, LayoutDashboard, AlertCircle, Coins, Gauge } from 'lucide-react';
 
 export interface OverviewApiResponse {
   totalTasks?: number;
@@ -23,10 +23,52 @@ export interface OverviewApiResponse {
   kpis?: KpiData;
 }
 
+export interface TokenUsageBreakdown {
+  operation: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  cost_usd: number;
+  average_latency_ms: number;
+}
+
+export interface TokenStatsApiResponse {
+  total_calls: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cached_tokens: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  average_latency_ms: number;
+  by_operation: TokenUsageBreakdown[];
+}
+
+export interface TokenComparisonApiResponse {
+  baseline_input_tokens_per_cycle: number;
+  cycle_count: number;
+  v1_estimated_input_tokens: number;
+  v2_input_tokens: number;
+  v2_input_tokens_per_cycle: number;
+  tokens_saved: number;
+  reduction_percentage: number;
+  target_reduction_percentage: number;
+  target_met: boolean;
+}
+
+const formatTokens = (value: number): string => {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+  return value.toLocaleString();
+};
+
 export const Dashboard: React.FC = () => {
   const { user } = useAppStore();
   const [data, setData] = useState<OverviewApiResponse | null>(null);
   const [projects, setProjects] = useState<ProjectProgress[]>([]);
+  const [tokenStats, setTokenStats] = useState<TokenStatsApiResponse | null>(null);
+  const [tokenComparison, setTokenComparison] = useState<TokenComparisonApiResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
@@ -43,9 +85,17 @@ export const Dashboard: React.FC = () => {
     try {
       // Project progress is not included in /api/stats/overview. Fetch the
       // project registry separately, then combine it with task statistics.
-      const [res, projectList] = await Promise.all([
+      const [res, projectList, usage, comparison] = await Promise.all([
         api.get<OverviewApiResponse>('/stats/overview'),
         api.get<Project[]>('/projects'),
+        api.get<TokenStatsApiResponse>('/stats/tokens').catch((err) => {
+          console.warn('Failed to fetch /api/stats/tokens:', err);
+          return null;
+        }),
+        api.get<TokenComparisonApiResponse>('/stats/tokens/comparison').catch((err) => {
+          console.warn('Failed to fetch /api/stats/tokens/comparison:', err);
+          return null;
+        }),
       ]);
 
       let projectStats: ProjectStats[] = [];
@@ -75,6 +125,8 @@ export const Dashboard: React.FC = () => {
 
       setData(res);
       setProjects(projectProgress);
+      setTokenStats(usage);
+      setTokenComparison(comparison);
       setLastRefreshed(new Date());
     } catch (err: any) {
       console.warn('Failed to fetch /api/stats/overview:', err);
@@ -95,9 +147,22 @@ export const Dashboard: React.FC = () => {
     inReview: data?.inReview ?? data?.kpis?.inReview ?? 0,
     completedTasks: data?.completedTasks ?? data?.kpis?.completedTasks ?? 0,
     failedTasks: data?.failedTasks ?? data?.kpis?.failedTasks ?? 0,
-    tokenEfficiency: data?.tokenEfficiency ?? data?.kpis?.tokenEfficiency ?? 0,
-    tokensSaved: data?.tokensSaved ?? data?.kpis?.tokensSaved ?? 0,
+    tokenEfficiency:
+      tokenComparison?.reduction_percentage
+      ?? data?.tokenEfficiency
+      ?? data?.kpis?.tokenEfficiency
+      ?? 0,
+    tokensSaved:
+      tokenComparison?.tokens_saved
+      ?? data?.tokensSaved
+      ?? data?.kpis?.tokensSaved
+      ?? 0,
   };
+
+  const maxOperationTokens = Math.max(
+    1,
+    ...(tokenStats?.by_operation || []).map((item) => item.total_tokens),
+  );
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto min-h-[calc(100vh-4rem)]">
@@ -152,6 +217,130 @@ export const Dashboard: React.FC = () => {
 
       {/* KPI Cards Component */}
       <KpiCards data={kpiData} loading={loading} />
+
+      {/* Measured token telemetry */}
+      <div className="rounded-xl border border-gray-800/80 bg-gray-900/60 p-6 shadow-lg backdrop-blur-sm">
+        <div className="flex flex-col gap-4 border-b border-gray-800/80 pb-5 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="flex items-center gap-2 text-base font-semibold text-gray-100">
+              <Coins className="h-4 w-4 text-purple-400" />
+              LLM Token Telemetry
+            </h2>
+            <p className="mt-0.5 text-xs text-gray-400">
+              Measured provider usage compared with the V1 baseline of 3,575 input tokens per cycle
+            </p>
+          </div>
+          <span
+            className={`inline-flex w-fit items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold ${
+              tokenComparison?.target_met
+                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                : 'border-amber-500/30 bg-amber-500/10 text-amber-400'
+            }`}
+          >
+            <Gauge className="h-3.5 w-3.5" />
+            {tokenComparison?.target_met ? '80% target met' : '80% target pending'}
+          </span>
+        </div>
+
+        {loading ? (
+          <div className="mt-5 grid grid-cols-2 gap-4 md:grid-cols-4">
+            {[1, 2, 3, 4].map((item) => (
+              <div key={item} className="h-20 animate-pulse rounded-lg bg-gray-800/60" />
+            ))}
+          </div>
+        ) : (
+          <>
+            <div className="mt-5 grid grid-cols-2 gap-4 lg:grid-cols-5">
+              <div className="rounded-lg border border-purple-500/20 bg-purple-500/5 p-4">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Total tokens</p>
+                <p className="mt-1 text-2xl font-bold text-gray-100">
+                  {formatTokens(tokenStats?.total_tokens ?? 0)}
+                </p>
+                <p className="mt-1 text-xs text-purple-400">{tokenStats?.total_calls ?? 0} LLM calls</p>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-4">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Input</p>
+                <p className="mt-1 text-xl font-bold text-gray-200">
+                  {formatTokens(tokenStats?.total_input_tokens ?? 0)}
+                </p>
+                <p className="mt-1 text-xs text-gray-500">
+                  {formatTokens(tokenStats?.total_cached_tokens ?? 0)} cached
+                </p>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-4">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Output</p>
+                <p className="mt-1 text-xl font-bold text-gray-200">
+                  {formatTokens(tokenStats?.total_output_tokens ?? 0)}
+                </p>
+                <p className="mt-1 text-xs text-gray-500">
+                  {Math.round(tokenStats?.average_latency_ms ?? 0).toLocaleString()} ms avg
+                </p>
+              </div>
+              <div className="rounded-lg border border-gray-800 bg-gray-950/50 p-4">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">Estimated cost</p>
+                <p className="mt-1 text-xl font-bold text-gray-200">
+                  ${(tokenStats?.total_cost_usd ?? 0).toFixed(4)}
+                </p>
+                <p className="mt-1 text-xs text-gray-500">Provider list pricing</p>
+              </div>
+              <div className="col-span-2 rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-4 lg:col-span-1">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-gray-500">V1 reduction</p>
+                <p className={`mt-1 text-2xl font-bold ${
+                  (tokenComparison?.reduction_percentage ?? 0) >= 80
+                    ? 'text-emerald-400'
+                    : 'text-indigo-300'
+                }`}>
+                  {(tokenComparison?.reduction_percentage ?? 0).toFixed(1)}%
+                </p>
+                <p className="mt-1 text-xs text-gray-500">
+                  {tokenComparison?.cycle_count ?? 0} measured cycles
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400">
+                  Usage by operation
+                </h3>
+                <span className="text-[11px] text-gray-500">Input + output tokens</span>
+              </div>
+              {(tokenStats?.by_operation?.length ?? 0) === 0 ? (
+                <div className="rounded-lg border border-dashed border-gray-800 p-5 text-center text-xs text-gray-500">
+                  No LLM usage has been recorded yet.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {tokenStats?.by_operation.map((operation) => (
+                    <div
+                      key={operation.operation}
+                      className="rounded-lg border border-gray-800/80 bg-gray-950/40 p-3"
+                    >
+                      <div className="mb-2 flex items-center justify-between text-xs">
+                        <span className="font-medium capitalize text-gray-300">
+                          {operation.operation.replaceAll('_', ' ')}
+                        </span>
+                        <span className="font-mono text-gray-400">
+                          {formatTokens(operation.total_tokens)}
+                        </span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-gray-800">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-purple-500"
+                          style={{ width: `${(operation.total_tokens / maxOperationTokens) * 100}%` }}
+                        />
+                      </div>
+                      <p className="mt-2 text-[11px] text-gray-500">
+                        {operation.calls} call{operation.calls === 1 ? '' : 's'} · {formatTokens(operation.input_tokens)} in · {formatTokens(operation.output_tokens)} out
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
 
       {/* Main Grid: Status Chart & Project Progress Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

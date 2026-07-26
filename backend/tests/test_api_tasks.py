@@ -47,10 +47,13 @@ def test_create_duplicate_task_id_fails(client):
     assert "already exists" in response2.json()["detail"]
 
 
-def test_get_tasks_with_filtering_and_pagination(client):
-    client.post("/api/tasks", json={"project": "web", "title": "Task 1", "status": "todo"})
-    client.post("/api/tasks", json={"project": "web", "title": "Task 2", "status": "in_progress"})
-    client.post("/api/tasks", json={"project": "backend", "title": "Task 3", "status": "todo"})
+def test_get_tasks_with_filtering_and_pagination(client, db_session):
+    first = client.post("/api/tasks", json={"project": "web", "title": "Task 1"})
+    second = client.post("/api/tasks", json={"project": "web", "title": "Task 2"})
+    client.post("/api/tasks", json={"project": "backend", "title": "Task 3"})
+    from app.db.models import Task
+    db_session.get(Task, second.json()["id"]).status = "in_progress"
+    db_session.commit()
 
     # Filter by status
     res = client.get("/api/tasks?status=todo")
@@ -93,19 +96,22 @@ def test_get_task_by_id(client):
 def test_patch_task_and_audit_log(client):
     create_res = client.post("/api/tasks", json={
         "project": "web",
-        "title": "Original Title",
-        "executor": "agent-1"
+        "title": "Original Title"
     })
     task_id = create_res.json()["id"]
 
-    patch_res = client.patch(f"/api/tasks/{task_id}", json={
+    protected_res = client.patch(f"/api/tasks/{task_id}", json={
         "status": "in_review",
+    })
+    assert protected_res.status_code == 422
+
+    patch_res = client.patch(f"/api/tasks/{task_id}", json={
         "plan": "Step 1, Step 2",
         "acceptance_criteria": ["AC1", "AC2"]
     })
     assert patch_res.status_code == 200
     updated_task = patch_res.json()
-    assert updated_task["status"] == "in_review"
+    assert updated_task["status"] == "todo"
     assert updated_task["plan"] == "Step 1, Step 2"
     assert updated_task["acceptance_criteria"] == ["AC1", "AC2"]
 

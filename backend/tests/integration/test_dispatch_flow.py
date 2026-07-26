@@ -28,6 +28,7 @@ def dispatch_context():
             project="test",
             title="Test task",
             status="todo",
+            mode="bypass",
         )
     )
     db.add(

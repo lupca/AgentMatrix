@@ -79,7 +79,7 @@ async def test_command_router_get_status(db_session):
 async def test_command_router_persists_run_before_enqueueing(db_session):
     from app.db.models import Agent, AgentRun, Project, Task
 
-    db_session.add(Project(id="proj-1", name="Test Project"))
+    db_session.add(Project(id="proj-1", name="Test Project", repo_root="/tmp"))
     db_session.add(
         Agent(
             id="@agent-1",
@@ -95,6 +95,7 @@ async def test_command_router_persists_run_before_enqueueing(db_session):
             title="Dispatch task",
             status="todo",
             current_gate="spec",
+            mode="bypass",
         )
     )
     db_session.commit()
@@ -115,4 +116,3 @@ async def test_command_router_persists_run_before_enqueueing(db_session):
     assert result["action"] == "dispatched"
     assert queued_run_ids == [result["run_id"]]
     assert db_session.get(AgentRun, result["run_id"]).agent_id == "@agent-1"
-

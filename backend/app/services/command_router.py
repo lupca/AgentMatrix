@@ -1,13 +1,18 @@
 import re
+import hashlib
+import json
 from typing import Tuple, Optional
-from datetime import datetime
-import uuid
 from app.db.models import AgentRun, Task, Session as SessionModel
+from app.services.task_orchestration import (
+    OrchestrationError,
+    TaskOrchestrationService,
+)
 
 COMMANDS = {
     '/pm': 'create_task',
     '/dispatch': 'dispatch_task',
     '/verdict': 'verdict',
+    '/approve': 'approve_gate',
     '/status': 'get_status',
     '/cancel': 'cancel_task',
     '/help': 'show_help',
@@ -69,12 +74,9 @@ class CommandRouter:
         return {'action': 'created', 'task_id': task.id, 'title': title, 'project': project}
 
     async def _handle_dispatch_task(self, args: str, session_id: str) -> dict:
-        from datetime import datetime
         from app.workers.agent_runner import run_agent
-        import uuid
         from app.db.models import Agent
         from app.services.agent_matcher import AgentMatcher
-        from app.services.command_builder import _infer_cli
 
         parts = args.strip().split()
         if not parts:
@@ -95,35 +97,50 @@ class CommandRouter:
         if not agent:
             return {'error': f'Agent {agent_id} not found'}
         
-        run_id = str(uuid.uuid4())
-        command = f'echo "Executing task {task_id} with agent {agent_id}"'
-        repo_root = '/tmp'
-
-        run = AgentRun(
-            id=run_id,
-            task_id=task_id,
-            agent_id=agent_id,
-            cli=(agent.cli or _infer_cli(agent.model, agent.id)).strip().lower(),
-            command=command,
-            status='queued',
-        )
-        task.status = 'dispatched'
-        task.executor = agent_id
-        task.updated_at = datetime.utcnow()
-        self.db.add(run)
-        self.db.commit()
-
+        service = TaskOrchestrationService(self.db)
         try:
-            run_agent.send(run_id, task_id, command, repo_root)
+            result = service.request_dispatch(
+                task_id=task_id,
+                agent_id=agent_id,
+                actor=f"chat:{session_id or 'anonymous'}",
+                idempotency_key=self._command_key(
+                    session_id, "dispatch", args
+                ),
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        if not result.applied:
+            return {
+                'action': 'dispatch_pending',
+                'task_id': task_id,
+                'gate_record_id': result.gate_record.id,
+                'status': 'pending',
+            }
+
+        run = result.agent_run
+        context = result.context or {}
+        if run is None:
+            return {'error': 'Dispatch transition did not create an agent run'}
+        try:
+            run_agent.send(
+                run.id,
+                task_id,
+                run.command,
+                context['repo_root'],
+                run.timeout_seconds,
+            )
         except Exception as exc:
-            run.status = 'failed'
-            run.error_message = f'Could not queue run: {exc}'
-            run.completed_at = datetime.utcnow()
-            task.status = 'todo'
-            self.db.commit()
-            return {'error': run.error_message, 'run_id': run_id}
+            error = f'Could not queue run: {exc}'
+            service.record_dispatch_queue_failure(
+                run_id=run.id,
+                error=error,
+                actor='system:dispatch-queue',
+                idempotency_key=f'{result.gate_record.idempotency_key}:queue-failure',
+            )
+            return {'error': error, 'run_id': run.id}
         
-        return {'action': 'dispatched', 'task_id': task_id, 'run_id': run_id, 'agent': agent_id}
+        return {'action': 'dispatched', 'task_id': task_id, 'run_id': run.id, 'agent': agent_id}
 
     async def _handle_cancel_task(self, args: str, session_id: str) -> dict:
         from datetime import datetime, timezone
@@ -154,20 +171,26 @@ class CommandRouter:
         except Exception as exc:
             return {'error': f'Could not signal cancellation: {exc}'}
 
-        run.status = 'cancelled'
-        run.error_message = 'Cancelled by user'
-        run.completed_at = datetime.now(timezone.utc)
-        task.status = 'todo'
-        self.db.commit()
+        try:
+            TaskOrchestrationService(self.db).cancel_run(
+                run_id=run.id,
+                actor=f"chat:{session_id or 'anonymous'}",
+                idempotency_key=self._command_key(session_id, "cancel", args),
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
         publish_status(run.id, 'cancelled', error=run.error_message)
         return {'action': 'cancelled', 'task_id': task_id, 'run_id': run.id, 'status': 'cancelled'}
 
     async def _handle_verdict(self, args: str, session_id: str) -> dict:
-        from datetime import datetime
-        
-        parts = args.strip().split()
-        if len(parts) < 2:
-            return {'error': 'Usage: /verdict <task_id> <pass|changes>'}
+        parts = args.strip().split(maxsplit=2)
+        if len(parts) < 3:
+            return {
+                'error': (
+                    'Usage: /verdict <task_id> <pass|changes> '
+                    '<ac_results_json>'
+                )
+            }
         
         task_id, verdict = parts[0], parts[1].lower()
         if verdict not in ['pass', 'changes']:
@@ -177,15 +200,86 @@ class CommandRouter:
         if not task:
             return {'error': f'Task {task_id} not found'}
         
-        if verdict == 'pass':
-            task.status = 'done'
-        else:
-            task.status = 'changes-requested'
+        try:
+            ac_results = json.loads(parts[2])
+        except json.JSONDecodeError:
+            return {'error': 'ac_results_json must be valid JSON'}
+        try:
+            result = TaskOrchestrationService(self.db).request_verdict(
+                task_id=task_id,
+                verdict=verdict,
+                ac_results=ac_results,
+                actor=task.reviewer or f"chat:{session_id or 'anonymous'}",
+                idempotency_key=self._command_key(session_id, "verdict", args),
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
         
-        task.updated_at = datetime.utcnow()
-        self.db.commit()
-        
-        return {'action': 'verdict', 'task_id': task_id, 'verdict': verdict, 'new_status': task.status}
+        return {
+            'action': 'verdict',
+            'task_id': task_id,
+            'verdict': verdict,
+            'new_status': result.task.status,
+            'decision_status': result.status,
+            'gate_record_id': result.gate_record.id,
+        }
+
+    async def _handle_approve_gate(self, args: str, session_id: str) -> dict:
+        from app.workers.agent_runner import run_agent
+
+        parts = args.strip().split()
+        if not parts:
+            return {'error': 'Usage: /approve <gate_record_id> [approved|rejected]'}
+        try:
+            gate_record_id = int(parts[0])
+        except ValueError:
+            return {'error': 'gate_record_id must be an integer'}
+        decision = parts[1].lower() if len(parts) > 1 else 'approved'
+        service = TaskOrchestrationService(self.db)
+        try:
+            result = service.decide_gate(
+                gate_record_id=gate_record_id,
+                decision=decision,
+                actor=f"chat:{session_id or 'anonymous'}",
+                idempotency_key=self._command_key(session_id, "approve", args),
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        run = result.agent_run
+        if run is not None:
+            context = result.context or {}
+            try:
+                run_agent.send(
+                    run.id,
+                    run.task_id,
+                    run.command,
+                    context['repo_root'],
+                    run.timeout_seconds,
+                )
+            except Exception as exc:
+                error = f'Could not queue run: {exc}'
+                service.record_dispatch_queue_failure(
+                    run_id=run.id,
+                    error=error,
+                    actor='system:dispatch-queue',
+                    idempotency_key=(
+                        f'{result.gate_record.idempotency_key}:queue-failure'
+                    ),
+                )
+                return {'error': error, 'run_id': run.id}
+        return {
+            'action': 'gate_decision',
+            'task_id': result.task.id,
+            'decision': result.status,
+            'new_status': result.task.status,
+            'run_id': run.id if run is not None else None,
+        }
+
+    @staticmethod
+    def _command_key(session_id: str, action: str, args: str) -> str:
+        digest = hashlib.sha256(args.strip().encode("utf-8")).hexdigest()[:24]
+        return f"chat:{session_id or 'anonymous'}:{action}:{digest}"[:100]
 
     async def _handle_get_status(self, args: str, session_id: str) -> dict:
         if not self.db:

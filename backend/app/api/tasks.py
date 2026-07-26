@@ -1,6 +1,8 @@
 import re
 import uuid
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.db.models import (
@@ -9,13 +11,31 @@ from app.db.models import (
     Session as SessionModel,
     Task as TaskModel,
 )
-from app.api.dispatch import AgentRunResponse
+from app.api.dispatch import AgentRunResponse, _raise_orchestration_http
 from app.schemas.task import Task, TaskCreate, TaskUpdate
 from app.schemas.audit import AuditLog
 from app.schemas.agent import AgentSuggestion
 from app.services.agent_matcher import AgentMatcher
+from app.services.task_orchestration import (
+    OrchestrationError,
+    TaskOrchestrationService,
+)
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+
+class ReviewRequest(BaseModel):
+    reviewer: str
+    actor: str
+    idempotency_key: str = Field(default_factory=lambda: str(uuid.uuid4()))
+
+
+class VerdictRequest(BaseModel):
+    verdict: str
+    ac_results: Any
+    actor: str
+    findings: list[Any] = Field(default_factory=list)
+    idempotency_key: str = Field(default_factory=lambda: str(uuid.uuid4()))
 
 
 def generate_task_id(db: Session, project: str) -> str:
@@ -97,7 +117,7 @@ def create_task(task_in: TaskCreate, db: Session = Depends(get_db)):
     audit_entry = AuditLogModel(
         task_id=task_id,
         action="create_task",
-        actor=task_in.executor or "system",
+        actor="system",
         details={
             "title": task_in.title,
             "project": task_in.project,
@@ -158,6 +178,56 @@ def get_task_runs(id: str, db: Session = Depends(get_db)):
     )
 
 
+@router.post("/{id}/review")
+def request_task_review(
+    id: str,
+    request: ReviewRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = TaskOrchestrationService(db).request_review(
+            task_id=id,
+            reviewer=request.reviewer,
+            actor=request.actor,
+            idempotency_key=request.idempotency_key,
+        )
+    except OrchestrationError as exc:
+        _raise_orchestration_http(exc)
+    return {
+        "task_id": id,
+        "status": result.task.status,
+        "decision_status": result.status,
+        "gate_record_id": result.gate_record.id,
+        "applied": result.applied,
+    }
+
+
+@router.post("/{id}/verdict")
+def request_task_verdict(
+    id: str,
+    request: VerdictRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        result = TaskOrchestrationService(db).request_verdict(
+            task_id=id,
+            verdict=request.verdict,
+            ac_results=request.ac_results,
+            actor=request.actor,
+            findings=request.findings,
+            idempotency_key=request.idempotency_key,
+        )
+    except OrchestrationError as exc:
+        _raise_orchestration_http(exc)
+    return {
+        "task_id": id,
+        "status": result.task.status,
+        "decision_status": result.status,
+        "gate_record_id": result.gate_record.id,
+        "applied": result.applied,
+    }
+
+
 @router.patch("/{id}", response_model=Task)
 def update_task(id: str, task_in: TaskUpdate, db: Session = Depends(get_db)):
     db_task = db.query(TaskModel).filter(TaskModel.id == id).first()
@@ -175,7 +245,7 @@ def update_task(id: str, task_in: TaskUpdate, db: Session = Depends(get_db)):
         setattr(db_task, field, value)
 
     # Auto audit log entry
-    actor = update_data.get("executor") or update_data.get("reviewer") or db_task.executor or "system"
+    actor = db_task.executor or "system"
     audit_entry = AuditLogModel(
         task_id=id,
         action="update_task",

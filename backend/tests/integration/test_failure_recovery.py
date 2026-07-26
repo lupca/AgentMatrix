@@ -22,7 +22,15 @@ def recovery_db(monkeypatch):
     factory = sessionmaker(bind=engine)
     db = factory()
     db.add(Project(id="recovery", name="Recovery", repo_root="/tmp"))
-    db.add(Task(id="T-RECOVERY", project="recovery", title="Recover"))
+    db.add(
+        Task(
+            id="T-RECOVERY",
+            project="recovery",
+            title="Recover",
+            status="dispatched",
+            executor="@test",
+        )
+    )
     db.add(
         AgentRun(
             id="recover-run",
@@ -36,6 +44,7 @@ def recovery_db(monkeypatch):
     db.close()
     monkeypatch.setattr(runner, "SessionLocal", factory)
     monkeypatch.setattr(runner, "redis_client", MagicMock())
+    monkeypatch.setattr(runner, "is_cancel_requested", MagicMock(return_value=False))
     monkeypatch.setattr(runner, "clear_cancel_request", MagicMock())
     yield factory
     Base.metadata.drop_all(engine)

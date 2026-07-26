@@ -139,7 +139,7 @@ def test_gate_record_crud_and_relationship(db_session):
     gate_rec = GateRecord(
         task_id="V2-002",
         gate_type="spec",
-        status="passed",
+        status="approved",
         executor="@dev-1",
         reviewer="@dev-2",
         input_payload={"raw_input": "Build feature X"},
@@ -152,7 +152,7 @@ def test_gate_record_crud_and_relationship(db_session):
     fetched_gate = db_session.query(GateRecord).filter(GateRecord.task_id == "V2-002").first()
     assert fetched_gate is not None
     assert fetched_gate.gate_type == "spec"
-    assert fetched_gate.status == "passed"
+    assert fetched_gate.status == "approved"
     assert fetched_gate.input_payload == {"raw_input": "Build feature X"}
     assert fetched_gate.output_payload == {"criteria": ["Feature X unit tests pass"]}
     assert fetched_gate.task.title == "Gate Record Task"
@@ -196,8 +196,8 @@ def test_session_checkpoint_and_relationship(db_session):
     assert task.sessions[0].checkpoint_id == "chk-9999"
 
 
-def test_cascade_delete_task(db_session):
-    """Verify deleting a Task cascades to its linked Session and GateRecord objects."""
+def test_gate_ledger_blocks_parent_task_deletion(db_session):
+    """Immutable gate evidence prevents deletion through an ORM cascade."""
     task = Task(id="V2-CASCADE", project="proj", title="Cascade Task")
     db_session.add(task)
     db_session.commit()
@@ -208,10 +208,11 @@ def test_cascade_delete_task(db_session):
     db_session.commit()
 
     db_session.delete(task)
-    db_session.commit()
+    with pytest.raises(ValueError, match="immutable"):
+        db_session.commit()
+    db_session.rollback()
 
-    assert db_session.query(GateRecord).filter(GateRecord.task_id == "V2-CASCADE").count() == 0
-    assert db_session.query(Session).filter(Session.task_id == "V2-CASCADE").count() == 0
+    assert db_session.query(GateRecord).filter(GateRecord.task_id == "V2-CASCADE").count() == 1
 
 
 # ---------------------------------------------------------------------------

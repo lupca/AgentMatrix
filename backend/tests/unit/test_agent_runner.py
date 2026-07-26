@@ -24,7 +24,15 @@ def worker_db(monkeypatch):
     factory = sessionmaker(bind=engine)
     db = factory()
     db.add(Project(id="project", name="Project", repo_root="/tmp"))
-    db.add(Task(id="RUN-001", project="project", title="Worker task"))
+    db.add(
+        Task(
+            id="RUN-001",
+            project="project",
+            title="Worker task",
+            status="dispatched",
+            executor="@test",
+        )
+    )
     db.add(
         AgentRun(
             id="run-001",
@@ -38,6 +46,7 @@ def worker_db(monkeypatch):
     db.close()
     monkeypatch.setattr(runner, "SessionLocal", factory)
     monkeypatch.setattr(runner, "redis_client", MagicMock())
+    monkeypatch.setattr(runner, "is_cancel_requested", MagicMock(return_value=False))
     monkeypatch.setattr(runner, "clear_cancel_request", MagicMock())
     yield factory
     Base.metadata.drop_all(engine)
@@ -103,7 +112,7 @@ def test_run_agent_persists_output_and_success(worker_db):
     assert run.output_lines == 2
     assert run.output_bytes == len("firstsecond")
     assert [chunk.content for chunk in run.output_chunks] == ["first\nsecond"]
-    assert db.get(Task, "RUN-001").status == "done"
+    assert db.get(Task, "RUN-001").status == "awaiting-review"
     db.close()
 
 
@@ -243,9 +252,10 @@ def test_parse_result_ref_handles_spawn_error(monkeypatch):
     assert runner._parse_result_ref("/tmp") is None
 
 
-def test_update_missing_task_is_a_noop(worker_db):
+def test_update_missing_task_is_not_silent(worker_db):
     db = worker_db()
 
-    runner._update_task_status(db, "missing", "failed", error="error")
+    with pytest.raises(Exception, match="Task missing not found"):
+        runner._update_task_status(db, "missing", "failed", error="error")
 
     db.close()

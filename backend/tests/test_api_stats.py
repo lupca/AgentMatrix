@@ -1,8 +1,49 @@
-def test_stats_overview(client):
-    client.post("/api/tasks", json={"id": "CT-101", "project": "p1", "title": "Task 1", "status": "todo"})
-    client.post("/api/tasks", json={"id": "CT-102", "project": "p1", "title": "Task 2", "status": "in_progress"})
-    client.post("/api/tasks", json={"id": "CT-103", "project": "p2", "title": "Task 3", "status": "done"})
-    client.post("/api/tasks", json={"id": "CT-104", "project": "p2", "title": "Task 4", "status": "done"})
+from app.db.models import GateRecord, Task
+
+
+def _persist_task(
+    db,
+    task_id,
+    project,
+    title,
+    status,
+    *,
+    executor=None,
+    reviewer=None,
+):
+    if status == "done":
+        executor = executor or f"{task_id}-executor"
+        reviewer = reviewer or f"{task_id}-reviewer"
+    task = Task(
+        id=task_id,
+        project=project,
+        title=title,
+        status=status,
+        executor=executor,
+        reviewer=reviewer,
+        result_ref=f"{task_id}-result" if status == "done" else None,
+        verdict="pass" if status == "done" else None,
+    )
+    db.add(task)
+    if status == "done":
+        db.add(
+            GateRecord(
+                task_id=task_id,
+                gate_type="verdict",
+                status="approved",
+                actor=reviewer,
+                mode="bypass",
+                output_ref="pass",
+            )
+        )
+    db.commit()
+
+
+def test_stats_overview(client, db_session):
+    _persist_task(db_session, "CT-101", "p1", "Task 1", "todo")
+    _persist_task(db_session, "CT-102", "p1", "Task 2", "in_progress")
+    _persist_task(db_session, "CT-103", "p2", "Task 3", "done")
+    _persist_task(db_session, "CT-104", "p2", "Task 4", "done")
 
     res = client.get("/api/stats/overview")
     assert res.status_code == 200
@@ -15,13 +56,13 @@ def test_stats_overview(client):
     }
 
 
-def test_stats_projects(client):
+def test_stats_projects(client, db_session):
     client.post("/api/projects", json={"id": "p1", "name": "Project One"})
     client.post("/api/projects", json={"id": "p2", "name": "Project Two"})
 
-    client.post("/api/tasks", json={"id": "CT-201", "project": "p1", "title": "Task 1", "status": "todo"})
-    client.post("/api/tasks", json={"id": "CT-202", "project": "p1", "title": "Task 2", "status": "done"})
-    client.post("/api/tasks", json={"id": "CT-203", "project": "p2", "title": "Task 3", "status": "in_progress"})
+    _persist_task(db_session, "CT-201", "p1", "Task 1", "todo")
+    _persist_task(db_session, "CT-202", "p1", "Task 2", "done")
+    _persist_task(db_session, "CT-203", "p2", "Task 3", "in_progress")
 
     res = client.get("/api/stats/projects")
     assert res.status_code == 200
@@ -41,26 +82,28 @@ def test_stats_projects(client):
     assert p2_stats["active_tasks"] == 1
 
 
-def test_stats_agents(client):
+def test_stats_agents(client, db_session):
     client.post("/api/agents", json={"id": "agent-exec", "name": "Executor Agent", "role": "developer"})
     client.post("/api/agents", json={"id": "agent-rev", "name": "Reviewer Agent", "role": "reviewer"})
 
-    client.post("/api/tasks", json={
-        "id": "CT-301",
-        "project": "p1",
-        "title": "Task 1",
-        "status": "done",
-        "executor": "agent-exec",
-        "reviewer": "agent-rev"
-    })
-    client.post("/api/tasks", json={
-        "id": "CT-302",
-        "project": "p1",
-        "title": "Task 2",
-        "status": "in_progress",
-        "executor": "agent-exec",
-        "reviewer": "agent-rev"
-    })
+    _persist_task(
+        db_session,
+        "CT-301",
+        "p1",
+        "Task 1",
+        "done",
+        executor="agent-exec",
+        reviewer="agent-rev",
+    )
+    _persist_task(
+        db_session,
+        "CT-302",
+        "p1",
+        "Task 2",
+        "in_progress",
+        executor="agent-exec",
+        reviewer="agent-rev",
+    )
 
     res = client.get("/api/stats/agents")
     assert res.status_code == 200

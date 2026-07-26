@@ -17,8 +17,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.base import SessionLocal
-from app.db.models import AgentOutputChunk, AgentRun, Task
+from app.db.models import AgentOutputChunk, AgentRun
 from app.services.process_manager import ProcessManager, ProcessResult, ProcessStatus
+from app.services.task_orchestration import TaskOrchestrationService
 from app.workers import redis_broker
 from app.workers.output_streamer import (
     clear_cancel_request,
@@ -211,9 +212,21 @@ def run_agent(
         run.completed_at = datetime.now(timezone.utc)
         if result.status == ProcessStatus.COMPLETED:
             run.result_ref = _parse_result_ref(repo_root)
-            _update_task_status(db, task_id, "done", result_ref=run.result_ref)
+            TaskOrchestrationService(db).record_execution_success(
+                task_id=task_id,
+                result_ref=run.result_ref,
+                actor=f"agent:{run.agent_id}",
+                idempotency_key=f"run:{run.id}:execution-success",
+                run_id=run.id,
+            )
         else:
-            _update_task_status(db, task_id, "failed", error=result.error)
+            TaskOrchestrationService(db).record_execution_failure(
+                task_id=task_id,
+                error=result.error or result.status.value,
+                actor=f"agent:{run.agent_id}",
+                idempotency_key=f"run:{run.id}:execution-{result.status.value}",
+                run_id=run.id,
+            )
         db.commit()
 
         publish_status(
@@ -340,19 +353,22 @@ def _update_task_status(
     result_ref: str | None = None,
     error: str | None = None,
 ) -> None:
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if task is None:
-        return
-
-    now = datetime.now(timezone.utc)
-    task.status = status
-    task.updated_at = now
-    if result_ref:
-        task.result_ref = result_ref
-    if error:
-        task.error = error
-    if status == "done":
-        task.completed_at = now
+    """Compatibility wrapper; lifecycle writes remain service-owned."""
+    service = TaskOrchestrationService(db)
+    if status in {"done", "awaiting-review"}:
+        service.record_execution_success(
+            task_id=task_id,
+            result_ref=result_ref,
+            actor="system:agent-worker",
+            idempotency_key=f"legacy-worker:{task_id}:success:{result_ref}",
+        )
+    else:
+        service.record_execution_failure(
+            task_id=task_id,
+            error=error or status,
+            actor="system:agent-worker",
+            idempotency_key=f"legacy-worker:{task_id}:failure:{status}",
+        )
 
 
 def _record_unexpected_failure(
@@ -374,7 +390,13 @@ def _record_unexpected_failure(
             run.pid = None
             run.error_message = str(exc)
             run.completed_at = datetime.now(timezone.utc)
-            _update_task_status(db, task_id, "failed", error=str(exc))
+            TaskOrchestrationService(db).record_execution_failure(
+                task_id=task_id,
+                error=str(exc),
+                actor=f"agent:{run.agent_id}",
+                idempotency_key=f"run:{run.id}:unexpected-failure",
+                run_id=run.id,
+            )
         db.commit()
         return should_retry
     except Exception:

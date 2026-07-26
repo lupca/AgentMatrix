@@ -75,7 +75,7 @@ def test_bulk_db_insertions_and_retrieval(db_session):
                 GateRecord(
                     task_id=f"BULK-{i:04d}",
                     gate_type=g_type,
-                    status="passed",
+                    status="approved",
                     executor=f"@dev-{i}",
                     reviewer=f"@rev-{i}",
                     input_payload={"step": g_type, "index": i},
@@ -114,7 +114,7 @@ def test_large_json_payload_handling(db_session):
     gate = GateRecord(
         task_id="LARGE-JSON-01",
         gate_type="review",
-        status="passed",
+        status="approved",
         input_payload=large_dict,
         output_payload={"list": large_list},
     )
@@ -131,8 +131,8 @@ def test_large_json_payload_handling(db_session):
     assert len(fetched_gate.output_payload["list"]) == 1000
 
 
-def test_heavy_cascade_deletion(db_session):
-    """Stress test ORM cascade deletion for 200 tasks, each with 5 GateRecords and 2 Sessions (1,400 total records)."""
+def test_heavy_cascade_deletion_is_blocked_by_immutable_ledger(db_session):
+    """A task with ledger evidence cannot erase that evidence by cascading."""
     tasks = []
     for i in range(200):
         t_id = f"CAS-{i:03d}"
@@ -151,17 +151,13 @@ def test_heavy_cascade_deletion(db_session):
     assert db_session.query(GateRecord).count() == 1000
     assert db_session.query(Session).count() == 400
 
-    # ORM object deletion to trigger relationship cascade="all, delete-orphan"
-    start_time = time.time()
-    for task in tasks:
-        db_session.delete(task)
-    db_session.commit()
-    elapsed = time.time() - start_time
+    db_session.delete(tasks[0])
+    with pytest.raises(ValueError, match="immutable"):
+        db_session.commit()
+    db_session.rollback()
 
-    assert db_session.query(Task).filter(Task.project == "cascade-proj").count() == 0
-    assert db_session.query(GateRecord).count() == 0
-    assert db_session.query(Session).count() == 0
-    assert elapsed < 3.0, f"Cascade deletion took too long: {elapsed:.2f}s"
+    assert db_session.query(Task).filter(Task.project == "cascade-proj").count() == 200
+    assert db_session.query(GateRecord).count() == 1000
 
 
 # ---------------------------------------------------------------------------
@@ -214,18 +210,11 @@ def test_four_eyes_same_user_instantiation_order(db_session):
 
 
 def test_four_eyes_case_sensitivity_and_whitespace_edge_cases(db_session):
-    """Boundary Case: Test case sensitivity and whitespace variations between executor and reviewer."""
-    # Case variation: "Alice" vs "alice" -> Different string literals, ORM allows it.
-    t_case = Task(id="FE-EDGE-1", project="p", title="t", executor="Alice", reviewer="alice")
-    db_session.add(t_case)
-    db_session.commit()
-    assert t_case.executor == "Alice" and t_case.reviewer == "alice"
-
-    # Whitespace variation: "alice " vs "alice" -> Different string literals, ORM allows it.
-    t_space = Task(id="FE-EDGE-2", project="p", title="t", executor="alice ", reviewer="alice")
-    db_session.add(t_space)
-    db_session.commit()
-    assert t_space.executor == "alice " and t_space.reviewer == "alice"
+    """Principal comparison normalizes case and surrounding whitespace."""
+    with pytest.raises(FourEyesViolation):
+        Task(id="FE-EDGE-1", project="p", title="t", executor="Alice", reviewer="alice")
+    with pytest.raises(FourEyesViolation):
+        Task(id="FE-EDGE-2", project="p", title="t", executor="alice ", reviewer="alice")
 
 
 def test_four_eyes_bulk_update_bypasses_orm_but_caught_by_db(db_session):

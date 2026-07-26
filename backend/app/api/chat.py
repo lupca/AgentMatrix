@@ -140,7 +140,13 @@ async def chat_endpoint(req: ChatRequest, db: DBSession = Depends(get_db)):
         yield f"data: {start_payload}\n\n"
 
         try:
-            async for chunk in llm.stream_async(llm_messages):
+            async for chunk in llm.stream_async(
+                llm_messages,
+                operation="chat",
+                session_id=db_session.id,
+                task_id=db_session.task_id,
+                db_session=db,
+            ):
                 full_content += chunk
                 chunk_payload = json.dumps({"type": "chunk", "content": chunk})
                 yield f"data: {chunk_payload}\n\n"

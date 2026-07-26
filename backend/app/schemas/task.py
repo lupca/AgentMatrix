@@ -7,6 +7,12 @@ class GateRecordCreate(BaseModel):
     task_id: str
     gate_type: str
     status: str | None = "pending"
+    actor: str = "system"
+    mode: str = "supervised"
+    idempotency_key: str
+    input_hash: str
+    output_ref: str | None = None
+    parent_id: int | None = None
     executor: str | None = None
     reviewer: str | None = None
     input_payload: dict[str, Any] | list[Any] | None = None
@@ -19,6 +25,12 @@ class GateRecord(BaseModel):
     task_id: str
     gate_type: str
     status: str
+    actor: str
+    mode: str
+    idempotency_key: str
+    input_hash: str
+    output_ref: str | None = None
+    parent_id: int | None = None
     executor: str | None = None
     reviewer: str | None = None
     input_payload: dict[str, Any] | list[Any] | None = None
@@ -62,64 +74,47 @@ class TaskState(BaseModel):
 
 
 class TaskCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str | None = None
     project: str
     title: str
     raw_input: str | None = ""
     tags: list[Any] | None = None
-    status: str | None = "todo"
-    current_gate: str | None = "spec"
     mode: str | None = "supervised"
     priority: str | None = None
     risk: str | None = None
-    executor: str | None = None
-    reviewer: str | None = None
     acceptance_criteria: list[Any] | None = None
     files: list[Any] | None = None
     tests: list[Any] | None = None
     flows: list[Any] | None = None
     plan: str | None = None
-    result_ref: str | None = None
-    findings: list[Any] | None = None
-    verdict: str | None = None
     predicted_success: str | None = None
     prediction_factors: dict[str, Any] | None = None
-    awaiting_approval: bool | None = False
-    approval_prompt: str | None = None
-    error: str | None = None
     session_id: str | None = None
     deadline: date | None = None
 
 
 class TaskUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     session_id: str | None = None
     project: str | None = None
     title: str | None = None
     raw_input: str | None = None
     tags: list[Any] | None = None
-    status: str | None = None
-    current_gate: str | None = None
-    mode: str | None = None
     priority: str | None = None
     risk: str | None = None
-    executor: str | None = None
-    reviewer: str | None = None
     acceptance_criteria: list[Any] | None = None
     files: list[Any] | None = None
     tests: list[Any] | None = None
     flows: list[Any] | None = None
     plan: str | None = None
-    result_ref: str | None = None
     findings: list[Any] | None = None
-    verdict: str | None = None
     predicted_success: str | None = None
     prediction_factors: dict[str, Any] | None = None
-    awaiting_approval: bool | None = None
-    approval_prompt: str | None = None
     error: str | None = None
     deadline: date | None = None
-    dispatched_at: datetime | None = None
-    completed_at: datetime | None = None
 
 
 class Task(BaseModel):

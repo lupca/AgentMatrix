@@ -27,7 +27,9 @@ def plan_gate(state: TaskState) -> TaskState:
         plan_text = llm.complete(
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1000,
-            temperature=0.5
+            temperature=0.5,
+            operation="plan",
+            task_id=state.task_id,
         )
     except Exception:
         plan_text = _generate_fallback_plan(state)
