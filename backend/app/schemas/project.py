@@ -6,12 +6,14 @@ class ProjectCreate(BaseModel):
     id: str
     name: str
     description: str | None = None
+    context_md: str | None = None
     status: str | None = "active"
 
 
 class ProjectUpdate(BaseModel):
     name: str | None = None
     description: str | None = None
+    context_md: str | None = None
     status: str | None = None
 
 
@@ -19,6 +21,7 @@ class Project(BaseModel):
     id: str
     name: str
     description: str | None = None
+    context_md: str | None = None
     status: str
     created_at: datetime | None = None
     updated_at: datetime | None = None

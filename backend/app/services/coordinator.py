@@ -27,6 +27,7 @@ from app.services.cli_dispatcher import (
     format_history_as_prompt,
     route_model,
 )
+from app.services.context_hierarchy import ContextHierarchy
 from app.services.providers import CoordinatorProvider, ProviderResponse
 from app.services.providers.anthropic_adapter import AnthropicAdapter
 from app.services.providers.google_adapter import GoogleAdapter
@@ -316,7 +317,7 @@ class CoordinatorService:
         *,
         max_output_tokens: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Keep the stable system prefix and newest turns within model context."""
+        """Keep the stable system/header prefix and newest turns within model context."""
 
         output_budget = max_output_tokens or self.max_output_tokens
         available = max(
@@ -325,20 +326,24 @@ class CoordinatorService:
             - output_budget
             - self.context_safety_tokens,
         )
-        system = [message for message in messages if message.get("role") == "system"]
+        prefix = [
+            message
+            for message in messages
+            if message.get("role") == "system" or "cache_control" in message
+        ]
         conversation = [
             message
             for message in messages
-            if message.get("role") != "system"
+            if message not in prefix
             and message.get("status", "complete") == "complete"
         ]
 
-        selected_system: list[dict[str, Any]] = []
+        selected_prefix: list[dict[str, Any]] = []
         used = 0
-        for message in system:
+        for message in prefix:
             tokens = self.estimate_tokens(message)
             if used + tokens <= available:
-                selected_system.append(message)
+                selected_prefix.append(message)
                 used += tokens
 
         selected_recent: list[dict[str, Any]] = []
@@ -358,35 +363,14 @@ class CoordinatorService:
                 selected_recent.append(truncated)
             break
         selected_recent.reverse()
-        return selected_system + selected_recent
+        return selected_prefix + selected_recent
 
-    def _canonical_messages(self, db_session: SessionModel) -> list[dict[str, Any]]:
-        messages: list[dict[str, Any]] = []
-        system = self._task_system_message(db_session)
-        if system:
-            messages.append(system)
-        for message in list(db_session.messages or []):
-            if message.get("status", "complete") != "complete":
-                continue
-            if message.get("role") not in {"user", "assistant", "tool", "system"}:
-                continue
-            messages.append(
-                {
-                    "role": message["role"],
-                    "content": str(message.get("content", "")),
-                    **{
-                        key: message[key]
-                        for key in (
-                            "name",
-                            "tool_name",
-                            "tool_call_id",
-                            "tool_calls",
-                        )
-                        if key in message
-                    },
-                }
-            )
-        return messages
+    def _canonical_messages(
+        self,
+        db_session: SessionModel,
+        project_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return ContextHierarchy(self.db).build_messages(db_session, project_id=project_id)
 
     @staticmethod
     def completed_turn(
@@ -628,6 +612,7 @@ class CoordinatorService:
             provider_name, resolved_model, adapter = self._resolve_selection(
                 db_session, model, provider
             )
+            ContextHierarchy(self.db).compact_context(db_session)
             canonical = self.budget_messages(
                 self._canonical_messages(db_session),
                 resolved_model,
@@ -696,6 +681,7 @@ class CoordinatorService:
             provider_name, resolved_model, adapter = self._resolve_selection(
                 db_session, model, provider
             )
+            ContextHierarchy(self.db).compact_context(db_session)
             canonical = self.budget_messages(
                 self._canonical_messages(db_session),
                 resolved_model,

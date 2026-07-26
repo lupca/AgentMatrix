@@ -39,29 +39,44 @@ class AnthropicAdapter:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Return cacheable system blocks and Claude user/assistant messages."""
 
-        system_parts: list[str] = []
+        system_parts: list[dict[str, Any]] = []
         provider_messages: list[dict[str, Any]] = []
         for message in messages:
             role = message.get("role", "user")
             content = str(message.get("content", ""))
+            cache_ctrl = message.get("cache_control")
             if role == "system":
-                system_parts.append(content)
+                block: dict[str, Any] = {"type": "text", "text": content}
+                if cache_ctrl:
+                    block["cache_control"] = cache_ctrl
+                system_parts.append(block)
                 continue
             if role not in {"user", "assistant"}:
                 content = f"[{role} result]\n{content}"
                 role = "user"
-            provider_messages.append({"role": role, "content": content})
+            
+            if cache_ctrl:
+                msg = {
+                    "role": role,
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": cache_ctrl,
+                        }
+                    ],
+                }
+            else:
+                msg = {"role": role, "content": content}
+            provider_messages.append(msg)
 
-        # The stable system prefix is an explicit cache breakpoint. Automatic
-        # top-level cache_control below also lets the breakpoint advance across
-        # same-model turns.
         system = [
             {
                 "type": "text",
-                "text": text,
-                "cache_control": {"type": "ephemeral"},
+                "text": block["text"],
+                "cache_control": block.get("cache_control", {"type": "ephemeral"}),
             }
-            for text in system_parts
+            for block in system_parts
         ]
         return system, provider_messages
 

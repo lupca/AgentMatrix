@@ -15,6 +15,7 @@ COMMANDS = {
     '/approve': 'approve_gate',
     '/status': 'get_status',
     '/cancel': 'cancel_task',
+    '/compact': 'compact_context',
     '/help': 'show_help',
 }
 
@@ -351,3 +352,15 @@ class CommandRouter:
                 for t in tasks
             ]
         }
+
+    async def _handle_compact_context(self, args: str, session_id: str) -> dict:
+        from app.services.context_hierarchy import ContextHierarchy
+        session = self.db.query(SessionModel).filter(
+            (SessionModel.id == session_id) | (SessionModel.thread_id == session_id)
+        ).first()
+        if not session:
+            return {'error': f'Session {session_id} not found'}
+
+        ctx = ContextHierarchy(self.db)
+        compacted = ctx.compact_context(session, threshold=0)
+        return {'action': 'compacted', 'session_id': session_id, 'compacted': compacted}

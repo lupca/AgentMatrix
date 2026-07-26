@@ -88,7 +88,8 @@ async def test_model_switch_rehydrates_canonical_history_and_records_usage(db_se
     assert first.provider == "anthropic"
     assert second.provider == "google"
     google_history = google.calls[0][1]
-    assert [message["content"] for message in google_history] == [
+    assert google_history[0]["role"] == "system"
+    assert [message["content"] for message in google_history[1:]] == [
         "Remember that my name is Ada.",
         "My name is Ada.",
         "What is my name?",
@@ -261,7 +262,8 @@ def test_chat_endpoint_routes_requested_models_and_preserves_history(
     assert first.status_code == second.status_code == 200
     assert '"type": "done"' in first.text
     assert '"type": "done"' in second.text
-    assert [message["content"] for message in google.calls[0][1]] == [
+    assert google.calls[0][1][0]["role"] == "system"
+    assert [message["content"] for message in google.calls[0][1][1:]] == [
         "First question",
         "first answer",
         "Second question",

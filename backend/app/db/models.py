@@ -201,6 +201,7 @@ class Project(Base):
     id = Column(String(50), primary_key=True)
     name = Column(String(100), nullable=False)
     description = Column(Text, nullable=True)
+    context_md = Column(Text, nullable=True)
     status = Column(String(20), nullable=False, default="active")
     repo_root = Column(String(255), nullable=True)
     task_prefix = Column(String(20), nullable=True)
