@@ -105,7 +105,7 @@ export const Dashboard: React.FC = () => {
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-gray-900/40 p-6 rounded-2xl border border-gray-800/80 shadow-lg backdrop-blur-md">
         <div>
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+            <h1 className="text-2xl font-bold text-gray-100 tracking-tight flex items-center gap-2">
               <LayoutDashboard className="w-6 h-6 text-indigo-400" />
               Welcome back, {user?.name || 'Operator'}
             </h1>

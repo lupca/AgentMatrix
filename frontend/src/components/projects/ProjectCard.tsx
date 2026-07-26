@@ -49,7 +49,7 @@ export const ProjectCard: React.FC<ProjectCardProps> = ({
               <span className="text-[10px] font-mono font-semibold text-indigo-400 uppercase tracking-wider">
                 {project.id}
               </span>
-              <h3 className="text-base font-semibold text-white group-hover:text-indigo-300 transition-colors line-clamp-1">
+              <h3 className="text-base font-semibold text-gray-100 group-hover:text-indigo-300 transition-colors line-clamp-1">
                 {project.name}
               </h3>
             </div>
@@ -69,12 +69,12 @@ export const ProjectCard: React.FC<ProjectCardProps> = ({
           <div className="flex items-center gap-1.5 p-2 rounded-lg bg-gray-950/50 border border-gray-800/60">
             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
             <span className="text-gray-400">Done:</span>
-            <span className="font-semibold text-white font-mono">{completed}</span>
+            <span className="font-semibold text-gray-100 font-mono">{completed}</span>
           </div>
           <div className="flex items-center gap-1.5 p-2 rounded-lg bg-gray-950/50 border border-gray-800/60">
             <Clock className="w-3.5 h-3.5 text-indigo-400" />
             <span className="text-gray-400">Active:</span>
-            <span className="font-semibold text-white font-mono">{active}</span>
+            <span className="font-semibold text-gray-100 font-mono">{active}</span>
           </div>
         </div>
       </div>

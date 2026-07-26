@@ -72,7 +72,7 @@ export const KanbanPage: React.FC = () => {
       {/* Top Bar Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-extrabold text-white tracking-tight flex items-center gap-2">
+          <h1 className="text-2xl font-extrabold text-gray-100 tracking-tight flex items-center gap-2">
             <LayoutGrid className="w-6 h-6 text-indigo-400" />
             <span>Kanban Board</span>
           </h1>
@@ -85,7 +85,7 @@ export const KanbanPage: React.FC = () => {
           <button
             onClick={fetchTasks}
             disabled={loading}
-            className="flex items-center space-x-1.5 px-3 py-2 rounded-lg bg-gray-900 border border-gray-800 text-gray-300 hover:text-white hover:border-gray-700 text-sm font-medium transition-colors disabled:opacity-50"
+            className="flex items-center space-x-1.5 px-3 py-2 rounded-lg bg-gray-900 border border-gray-800 text-gray-300 hover:text-gray-100 hover:border-gray-700 text-sm font-medium transition-colors disabled:opacity-50"
             title="Refresh board"
           >
             <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
@@ -94,7 +94,7 @@ export const KanbanPage: React.FC = () => {
 
           <Link
             to="/tasks"
-            className="flex items-center space-x-1.5 px-3 py-2 rounded-lg bg-gray-900 border border-gray-800 text-gray-300 hover:text-white hover:border-gray-700 text-sm font-medium transition-colors"
+            className="flex items-center space-x-1.5 px-3 py-2 rounded-lg bg-gray-900 border border-gray-800 text-gray-300 hover:text-gray-100 hover:border-gray-700 text-sm font-medium transition-colors"
           >
             <Table className="w-4 h-4 text-indigo-400" />
             <span>Table View</span>

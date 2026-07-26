@@ -61,7 +61,7 @@ export const AgentStats: React.FC<AgentStatsProps> = ({
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-medium text-gray-400">Total Agent Roster</p>
-              <h3 className="text-2xl font-extrabold text-white mt-1 font-mono">{totalAgents}</h3>
+              <h3 className="text-2xl font-extrabold text-gray-100 mt-1 font-mono">{totalAgents}</h3>
             </div>
             <div className="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
               <Bot className="w-5 h-5" />
@@ -84,7 +84,7 @@ export const AgentStats: React.FC<AgentStatsProps> = ({
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-medium text-gray-400">Total Tasks Executed</p>
-              <h3 className="text-2xl font-extrabold text-white mt-1 font-mono">{totalExecuted}</h3>
+              <h3 className="text-2xl font-extrabold text-gray-100 mt-1 font-mono">{totalExecuted}</h3>
             </div>
             <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
               <Zap className="w-5 h-5" />
@@ -100,7 +100,7 @@ export const AgentStats: React.FC<AgentStatsProps> = ({
           <div className="flex items-center justify-between">
             <div>
               <p className="text-xs font-medium text-gray-400">Four-Eyes Reviews</p>
-              <h3 className="text-2xl font-extrabold text-white mt-1 font-mono">{totalReviewed}</h3>
+              <h3 className="text-2xl font-extrabold text-gray-100 mt-1 font-mono">{totalReviewed}</h3>
             </div>
             <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
               <ShieldCheck className="w-5 h-5" />
@@ -143,7 +143,7 @@ export const AgentStats: React.FC<AgentStatsProps> = ({
                 key={role}
                 className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-gray-950/80 border border-gray-800 text-gray-300"
               >
-                <span className="font-semibold text-white capitalize">{role}</span>
+                <span className="font-semibold text-gray-100 capitalize">{role}</span>
                 <span className="text-xs px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 font-mono">
                   {count}
                 </span>

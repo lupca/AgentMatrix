@@ -66,7 +66,7 @@ export const StatusChart: React.FC<StatusChartProps> = ({
     <div className="rounded-xl border border-gray-800/80 bg-gray-900/60 p-6 shadow-lg backdrop-blur-sm">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-800/80">
         <div>
-          <h2 className="text-base font-semibold text-white flex items-center gap-2">
+          <h2 className="text-base font-semibold text-gray-100 flex items-center gap-2">
             <BarChart3 className="w-4 h-4 text-indigo-400" />
             Task Execution Distribution
           </h2>

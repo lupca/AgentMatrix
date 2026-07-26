@@ -45,7 +45,7 @@ export const AgentOutputViewer: React.FC<AgentOutputViewerProps> = ({
         <button
           type="button"
           onClick={handleCopy}
-          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-gray-400 transition-colors hover:bg-gray-800 hover:text-white"
+          className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-gray-400 transition-colors hover:bg-gray-800 hover:text-gray-100"
           title="Copy agent output"
           aria-label="Copy agent output"
         >

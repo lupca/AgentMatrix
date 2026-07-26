@@ -77,7 +77,7 @@ export const RunHistory: React.FC<RunHistoryProps> = ({ taskId, refreshKey = 0 }
           type="button"
           onClick={() => fetchRuns(true)}
           disabled={loading || refreshing}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-800 bg-gray-950 px-2.5 py-1.5 text-xs font-medium text-gray-400 transition-colors hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-800 bg-gray-950 px-2.5 py-1.5 text-xs font-medium text-gray-400 transition-colors hover:text-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
           title="Refresh run history"
         >
           <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />

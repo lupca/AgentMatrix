@@ -256,7 +256,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h3 className="text-sm font-bold text-white tracking-wide">
+              <h3 className="text-sm font-bold text-gray-100 tracking-wide">
                 Task Copilot Chat
               </h3>
               <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-mono">
@@ -274,7 +274,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           <button
             onClick={fetchSessionHistory}
             disabled={loadingHistory || isStreaming}
-            className="p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors disabled:opacity-40"
+            className="p-1.5 rounded-lg text-gray-400 hover:text-gray-100 hover:bg-gray-800 transition-colors disabled:opacity-40"
             title="Refresh history"
           >
             <RefreshCw className={`w-4 h-4 ${loadingHistory ? 'animate-spin' : ''}`} />
@@ -290,7 +290,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           {onClose && (
             <button
               onClick={onClose}
-              className="px-2 py-1 text-xs font-semibold rounded-lg bg-gray-800 text-gray-300 hover:text-white hover:bg-gray-700 transition-colors"
+            className="px-2 py-1 text-xs font-semibold rounded-lg bg-gray-800 text-gray-300 hover:text-gray-100 hover:bg-gray-700 transition-colors"
             >
               Close
             </button>

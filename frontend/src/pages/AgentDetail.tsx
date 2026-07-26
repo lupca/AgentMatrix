@@ -121,7 +121,7 @@ export const AgentDetailPage: React.FC = () => {
       <div className="space-y-4">
         <button
           onClick={() => navigate('/agents')}
-          className="inline-flex items-center gap-2 text-xs font-medium text-gray-400 hover:text-white transition-colors"
+          className="inline-flex items-center gap-2 text-xs font-medium text-gray-400 hover:text-gray-100 transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
           <span>Back to Agent Roster</span>
@@ -169,14 +169,14 @@ export const AgentDetailPage: React.FC = () => {
                     </span>
                   </div>
 
-                  <h1 className="text-2xl font-bold text-white tracking-tight mt-1">
+                  <h1 className="text-2xl font-bold text-gray-100 tracking-tight mt-1">
                     {agent?.name}
                   </h1>
 
                   <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400">
                     <span className="flex items-center gap-1">
                       <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
-                      Role: <strong className="text-white capitalize">{agent?.role}</strong>
+                      Role: <strong className="text-gray-100 capitalize">{agent?.role}</strong>
                     </span>
                     <span>•</span>
                     <span className="flex items-center gap-1">
@@ -209,7 +209,7 @@ export const AgentDetailPage: React.FC = () => {
         <div className="rounded-xl border border-gray-800/80 bg-gray-900/60 p-4 shadow-lg backdrop-blur-sm flex items-center justify-between">
           <div>
             <p className="text-xs font-medium text-gray-400">Tasks Executed</p>
-            <h3 className="text-2xl font-extrabold text-white mt-1 font-mono">{executedCount}</h3>
+            <h3 className="text-2xl font-extrabold text-gray-100 mt-1 font-mono">{executedCount}</h3>
           </div>
           <div className="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center text-purple-400">
             <Zap className="w-5 h-5" />
@@ -251,7 +251,7 @@ export const AgentDetailPage: React.FC = () => {
       <div className="rounded-xl border border-gray-800/80 bg-gray-900/60 p-6 shadow-lg backdrop-blur-sm space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-800/80">
           <div>
-            <h2 className="text-base font-semibold text-white flex items-center gap-2">
+            <h2 className="text-base font-semibold text-gray-100 flex items-center gap-2">
               <Layers className="w-4 h-4 text-purple-400" />
               Assigned Task Workload
             </h2>
@@ -331,7 +331,7 @@ export const AgentDetailPage: React.FC = () => {
                         {task.project}
                       </Link>
                     </td>
-                    <td className="p-3 font-medium text-white max-w-md line-clamp-1">
+                    <td className="p-3 font-medium text-gray-100 max-w-md line-clamp-1">
                       {task.title}
                     </td>
                     <td className="p-3 whitespace-nowrap">

@@ -28,7 +28,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
       return (
         <main className="min-h-screen bg-gray-950 text-gray-100 flex items-center justify-center p-6">
           <div className="max-w-md text-center space-y-4">
-            <h1 className="text-2xl font-bold text-white">Something went wrong</h1>
+            <h1 className="text-2xl font-bold text-gray-100">Something went wrong</h1>
             <p className="text-gray-400">
               The application encountered an unexpected error. Please reload the page and try again.
             </p>

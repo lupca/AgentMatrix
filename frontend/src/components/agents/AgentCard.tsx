@@ -60,7 +60,7 @@ export const AgentCard: React.FC<AgentCardProps> = ({ agent, stats }) => {
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-base font-semibold text-white group-hover:text-purple-300 transition-colors">
+                <h3 className="text-base font-semibold text-gray-100 group-hover:text-purple-300 transition-colors">
                   {agent.name}
                 </h3>
               </div>
@@ -81,7 +81,7 @@ export const AgentCard: React.FC<AgentCardProps> = ({ agent, stats }) => {
         <div className="mt-3.5 flex items-center gap-2">
           <span className="text-xs px-2.5 py-1 rounded-md bg-gray-950/80 border border-gray-800 text-gray-300 font-medium capitalize flex items-center gap-1.5">
             <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
-            Role: <strong className="text-white">{agent.role}</strong>
+            Role: <strong className="text-gray-100">{agent.role}</strong>
           </span>
         </div>
 
@@ -111,11 +111,11 @@ export const AgentCard: React.FC<AgentCardProps> = ({ agent, stats }) => {
         <div className="grid grid-cols-3 gap-2 text-center text-xs">
           <div className="p-2 rounded-lg bg-gray-950/60 border border-gray-800/50">
             <span className="text-[10px] text-gray-400 block">Executed</span>
-            <span className="font-bold text-white font-mono">{executed}</span>
+                <span className="font-bold text-gray-100 font-mono">{executed}</span>
           </div>
           <div className="p-2 rounded-lg bg-gray-950/60 border border-gray-800/50">
             <span className="text-[10px] text-gray-400 block">Reviewed</span>
-            <span className="font-bold text-white font-mono">{reviewed}</span>
+                <span className="font-bold text-gray-100 font-mono">{reviewed}</span>
           </div>
           <div className="p-2 rounded-lg bg-gray-950/60 border border-gray-800/50">
             <span className="text-[10px] text-gray-400 block">Success Rate</span>

@@ -79,7 +79,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             type="button"
             onClick={() => handleQuickPromptClick(prompt)}
             disabled={disabled || isStreaming}
-            className="text-[11px] px-2.5 py-1 rounded-full bg-gray-900 border border-gray-800 text-gray-300 hover:text-white hover:border-indigo-500/40 hover:bg-gray-800 transition-all disabled:opacity-40 disabled:pointer-events-none whitespace-nowrap"
+            className="text-[11px] px-2.5 py-1 rounded-full bg-gray-900 border border-gray-800 text-gray-300 hover:text-gray-100 hover:border-indigo-500/40 hover:bg-gray-800 transition-all disabled:opacity-40 disabled:pointer-events-none whitespace-nowrap"
           >
             {prompt}
           </button>

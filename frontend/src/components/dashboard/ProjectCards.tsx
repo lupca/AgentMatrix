@@ -48,7 +48,7 @@ export const ProjectCards: React.FC<ProjectCardsProps> = ({
     <div className="rounded-xl border border-gray-800/80 bg-gray-900/60 p-6 shadow-lg backdrop-blur-sm">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-800/80">
         <div>
-          <h2 className="text-base font-semibold text-white flex items-center gap-2">
+          <h2 className="text-base font-semibold text-gray-100 flex items-center gap-2">
             <FolderKanban className="w-4 h-4 text-indigo-400" />
             Project Progress & Status
           </h2>
@@ -100,7 +100,7 @@ export const ProjectCards: React.FC<ProjectCardsProps> = ({
                       <span className="text-[10px] font-mono font-medium text-indigo-400 uppercase tracking-wide">
                         {project.id}
                       </span>
-                      <h3 className="text-sm font-semibold text-white group-hover:text-indigo-300 transition-colors">
+                      <h3 className="text-sm font-semibold text-gray-100 group-hover:text-indigo-300 transition-colors">
                         {project.name}
                       </h3>
                     </div>

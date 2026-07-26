@@ -124,7 +124,7 @@ export const TaskHeader: React.FC<TaskHeaderProps> = ({
         <div className="flex items-center space-x-3">
           <button
             onClick={() => navigate('/tasks')}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-950/80 border border-gray-800 text-xs font-medium text-gray-400 hover:text-white hover:border-gray-700 transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-950/80 border border-gray-800 text-xs font-medium text-gray-400 hover:text-gray-100 hover:border-gray-700 transition-colors"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
             <span>Tasks</span>
@@ -139,7 +139,7 @@ export const TaskHeader: React.FC<TaskHeaderProps> = ({
           <span className="text-gray-600">/</span>
           <button
             onClick={handleCopyId}
-            className="flex items-center gap-1 text-xs font-mono font-bold text-gray-300 hover:text-white bg-gray-950 px-2 py-0.5 rounded border border-gray-800"
+              className="flex items-center gap-1 text-xs font-mono font-bold text-gray-300 hover:text-gray-100 bg-gray-950 px-2 py-0.5 rounded border border-gray-800"
             title="Copy Task ID"
           >
             <span>{task.id}</span>
@@ -151,7 +151,7 @@ export const TaskHeader: React.FC<TaskHeaderProps> = ({
           {onRefresh && (
             <button
               onClick={onRefresh}
-              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-gray-950 border border-gray-800 text-gray-300 hover:text-white text-xs font-medium transition-colors"
+              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-gray-950 border border-gray-800 text-gray-300 hover:text-gray-100 text-xs font-medium transition-colors"
               title="Reload Task data"
             >
               <RefreshCw className="w-3.5 h-3.5" />
@@ -185,7 +185,7 @@ export const TaskHeader: React.FC<TaskHeaderProps> = ({
       {/* Title & Badges */}
       <div className="space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-          <h1 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight leading-snug">
+          <h1 className="text-xl sm:text-2xl font-extrabold text-gray-100 tracking-tight leading-snug">
             {task.title}
           </h1>
 

@@ -111,7 +111,7 @@ export const QuickActions: React.FC<QuickActionsProps> = ({
             type="button"
             onClick={() => void handleAction(action.id)}
             disabled={disabled}
-            className="inline-flex h-7 items-center gap-1 rounded-lg border border-gray-700 bg-gray-900 px-2.5 text-[11px] font-semibold text-gray-300 transition-colors hover:border-indigo-500/50 hover:bg-gray-800 hover:text-white disabled:pointer-events-none disabled:opacity-40"
+            className="inline-flex h-7 items-center gap-1 rounded-lg border border-gray-700 bg-gray-900 px-2.5 text-[11px] font-semibold text-gray-300 transition-colors hover:border-indigo-500/50 hover:bg-gray-800 hover:text-gray-100 disabled:pointer-events-none disabled:opacity-40"
           >
             <Icon className="h-3 w-3" />
             {action.label}

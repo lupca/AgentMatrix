@@ -115,7 +115,7 @@ export const KpiCards: React.FC<KpiCardsProps> = ({ data, loading }) => {
             </div>
 
             <div className="mt-3 flex items-baseline justify-between">
-              <span className="text-3xl font-extrabold tracking-tight text-white">
+              <span className="text-3xl font-extrabold tracking-tight text-gray-100">
                 {card.value}
               </span>
               <span

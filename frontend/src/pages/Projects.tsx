@@ -121,7 +121,7 @@ export const ProjectsPage: React.FC = () => {
               <FolderKanban className="w-5 h-5" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+              <h1 className="text-2xl font-bold text-gray-100 tracking-tight flex items-center gap-2">
                 Projects Directory
               </h1>
               <p className="text-gray-400 text-xs mt-0.5">
@@ -172,7 +172,7 @@ export const ProjectsPage: React.FC = () => {
         <div className="rounded-xl border border-gray-800/80 bg-gray-900/60 p-4 shadow-lg backdrop-blur-sm flex items-center justify-between">
           <div>
             <p className="text-xs font-medium text-gray-400">Total Projects</p>
-            <h3 className="text-2xl font-extrabold text-white mt-1 font-mono">{totalProjects}</h3>
+            <h3 className="text-2xl font-extrabold text-gray-100 mt-1 font-mono">{totalProjects}</h3>
           </div>
           <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center text-indigo-400">
             <Layers className="w-5 h-5" />
@@ -264,13 +264,13 @@ export const ProjectsPage: React.FC = () => {
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4 relative">
             <div className="flex items-center justify-between pb-3 border-b border-gray-800">
-              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+              <h3 className="text-lg font-bold text-gray-100 flex items-center gap-2">
                 <FolderKanban className="w-5 h-5 text-indigo-400" />
                 Register New Project
               </h3>
               <button
                 onClick={() => setShowModal(false)}
-                className="p-1 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800"
+                className="p-1 rounded-lg text-gray-400 hover:text-gray-100 hover:bg-gray-800"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -322,7 +322,7 @@ export const ProjectsPage: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setShowModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-white hover:bg-gray-800"
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-gray-100 hover:bg-gray-800"
                 >
                   Cancel
                 </button>

@@ -92,7 +92,7 @@ export const KanbanCard: React.FC<KanbanCardProps> = ({ task, onStatusChange }) 
       </div>
 
       {/* Title */}
-      <h4 className="text-sm font-semibold text-white group-hover:text-indigo-200 transition-colors line-clamp-2">
+      <h4 className="text-sm font-semibold text-gray-100 group-hover:text-indigo-200 transition-colors line-clamp-2">
         {task.title}
       </h4>
 
@@ -135,7 +135,7 @@ export const KanbanCard: React.FC<KanbanCardProps> = ({ task, onStatusChange }) 
               <button
                 onClick={() => onStatusChange(task.id, prevStatus)}
                 title={`Move to ${prevStatus}`}
-                className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-white"
+                className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-gray-100"
               >
                 <ChevronLeft className="w-3.5 h-3.5" />
               </button>
@@ -144,7 +144,7 @@ export const KanbanCard: React.FC<KanbanCardProps> = ({ task, onStatusChange }) 
               <button
                 onClick={() => onStatusChange(task.id, nextStatus)}
                 title={`Move to ${nextStatus}`}
-                className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-white"
+                className="p-1 rounded hover:bg-gray-800 text-gray-400 hover:text-gray-100"
               >
                 <ChevronRight className="w-3.5 h-3.5" />
               </button>

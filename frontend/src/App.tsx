@@ -1,5 +1,4 @@
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { useAppStore } from './lib/store';
 import { LayoutDashboard, FolderKanban, Bot, CheckSquare, LayoutGrid, Settings as SettingsIcon, Moon, Sun } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import ProjectsPage from './pages/Projects';
@@ -11,10 +10,11 @@ import TaskDetailPage from './pages/TaskDetail';
 import KanbanPage from './pages/Kanban';
 import ErrorBoundary from './components/ErrorBoundary';
 import { Toaster } from 'react-hot-toast';
+import { ThemeProvider, useTheme } from './contexts/ThemeContext';
 
 function Navigation() {
   const location = useLocation();
-  const { darkMode, toggleDarkMode } = useAppStore();
+  const { theme, toggleTheme } = useTheme();
 
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -33,7 +33,7 @@ function Navigation() {
             <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
               CT
             </div>
-            <span className="font-bold text-lg text-white tracking-wide">
+            <span className="font-bold text-lg text-gray-100 tracking-wide">
               Control Tower <span className="text-xs px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-400 border border-indigo-500/30">v2</span>
             </span>
           </div>
@@ -49,7 +49,7 @@ function Navigation() {
                   to={item.path}
                   className={`flex items-center space-x-2 px-3 py-2 rounded-md text-sm font-medium transition-colors ${
                     isActive
-                      ? 'bg-gray-800 text-white shadow-sm'
+                      ? 'bg-gray-800 text-gray-100 shadow-sm'
                       : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
                   }`}
                 >
@@ -62,11 +62,12 @@ function Navigation() {
         </div>
         <div className="flex items-center space-x-4">
           <button
-            onClick={toggleDarkMode}
-            className="p-2 rounded-lg bg-gray-800 text-gray-400 hover:text-white transition-colors"
-            title="Toggle theme"
+            onClick={toggleTheme}
+            className="p-2 rounded-lg bg-gray-800 text-gray-400 hover:text-gray-100 transition-colors"
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
           >
-            {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+            {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
         </div>
       </div>
@@ -77,7 +78,7 @@ function Navigation() {
 function SettingsPage() {
   return (
     <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-bold text-white">System Settings</h1>
+      <h1 className="text-2xl font-bold text-gray-100">System Settings</h1>
       <p className="text-gray-400 text-sm">Configure backend endpoints and LLM provider settings.</p>
       <div className="p-6 rounded-xl border border-gray-800 bg-gray-900/60 max-w-xl space-y-4">
         <div>
@@ -96,26 +97,28 @@ function SettingsPage() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <ErrorBoundary>
-        <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col font-sans">
-          <Navigation />
-          <main className="flex-1 max-w-7xl w-full mx-auto">
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/projects" element={<ProjectsPage />} />
-              <Route path="/projects/:id" element={<ProjectDetailPage />} />
-              <Route path="/agents" element={<AgentsPage />} />
-              <Route path="/agents/:id" element={<AgentDetailPage />} />
-              <Route path="/tasks" element={<TasksPage />} />
-              <Route path="/tasks/:id" element={<TaskDetailPage />} />
-              <Route path="/kanban" element={<KanbanPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-            </Routes>
-          </main>
-        </div>
-      </ErrorBoundary>
-      <Toaster position="top-right" />
-    </BrowserRouter>
+    <ThemeProvider>
+      <BrowserRouter>
+        <ErrorBoundary>
+          <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col font-sans">
+            <Navigation />
+            <main className="flex-1 max-w-7xl w-full mx-auto">
+              <Routes>
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/projects" element={<ProjectsPage />} />
+                <Route path="/projects/:id" element={<ProjectDetailPage />} />
+                <Route path="/agents" element={<AgentsPage />} />
+                <Route path="/agents/:id" element={<AgentDetailPage />} />
+                <Route path="/tasks" element={<TasksPage />} />
+                <Route path="/tasks/:id" element={<TaskDetailPage />} />
+                <Route path="/kanban" element={<KanbanPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
+              </Routes>
+            </main>
+          </div>
+        </ErrorBoundary>
+        <Toaster position="top-right" toastOptions={{ className: 'theme-toast' }} />
+      </BrowserRouter>
+    </ThemeProvider>
   );
 }

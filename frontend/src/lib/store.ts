@@ -7,8 +7,6 @@ interface User {
 }
 
 interface AppState {
-  darkMode: boolean;
-  toggleDarkMode: () => void;
   user: User | null;
   setUser: (user: User | null) => void;
   activeTaskId: string | null;
@@ -16,19 +14,6 @@ interface AppState {
 }
 
 export const useAppStore = create<AppState>((set) => ({
-  darkMode: true,
-  toggleDarkMode: () =>
-    set((state) => {
-      const nextMode = !state.darkMode;
-      if (typeof document !== 'undefined') {
-        if (nextMode) {
-          document.documentElement.classList.add('dark');
-        } else {
-          document.documentElement.classList.remove('dark');
-        }
-      }
-      return { darkMode: nextMode };
-    }),
   user: {
     id: '1',
     name: 'Operator',

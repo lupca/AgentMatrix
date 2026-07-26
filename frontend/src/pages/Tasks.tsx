@@ -104,7 +104,7 @@ export const TasksPage: React.FC = () => {
       {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-extrabold text-white tracking-tight flex items-center gap-2">
+          <h1 className="text-2xl font-extrabold text-gray-100 tracking-tight flex items-center gap-2">
             <CheckSquare className="w-6 h-6 text-indigo-400" />
             <span>Tasks Table</span>
           </h1>
@@ -139,7 +139,7 @@ export const TasksPage: React.FC = () => {
         <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-3.5 flex items-center justify-between">
           <div>
             <div className="text-xs text-gray-400 font-medium">Total Tasks</div>
-            <div className="text-xl font-bold text-white mt-0.5">{stats.total}</div>
+          <div className="text-xl font-bold text-gray-100 mt-0.5">{stats.total}</div>
           </div>
           <CheckSquare className="w-5 h-5 text-indigo-400" />
         </div>

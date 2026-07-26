@@ -124,7 +124,7 @@ export const ProjectDetailPage: React.FC = () => {
       <div className="space-y-4">
         <button
           onClick={() => navigate('/projects')}
-          className="inline-flex items-center gap-2 text-xs font-medium text-gray-400 hover:text-white transition-colors"
+          className="inline-flex items-center gap-2 text-xs font-medium text-gray-400 hover:text-gray-100 transition-colors"
         >
           <ArrowLeft className="w-4 h-4" />
           <span>Back to Projects Directory</span>
@@ -168,7 +168,7 @@ export const ProjectDetailPage: React.FC = () => {
                       {project?.status}
                     </span>
                   </div>
-                  <h1 className="text-2xl font-bold text-white tracking-tight mt-1">
+                  <h1 className="text-2xl font-bold text-gray-100 tracking-tight mt-1">
                     {project?.name}
                   </h1>
                 </div>
@@ -193,7 +193,7 @@ export const ProjectDetailPage: React.FC = () => {
       <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
         <div className="rounded-xl border border-gray-800/80 bg-gray-900/60 p-4 shadow-lg backdrop-blur-sm">
           <p className="text-xs font-medium text-gray-400">Total Project Tasks</p>
-          <h3 className="text-2xl font-extrabold text-white mt-1 font-mono">{totalTasks}</h3>
+          <h3 className="text-2xl font-extrabold text-gray-100 mt-1 font-mono">{totalTasks}</h3>
         </div>
 
         <div className="rounded-xl border border-gray-800/80 bg-gray-900/60 p-4 shadow-lg backdrop-blur-sm">
@@ -224,7 +224,7 @@ export const ProjectDetailPage: React.FC = () => {
       <div className="rounded-xl border border-gray-800/80 bg-gray-900/60 p-6 shadow-lg backdrop-blur-sm space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-gray-800/80">
           <div>
-            <h2 className="text-base font-semibold text-white flex items-center gap-2">
+            <h2 className="text-base font-semibold text-gray-100 flex items-center gap-2">
               <Layers className="w-4 h-4 text-indigo-400" />
               Project Task Execution Queue
             </h2>
@@ -291,7 +291,7 @@ export const ProjectDetailPage: React.FC = () => {
                     <td className="p-3 font-mono font-semibold text-indigo-400 whitespace-nowrap">
                       {task.id}
                     </td>
-                    <td className="p-3 font-medium text-white max-w-md line-clamp-1">
+                    <td className="p-3 font-medium text-gray-100 max-w-md line-clamp-1">
                       {task.title}
                     </td>
                     <td className="p-3 whitespace-nowrap">

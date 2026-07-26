@@ -237,7 +237,7 @@ export const TaskTable: React.FC<TaskTableProps> = ({
                         {task.id}
                       </Link>
                     </td>
-                    <td className="py-3.5 px-4 font-medium text-white max-w-xs truncate">
+                    <td className="py-3.5 px-4 font-medium text-gray-100 max-w-xs truncate">
                       <Link
                         to={`/tasks/${task.id}`}
                         onClick={() => onSelectTask?.(task)}
