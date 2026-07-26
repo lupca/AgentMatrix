@@ -64,15 +64,21 @@ export const TaskDetailPage: React.FC = () => {
     if (!task) return;
     setIsDispatching(true);
     try {
-      try {
-        await api.post(`/tasks/${task.id}/dispatch`);
-      } catch {
-        await api.patch(`/tasks/${task.id}`, { status: 'dispatched' });
-      }
+      // Use executor from task or default agent
+      const agentId = task.executor || '@gpt-5.6-luna-high';
+      const response = await api.post<{ run_id: string; status: string }>('/dispatch', {
+        task_id: task.id,
+        agent_id: agentId,
+      });
       setTask((prev) => (prev ? { ...prev, status: 'dispatched' } : null));
-      showSuccess(`Task ${task.id} dispatched successfully`);
+      showSuccess(`Task ${task.id} dispatched (run: ${response.run_id})`);
     } catch (err: any) {
       console.error('Failed to dispatch task:', err);
+      // Fallback: just update status
+      try {
+        await api.patch(`/tasks/${task.id}`, { status: 'dispatched' });
+        setTask((prev) => (prev ? { ...prev, status: 'dispatched' } : null));
+      } catch {}
     } finally {
       setIsDispatching(false);
     }
