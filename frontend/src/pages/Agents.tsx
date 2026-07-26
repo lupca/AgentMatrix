@@ -3,6 +3,7 @@ import { api } from '../lib/api';
 import { Agent, AgentStats as AgentStatsType } from '../types/agent';
 import AgentCard from '../components/agents/AgentCard';
 import AgentStats from '../components/agents/AgentStats';
+import AgentForm, { AgentFormData } from '../components/agents/AgentForm';
 import {
   Bot,
   Search,
@@ -11,8 +12,6 @@ import {
   Filter,
   ShieldCheck,
   AlertCircle,
-  X,
-  Cpu,
 } from 'lucide-react';
 
 export const AgentsPage: React.FC = () => {
@@ -27,13 +26,9 @@ export const AgentsPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
-  // New agent modal state
   const [showModal, setShowModal] = useState<boolean>(false);
-  const [newAgentId, setNewAgentId] = useState<string>('');
-  const [newAgentName, setNewAgentName] = useState<string>('');
-  const [newAgentRole, setNewAgentRole] = useState<string>('executor');
-  const [newCapabilities, setNewCapabilities] = useState<string>('code-generation, testing, review');
-  const [creating, setCreating] = useState<boolean>(false);
+  const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
+  const [saving, setSaving] = useState<boolean>(false);
 
   const fetchAgentsData = useCallback(async (isManual = false) => {
     if (isManual) setIsRefreshing(true);
@@ -73,38 +68,51 @@ export const AgentsPage: React.FC = () => {
     fetchAgentsData();
   }, [fetchAgentsData]);
 
-  const handleCreateAgent = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newAgentId.trim() || !newAgentName.trim()) return;
-
-    setCreating(true);
-    const capsArray = newCapabilities
-      .split(',')
-      .map((c) => c.trim())
-      .filter(Boolean);
-
+  const handleSaveAgent = async (data: AgentFormData) => {
+    setSaving(true);
     try {
-      const created = await api.post<Agent>('/agents', {
-        id: newAgentId.trim(),
-        name: newAgentName.trim(),
-        role: newAgentRole.trim(),
-        capabilities: capsArray,
-        status: 'idle',
-      });
-      setAgents((prev) => [created, ...prev]);
+      const saved = editingAgent
+        ? await api.patch<Agent>(`/agents/${encodeURIComponent(editingAgent.id)}`, data)
+        : await api.post<Agent>('/agents', data);
+      setAgents((prev) => editingAgent
+        ? prev.map((agent) => agent.id === saved.id ? saved : agent)
+        : [saved, ...prev]);
       setShowModal(false);
-      setNewAgentId('');
-      setNewAgentName('');
+      setEditingAgent(null);
     } catch (err: any) {
-      alert(`Failed to create agent: ${err?.message || 'Unknown error'}`);
+      alert(`Failed to save agent: ${err?.message || 'Unknown error'}`);
     } finally {
-      setCreating(false);
+      setSaving(false);
     }
   };
 
+  const openCreateModal = () => {
+    setEditingAgent(null);
+    setShowModal(true);
+  };
 
-  // Unique roles from agents
-  const availableRoles = Array.from(new Set(agents.map((a) => a.role || 'executor')));
+  const openEditModal = (agent: Agent) => {
+    setEditingAgent(agent);
+    setShowModal(true);
+  };
+
+  const handleSetDefault = async (agent: Agent) => {
+    try {
+      const updated = await api.post<Agent>(`/agents/${encodeURIComponent(agent.id)}/set-default`);
+      setAgents((prev) => prev.map((item) => item.role === 'coordinator'
+        ? item.id === updated.id ? updated : { ...item, is_default: false }
+        : item));
+    } catch (err: any) {
+      alert(`Failed to set default coordinator: ${err?.message || 'Unknown error'}`);
+    }
+  };
+
+  const roleTabs = [
+    ['all', 'All'],
+    ['executor', 'Executors'],
+    ['reviewer', 'Reviewers'],
+    ['coordinator', 'Coordinators'],
+  ];
 
   // Filtered agents
   const filteredAgents = agents.filter((a) => {
@@ -155,7 +163,7 @@ export const AgentsPage: React.FC = () => {
           </button>
 
           <button
-            onClick={() => setShowModal(true)}
+            onClick={openCreateModal}
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs shadow-lg shadow-purple-600/20 transition-all"
           >
             <Plus className="w-4 h-4" />
@@ -219,17 +227,7 @@ export const AgentsPage: React.FC = () => {
           <span className="text-xs text-gray-400 font-medium mr-1 flex items-center gap-1">
             <Filter className="w-3 h-3 text-purple-400" /> Role Filter:
           </span>
-          <button
-            onClick={() => setRoleFilter('all')}
-            className={`px-3 py-1 rounded-lg text-xs font-medium capitalize transition-colors ${
-              roleFilter === 'all'
-                ? 'bg-purple-600 text-white shadow-md'
-                : 'bg-gray-950/60 text-gray-400 hover:text-gray-200 border border-gray-800/60'
-            }`}
-          >
-            All Roles ({agents.length})
-          </button>
-          {availableRoles.map((role) => (
+          {roleTabs.map(([role, label]) => (
             <button
               key={role}
               onClick={() => setRoleFilter(role)}
@@ -239,7 +237,7 @@ export const AgentsPage: React.FC = () => {
                   : 'bg-gray-950/60 text-gray-400 hover:text-gray-200 border border-gray-800/60'
               }`}
             >
-              {role}
+              {label} ({role === 'all' ? agents.length : agents.filter((agent) => agent.role === role).length})
             </button>
           ))}
         </div>
@@ -267,103 +265,36 @@ export const AgentsPage: React.FC = () => {
               key={agent.id}
               agent={agent}
               stats={statsMap[agent.id]}
+              onEdit={openEditModal}
+              onSetDefault={handleSetDefault}
             />
           ))}
         </div>
       )}
 
-      {/* Modal to Register Agent */}
+      {/* Add/edit agent modal */}
       {showModal && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-md shadow-2xl space-y-4 relative">
+          <div className="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-lg shadow-2xl space-y-4 relative">
             <div className="flex items-center justify-between pb-3 border-b border-gray-800">
-                <h3 className="text-lg font-bold text-gray-100 flex items-center gap-2">
+              <h3 className="text-lg font-bold text-gray-100 flex items-center gap-2">
                 <Bot className="w-5 h-5 text-purple-400" />
-                Register New AI Agent
+                {editingAgent ? 'Edit AI Agent' : 'Register New AI Agent'}
               </h3>
               <button
-                onClick={() => setShowModal(false)}
+                onClick={() => { setShowModal(false); setEditingAgent(null); }}
                 className="p-1 rounded-lg text-gray-400 hover:text-gray-100 hover:bg-gray-800"
+                aria-label="Close agent form"
               >
-                <X className="w-5 h-5" />
+                ×
               </button>
             </div>
-
-            <form onSubmit={handleCreateAgent} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1">
-                  Agent ID *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. CodeAgent-02, SecurityReviewer-01"
-                  value={newAgentId}
-                  onChange={(e) => setNewAgentId(e.target.value)}
-                  className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500 font-mono"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1">
-                  Agent Display Name *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Frontend Specialist Agent"
-                  value={newAgentName}
-                  onChange={(e) => setNewAgentName(e.target.value)}
-                  className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1">
-                  Agent Role *
-                </label>
-                <select
-                  value={newAgentRole}
-                  onChange={(e) => setNewAgentRole(e.target.value)}
-                  className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500 capitalize"
-                >
-                  <option value="executor">Executor (Task Execution)</option>
-                  <option value="reviewer">Reviewer (Four-Eyes Gate Approval)</option>
-                  <option value="spec_author">Spec Author (Requirements & Spec)</option>
-                  <option value="orchestrator">Orchestrator (State Router)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-gray-300 uppercase tracking-wider mb-1">
-                  Capabilities (Comma separated)
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g. typescript, unit-testing, react, refactoring"
-                  value={newCapabilities}
-                  onChange={(e) => setNewCapabilities(e.target.value)}
-                  className="w-full bg-gray-950 border border-gray-800 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-purple-500 text-xs"
-                />
-              </div>
-
-              <div className="pt-3 border-t border-gray-800 flex items-center justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-400 hover:text-gray-100 hover:bg-gray-800"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={creating}
-                  className="px-5 py-2 rounded-xl text-xs font-medium bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-600/20 disabled:opacity-50"
-                >
-                  {creating ? 'Registering...' : 'Register Agent'}
-                </button>
-              </div>
-            </form>
+            <AgentForm
+              agent={editingAgent}
+              submitting={saving}
+              onSubmit={handleSaveAgent}
+              onCancel={() => { setShowModal(false); setEditingAgent(null); }}
+            />
           </div>
         </div>
       )}

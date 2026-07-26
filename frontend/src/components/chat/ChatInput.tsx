@@ -13,6 +13,7 @@ interface ChatInputProps {
   task?: Task;
   currentModel?: string | null;
   onModelChange?: (model: string) => void | Promise<void>;
+  onDefaultModelChange?: (model: string) => void;
   isModelLoading?: boolean;
 }
 
@@ -25,6 +26,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   task,
   currentModel,
   onModelChange,
+  onDefaultModelChange,
   isModelLoading = false,
 }) => {
   const [input, setInput] = useState('');
@@ -79,6 +81,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         <ModelSelector
           currentModel={currentModel}
           onModelChange={onModelChange}
+          onDefaultModelChange={onDefaultModelChange}
           disabled={disabled || isStreaming}
           isLoading={isModelLoading}
         />

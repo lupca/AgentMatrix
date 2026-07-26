@@ -222,6 +222,7 @@ class Agent(Base):
     model = Column(String(50), nullable=True)
     effort = Column(String(20), nullable=True)
     cli = Column(String(50), nullable=True)
+    is_default = Column(Boolean, nullable=False, default=False, server_default="false")
     success_rate = Column(Float, nullable=True, default=0.0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

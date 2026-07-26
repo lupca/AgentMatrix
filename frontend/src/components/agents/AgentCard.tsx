@@ -1,14 +1,16 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Bot, Cpu, CheckCircle2, Award, ArrowRight, ShieldCheck, Zap } from 'lucide-react';
+import { Bot, Cpu, CheckCircle2, Award, ArrowRight, ShieldCheck, Zap, Pencil, Star } from 'lucide-react';
 import { Agent, AgentStats } from '../../types/agent';
 
 interface AgentCardProps {
   agent: Agent;
   stats?: AgentStats;
+  onEdit?: (agent: Agent) => void;
+  onSetDefault?: (agent: Agent) => void;
 }
 
-export const AgentCard: React.FC<AgentCardProps> = ({ agent, stats }) => {
+export const AgentCard: React.FC<AgentCardProps> = ({ agent, stats, onEdit, onSetDefault }) => {
   const executed = stats?.tasks_executed ?? 0;
   const reviewed = stats?.tasks_reviewed ?? 0;
   const completed = stats?.tasks_completed ?? 0;
@@ -63,6 +65,11 @@ export const AgentCard: React.FC<AgentCardProps> = ({ agent, stats }) => {
                 <h3 className="text-base font-semibold text-gray-100 group-hover:text-purple-300 transition-colors">
                   {agent.name}
                 </h3>
+                {agent.role === 'coordinator' && agent.is_default && (
+                  <span className="flex items-center gap-1 rounded-full border border-amber-400/30 bg-amber-400/10 px-2 py-0.5 text-[10px] text-amber-300">
+                    <Star className="h-3 w-3 fill-current" /> Default
+                  </span>
+                )}
               </div>
               <span className="text-[11px] font-mono text-purple-400/90 flex items-center gap-1 mt-0.5">
                 <Cpu className="w-3 h-3" />
@@ -104,10 +111,36 @@ export const AgentCard: React.FC<AgentCardProps> = ({ agent, stats }) => {
             )}
           </div>
         </div>
+
+        {agent.model && (
+          <div className="mt-3 text-[11px] text-gray-400">
+            Model: <span className="font-mono text-gray-200">{agent.model}</span>
+          </div>
+        )}
       </div>
 
       {/* Stats Summary & Action */}
       <div className="mt-5 pt-4 border-t border-gray-800/80 space-y-3">
+        <div className="flex gap-2">
+          {onEdit && (
+            <button
+              type="button"
+              onClick={() => onEdit(agent)}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-gray-700 px-3 py-2 text-xs font-medium text-gray-300 transition-colors hover:border-purple-500/50 hover:bg-gray-800 hover:text-white"
+            >
+              <Pencil className="h-3.5 w-3.5" /> Edit
+            </button>
+          )}
+          {agent.role === 'coordinator' && !agent.is_default && onSetDefault && (
+            <button
+              type="button"
+              onClick={() => onSetDefault(agent)}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-amber-500/20 px-3 py-2 text-xs font-medium text-amber-300 transition-colors hover:bg-amber-500/10"
+            >
+              <Star className="h-3.5 w-3.5" /> Set default
+            </button>
+          )}
+        </div>
         <div className="grid grid-cols-3 gap-2 text-center text-xs">
           <div className="p-2 rounded-lg bg-gray-950/60 border border-gray-800/50">
             <span className="text-[10px] text-gray-400 block">Executed</span>

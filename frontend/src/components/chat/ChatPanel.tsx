@@ -36,7 +36,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [selectedModel, setSelectedModel] = useState(DEFAULT_COORDINATOR_MODEL);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
   const [selectedProvider, setSelectedProvider] = useState(
     providerForModel(DEFAULT_COORDINATOR_MODEL),
   );
@@ -68,11 +68,11 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
       const session = sessionData as ChatSession | null;
       setSessionId(session?.id || null);
-      const nextModel = session?.selected_model || DEFAULT_COORDINATOR_MODEL;
+      const nextModel = session?.selected_model || null;
       setSelectedModel(nextModel);
       setSelectedProvider(
         (session?.selected_provider as 'anthropic' | 'google' | null) ||
-          providerForModel(nextModel),
+          providerForModel(nextModel || DEFAULT_COORDINATOR_MODEL),
       );
 
       if (sessionData && Array.isArray(sessionData.messages)) {
@@ -182,7 +182,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         body: JSON.stringify({
           thread_id: threadId,
           message: userText,
-          model: selectedModel,
+          model: selectedModel || DEFAULT_COORDINATOR_MODEL,
           provider: selectedProvider,
         }),
       });
@@ -384,6 +384,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           onTaskAction={onTaskAction}
           currentModel={selectedModel}
           onModelChange={handleModelChange}
+          onDefaultModelChange={(model) => {
+            setSelectedModel(model);
+            setSelectedProvider(providerForModel(model));
+          }}
           isModelLoading={isModelSwitching}
           placeholder={`Message Control Tower AI (${taskId ? `Task ${taskId}` : 'Assistant'})...`}
         />

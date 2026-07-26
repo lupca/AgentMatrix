@@ -4,6 +4,11 @@ export interface Agent {
   role: string;
   capabilities?: string[] | any[] | null;
   status: 'idle' | 'busy' | 'offline' | string;
+  type?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  cli?: string | null;
+  is_default?: boolean;
   created_at?: string | null;
   updated_at?: string | null;
 }

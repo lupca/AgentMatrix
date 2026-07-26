@@ -9,6 +9,11 @@ class AgentCreate(BaseModel):
     role: str
     capabilities: list[Any] | None = None
     status: str | None = "idle"
+    type: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    cli: str | None = None
+    is_default: bool = False
 
 
 class AgentUpdate(BaseModel):
@@ -16,6 +21,11 @@ class AgentUpdate(BaseModel):
     role: str | None = None
     capabilities: list[Any] | None = None
     status: str | None = None
+    type: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    cli: str | None = None
+    is_default: bool | None = None
 
 
 class Agent(BaseModel):
@@ -24,6 +34,11 @@ class Agent(BaseModel):
     role: str
     capabilities: list[Any] | None = Field(default_factory=list)
     status: str
+    type: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    cli: str | None = None
+    is_default: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

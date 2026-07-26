@@ -48,6 +48,51 @@ def test_get_agents_filtering_and_pagination(client):
     assert len(res_both.json()) == 1
 
 
+def test_coordinator_filter_returns_only_coordinators(client):
+    client.post(
+        "/api/agents",
+        json={
+            "id": "coordinator-1",
+            "name": "Coordinator",
+            "role": "coordinator",
+            "model": "claude-sonnet-4-20250514",
+            "cli": "claude",
+            "is_default": True,
+        },
+    )
+    client.post(
+        "/api/agents",
+        json={"id": "executor-1", "name": "Executor", "role": "executor"},
+    )
+
+    response = client.get("/api/agents?role=coordinator")
+
+    assert response.status_code == 200
+    assert [agent["id"] for agent in response.json()] == ["coordinator-1"]
+    assert response.json()[0]["is_default"] is True
+    assert response.json()[0]["model"] == "claude-sonnet-4-20250514"
+
+
+def test_setting_default_unsets_other_coordinators(client):
+    for agent_id in ("coordinator-a", "coordinator-b"):
+        client.post(
+            "/api/agents",
+            json={
+                "id": agent_id,
+                "name": agent_id,
+                "role": "coordinator",
+                "is_default": agent_id.endswith("a"),
+            },
+        )
+
+    response = client.post("/api/agents/coordinator-b/set-default")
+
+    assert response.status_code == 200
+    assert response.json()["is_default"] is True
+    coordinators = client.get("/api/agents?role=coordinator").json()
+    assert {agent["id"] for agent in coordinators if agent["is_default"]} == {"coordinator-b"}
+
+
 def test_get_agent_by_id(client):
     client.post("/api/agents", json={"id": "agent-find", "name": "Agent Find", "role": "planner"})
 

@@ -8,6 +8,7 @@ import { updateSessionModel } from '../../hooks/useChat';
 vi.mock('../../lib/api', () => ({
   api: {
     patch: vi.fn(),
+    get: vi.fn().mockResolvedValue([]),
   },
 }));
 

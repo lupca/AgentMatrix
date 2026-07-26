@@ -1,5 +1,7 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Loader2 } from 'lucide-react';
+import { api } from '../../lib/api';
+import { Agent } from '../../types/agent';
 
 export type CoordinatorProvider = 'anthropic' | 'google';
 
@@ -41,6 +43,14 @@ export function providerForModel(model: string): CoordinatorProvider {
     (model.toLowerCase().includes('gemini') ? 'google' : 'anthropic');
 }
 
+function optionForAgent(agent: Agent): CoordinatorModelOption | null {
+  if (!agent.model) return null;
+  const provider = agent.cli?.toLowerCase() === 'agy'
+    ? 'google'
+    : providerForModel(agent.model);
+  return { label: agent.name, value: agent.model, provider };
+}
+
 interface ProviderBadgeProps {
   provider: CoordinatorProvider;
 }
@@ -62,6 +72,7 @@ const ProviderBadge: React.FC<ProviderBadgeProps> = ({ provider }) => (
 export interface ModelSelectorProps {
   currentModel?: string | null;
   onModelChange: (model: string) => void | Promise<void>;
+  onDefaultModelChange?: (model: string) => void;
   disabled?: boolean;
   isLoading?: boolean;
   className?: string;
@@ -70,12 +81,46 @@ export interface ModelSelectorProps {
 export const ModelSelector: React.FC<ModelSelectorProps> = ({
   currentModel,
   onModelChange,
+  onDefaultModelChange,
   disabled = false,
   isLoading = false,
   className = '',
 }) => {
-  const selectedModel = currentModel || DEFAULT_COORDINATOR_MODEL;
-  const selectedOption = MODELS.find((option) => option.value === selectedModel);
+  const [models, setModels] = useState<CoordinatorModelOption[]>(MODELS);
+  const currentModelRef = useRef(currentModel);
+
+  useEffect(() => {
+    currentModelRef.current = currentModel;
+  }, [currentModel]);
+
+  useEffect(() => {
+    let mounted = true;
+    api.get<Agent[]>('/agents?role=coordinator&status=idle')
+      .then((agents) => {
+        if (!mounted) return;
+        const options = agents
+          .map(optionForAgent)
+          .filter((option): option is CoordinatorModelOption => option !== null);
+        if (options.length > 0) {
+          const defaultOption = agents.find((agent) => agent.is_default && agent.model);
+          const orderedOptions = defaultOption
+            ? [optionForAgent(defaultOption)!, ...options.filter((option) => option.value !== defaultOption.model)]
+            : options;
+          setModels(orderedOptions);
+          if (!currentModelRef.current && defaultOption?.model) {
+            onDefaultModelChange?.(defaultOption.model);
+          }
+        }
+      })
+      .catch(() => {
+        // Keep the built-in list available when the roster API is unavailable.
+      });
+    return () => { mounted = false; };
+  }, []);
+
+  const defaultOption = models[0];
+  const selectedModel = currentModel || defaultOption?.value || DEFAULT_COORDINATOR_MODEL;
+  const selectedOption = models.find((option) => option.value === selectedModel);
   const provider = selectedOption?.provider || providerForModel(selectedModel);
   const isDisabled = disabled || isLoading;
 
@@ -102,7 +147,7 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
           {!selectedOption && currentModel && (
             <option value={currentModel}>{currentModel}</option>
           )}
-          {MODELS.map((model) => (
+          {models.map((model) => (
             <option key={model.value} value={model.value}>
               {model.label}
             </option>
