@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session as DBSession
 
 from app.db.models import Project, Session as SessionModel, Task
+from app.graph.context import get_context_snapshot
 from app.services import tool_definitions as _tool_definitions
 
 logger = logging.getLogger(__name__)
@@ -211,6 +212,13 @@ class ContextHierarchy:
         # Tier 1: Global (with cache_control)
         global_ctx = self.get_global_context()
         if global_ctx:
+            # Keep the structured snapshot in the stable system prefix.  It
+            # appears before the separately supplied tool schemas and is
+            # rebuilt after project/task mutations.
+            global_ctx[-1]["content"] = (
+                f"{global_ctx[-1].get('content', '')}\n\n"
+                f"{get_context_snapshot(session, self.db)}"
+            )
             messages.extend(global_ctx)
             messages[-1]["cache_control"] = {"type": "ephemeral"}
 

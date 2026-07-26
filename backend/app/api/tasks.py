@@ -12,6 +12,7 @@ from app.db.models import (
     Task as TaskModel,
 )
 from app.api.dispatch import AgentRunResponse, _raise_orchestration_http
+from app.graph.context import invalidate_context_snapshot
 from app.schemas.task import Task, TaskCreate, TaskUpdate
 from app.schemas.audit import AuditLog
 from app.schemas.agent import AgentSuggestion
@@ -130,6 +131,7 @@ def create_task(task_in: TaskCreate, db: Session = Depends(get_db)):
     
     db.commit()
     db.refresh(db_task)
+    invalidate_context_snapshot(db, project_id=db_task.project)
     return db_task
 
 
@@ -258,6 +260,7 @@ def update_task(id: str, task_in: TaskUpdate, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(db_task)
+    invalidate_context_snapshot(db, project_id=db_task.project)
     return db_task
 
 

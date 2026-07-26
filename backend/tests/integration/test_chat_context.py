@@ -1,0 +1,84 @@
+from dataclasses import dataclass, field
+
+from app.db.models import Project, Task
+from app.services.coordinator import DEFAULT_PROVIDER_ROUTER
+from app.services.llm_client import UsageCounts
+from app.services.providers import ProviderResponse
+
+
+@dataclass
+class _ContextProvider:
+    messages: list[list[dict]] = field(default_factory=list)
+
+    async def complete(self, messages, model, stream=False, **kwargs):
+        self.messages.append(messages)
+        return ProviderResponse(
+            provider="anthropic",
+            model=model,
+            text="context-aware",
+            usage=UsageCounts(input_tokens=10, output_tokens=2),
+            request_id="context-test",
+            stop_reason="stop",
+        )
+
+
+def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
+    client,
+    db_session,
+    monkeypatch,
+):
+    db_session.add(Project(id="alpha", name="Alpha", status="active"))
+    db_session.add(
+        Task(
+            id="ALPHA-001",
+            project="alpha",
+            title="Dispatch the release",
+            status="dispatched",
+        )
+    )
+    db_session.commit()
+
+    provider = _ContextProvider()
+    monkeypatch.setitem(DEFAULT_PROVIDER_ROUTER.providers, "anthropic", provider)
+    session = client.post(
+        "/api/sessions",
+        json={
+            "thread_id": "context-chat",
+            "project_id": "alpha",
+            "context_level": "project",
+        },
+    )
+    assert session.status_code == 201
+
+    first = client.post(
+        "/api/chat",
+        json={
+            "thread_id": "context-chat",
+            "message": "What projects do I have?",
+            "model": "claude-sonnet-4",
+            "idempotency_key": "context-turn-1",
+        },
+    )
+    assert first.status_code == 200
+    first_system = provider.messages[0][0]["content"]
+    assert "- alpha: Alpha (active, 1 tasks)" in first_system
+    assert "ALPHA-001: Dispatch the release (dispatched)" in first_system
+
+    updated = client.patch(
+        "/api/projects/alpha",
+        json={"name": "Renamed Alpha"},
+    )
+    assert updated.status_code == 200
+
+    second = client.post(
+        "/api/chat",
+        json={
+            "thread_id": "context-chat",
+            "message": "Which project is this?",
+            "model": "claude-sonnet-4",
+            "idempotency_key": "context-turn-2",
+        },
+    )
+    assert second.status_code == 200
+    second_system = provider.messages[1][0]["content"]
+    assert "- alpha: Renamed Alpha (active, 1 tasks)" in second_system

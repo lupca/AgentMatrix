@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 from app.db.base import get_db
 from app.db.models import Session as SessionModel
+from app.graph.context import invalidate_context_snapshot
 from app.services.command_router import CommandRouter
 from app.services.coordinator import CoordinatorService
 
@@ -59,6 +60,10 @@ async def chat_endpoint(
                 full_content = str(completed_command.get("content", ""))
             else:
                 cmd_result = await command_router.execute(cmd, args, db_session.id)
+                # Slash commands include task mutations (create, dispatch,
+                # verdict, cancellation).  Invalidate the local snapshot so
+                # the following user-chat turn sees committed state.
+                invalidate_context_snapshot(db, project_id=db_session.project_id)
                 full_content = json.dumps(cmd_result)
 
             chunk_payload = json.dumps({"type": "chunk", "content": full_content})

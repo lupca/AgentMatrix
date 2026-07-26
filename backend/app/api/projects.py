@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.db.models import ContextLevel, Project as ProjectModel, Session as SessionModel
+from app.graph.context import invalidate_context_snapshot
 from app.schemas.project import Project, ProjectCreate, ProjectUpdate
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -34,6 +35,7 @@ def create_project(project_in: ProjectCreate, db: Session = Depends(get_db)):
     db.add(db_project)
     db.commit()
     db.refresh(db_project)
+    invalidate_context_snapshot(db, project_id=db_project.id)
     return db_project
 
 
@@ -63,6 +65,7 @@ def update_project(id: str, project_in: ProjectUpdate, db: Session = Depends(get
 
     db.commit()
     db.refresh(db_project)
+    invalidate_context_snapshot(db, project_id=db_project.id)
     return db_project
 
 
@@ -89,6 +92,7 @@ def delete_project(id: str, db: Session = Depends(get_db)):
 
     db.delete(db_project)
     db.commit()
+    invalidate_context_snapshot(db, project_id=id)
     return None
 
 
@@ -97,4 +101,3 @@ def delete_project(id: str, db: Session = Depends(get_db)):
 def build_graph(id: str):
     # Placeholder for graph building
     return {'status': 'building', 'project_id': id}
-
