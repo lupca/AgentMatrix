@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { FolderKanban, Search, CheckCircle2, Clock, AlertCircle, ArrowUpRight } from 'lucide-react';
 
 export interface ProjectProgress {
@@ -88,8 +89,9 @@ export const ProjectCards: React.FC<ProjectCardsProps> = ({
             };
 
             return (
-              <div
+              <Link
                 key={project.id}
+                to={`/projects/${project.id}`}
                 className="group relative flex flex-col justify-between rounded-xl border border-gray-800/70 bg-gray-950/60 p-4 transition-all duration-200 hover:border-gray-700 hover:bg-gray-950/90 shadow-md"
               >
                 <div>
@@ -133,7 +135,7 @@ export const ProjectCards: React.FC<ProjectCardsProps> = ({
                     />
                   </div>
                 </div>
-              </div>
+              </Link>
             );
           })}
         </div>

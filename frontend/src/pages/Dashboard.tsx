@@ -5,6 +5,7 @@ import KpiCards, { KpiData } from '../components/dashboard/KpiCards';
 import StatusChart, { TaskStatusCounts, GateCounts } from '../components/dashboard/StatusChart';
 import ProjectCards, { ProjectProgress } from '../components/dashboard/ProjectCards';
 import RecentActivity, { AuditItem } from '../components/dashboard/RecentActivity';
+import { Project, ProjectStats } from '../types/project';
 import { RefreshCw, LayoutDashboard, AlertCircle, ShieldAlert, Sparkles } from 'lucide-react';
 
 export interface OverviewApiResponse {
@@ -25,6 +26,7 @@ export interface OverviewApiResponse {
 export const Dashboard: React.FC = () => {
   const { user } = useAppStore();
   const [data, setData] = useState<OverviewApiResponse | null>(null);
+  const [projects, setProjects] = useState<ProjectProgress[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
@@ -39,9 +41,40 @@ export const Dashboard: React.FC = () => {
     setError(null);
 
     try {
-      // Fetch stats from /api/stats/overview
-      const res = await api.get<OverviewApiResponse>('/stats/overview');
+      // Project progress is not included in /api/stats/overview. Fetch the
+      // project registry separately, then combine it with task statistics.
+      const [res, projectList] = await Promise.all([
+        api.get<OverviewApiResponse>('/stats/overview'),
+        api.get<Project[]>('/projects'),
+      ]);
+
+      let projectStats: ProjectStats[] = [];
+      try {
+        projectStats = await api.get<ProjectStats[]>('/stats/projects');
+      } catch (err) {
+        console.warn('Failed to fetch /api/stats/projects:', err);
+      }
+
+      const statsByProject = new Map(projectStats.map((stats) => [stats.project_id, stats]));
+      const projectProgress: ProjectProgress[] = (projectList || []).map((project) => {
+        const stats = statsByProject.get(project.id);
+        const totalTasks = stats?.total_tasks ?? 0;
+        const completedTasks = stats?.done_tasks ?? 0;
+
+        return {
+          id: project.id,
+          name: project.name,
+          description: project.description ?? undefined,
+          status: project.status,
+          totalTasks,
+          completedTasks,
+          progressPercentage: totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0,
+          lastUpdated: project.updated_at ?? project.created_at ?? undefined,
+        };
+      });
+
       setData(res);
+      setProjects(projectProgress);
       setLastRefreshed(new Date());
     } catch (err: any) {
       console.warn('Failed to fetch /api/stats/overview:', err);
@@ -131,7 +164,7 @@ export const Dashboard: React.FC = () => {
         </div>
         <div className="lg:col-span-2">
           <ProjectCards
-            projects={data?.projectProgress}
+            projects={projects}
             loading={loading}
           />
         </div>
