@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Task } from '../../types/task';
 import {
   ChevronDown,
@@ -232,15 +233,18 @@ export const TaskTable: React.FC<TaskTableProps> = ({
                       </button>
                     </td>
                     <td className="py-3.5 px-4 font-mono font-bold text-indigo-400 whitespace-nowrap">
-                      {task.id}
+                      <Link to={`/tasks/${task.id}`} className="hover:underline hover:text-indigo-300">
+                        {task.id}
+                      </Link>
                     </td>
                     <td className="py-3.5 px-4 font-medium text-white max-w-xs truncate">
-                      <button
+                      <Link
+                        to={`/tasks/${task.id}`}
                         onClick={() => onSelectTask?.(task)}
                         className="hover:underline hover:text-indigo-300 text-left truncate block w-full"
                       >
                         {task.title}
-                      </button>
+                      </Link>
                     </td>
                     <td className="py-3.5 px-4 whitespace-nowrap">
                       <span className="px-2 py-0.5 rounded text-xs font-medium bg-gray-800 text-gray-300 border border-gray-700">

@@ -7,6 +7,7 @@ import ProjectDetailPage from './pages/ProjectDetail';
 import AgentsPage from './pages/Agents';
 import AgentDetailPage from './pages/AgentDetail';
 import TasksPage from './pages/Tasks';
+import TaskDetailPage from './pages/TaskDetail';
 import KanbanPage from './pages/Kanban';
 
 function Navigation() {
@@ -104,6 +105,7 @@ export default function App() {
             <Route path="/agents" element={<AgentsPage />} />
             <Route path="/agents/:id" element={<AgentDetailPage />} />
             <Route path="/tasks" element={<TasksPage />} />
+            <Route path="/tasks/:id" element={<TaskDetailPage />} />
             <Route path="/kanban" element={<KanbanPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
