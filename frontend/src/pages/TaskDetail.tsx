@@ -142,7 +142,7 @@ export const TaskDetailPage: React.FC = () => {
         </div>
 
         {/* Right Column (AI Copilot Chat Sidecar) */}
-        <div className="lg:col-span-5 xl:col-span-4 sticky top-20">
+        <div className="lg:col-span-5 xl:col-span-4 sticky top-20 h-[calc(100vh-200px)] max-h-[calc(100vh-200px)] min-h-0">
           <ChatPanelManager
             threadId={threadId}
             taskId={task.id}

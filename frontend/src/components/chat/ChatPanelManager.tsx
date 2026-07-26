@@ -44,7 +44,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
 
   if (mode === 'floating') {
     return (
-      <div className="fixed bottom-6 right-6 z-50 w-[90vw] sm:w-[420px] h-[580px] max-h-[85vh] shadow-2xl flex flex-col transition-all duration-300">
+      <div className="fixed bottom-6 right-6 z-50 w-[90vw] sm:w-[420px] h-[580px] max-h-[85vh] min-h-0 shadow-2xl flex flex-col transition-all duration-300">
         <div className="bg-gray-950 px-4 py-2 border-t border-l border-r border-gray-800 rounded-t-2xl flex items-center justify-between text-xs text-gray-400">
           <div className="flex items-center gap-2 font-mono text-indigo-400 font-medium">
             <MessageSquare className="w-3.5 h-3.5" />
@@ -81,7 +81,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
           taskTitle={taskTitle}
           task={task}
           onTaskAction={onTaskAction}
-          className="rounded-t-none h-full border-t-0"
+          className="rounded-t-none h-full min-h-0 border-t-0"
         />
       </div>
     );
@@ -90,7 +90,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
   // Docked Mode
   return (
     <div
-      className={`flex flex-col h-full rounded-2xl overflow-hidden border border-gray-800/80 bg-gray-950/40 ${
+      className={`flex flex-col h-full min-h-0 max-h-[calc(100vh-200px)] rounded-2xl overflow-hidden border border-gray-800/80 bg-gray-950/40 ${
         isExpandedFull ? 'fixed inset-4 z-50 bg-gray-950 shadow-2xl' : ''
       } ${className}`}
     >
@@ -135,7 +135,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
         taskTitle={taskTitle}
         task={task}
         onTaskAction={onTaskAction}
-        className="border-0 rounded-t-none flex-1 min-h-[500px]"
+        className="border-0 rounded-t-none flex-1 min-h-0"
       />
     </div>
   );

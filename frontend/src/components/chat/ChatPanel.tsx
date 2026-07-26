@@ -93,8 +93,10 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   }, [fetchSessionHistory]);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages, scrollToBottom]);
+    if (!loadingHistory) {
+      scrollToBottom();
+    }
+  }, [messages, loadingHistory, scrollToBottom]);
 
   // Handle SSE streaming chat message send
   const handleSendMessage = async (userText: string) => {
@@ -245,7 +247,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   };
 
   return (
-    <div className={`flex flex-col bg-gray-900/90 border border-gray-800 rounded-2xl overflow-hidden shadow-2xl backdrop-blur-md h-full ${className}`}>
+    <div className={`flex flex-col min-h-0 h-full max-h-[calc(100vh-200px)] bg-gray-900/90 border border-gray-800 rounded-2xl overflow-hidden shadow-2xl backdrop-blur-md ${className}`}>
       {/* Header */}
       <div className="px-4 py-3 bg-gray-950/80 border-b border-gray-800/80 flex items-center justify-between shrink-0 select-none">
         <div className="flex items-center space-x-2.5">
@@ -297,7 +299,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       </div>
 
       {/* Messages List Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-2 no-scrollbar min-h-[300px]">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 space-y-2 no-scrollbar">
         {loadingHistory ? (
           <div className="flex flex-col items-center justify-center h-full py-12 text-gray-500 space-y-2">
             <RefreshCw className="w-6 h-6 animate-spin text-indigo-500" />
@@ -321,14 +323,16 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       </div>
 
       {/* Chat Input */}
-      <ChatInput
-        onSendMessage={handleSendMessage}
-        disabled={loadingHistory}
-        isStreaming={isStreaming}
-        task={task}
-        onTaskAction={onTaskAction}
-        placeholder={`Message Control Tower AI (${taskId ? `Task ${taskId}` : 'Assistant'})...`}
-      />
+      <div className="shrink-0">
+        <ChatInput
+          onSendMessage={handleSendMessage}
+          disabled={loadingHistory}
+          isStreaming={isStreaming}
+          task={task}
+          onTaskAction={onTaskAction}
+          placeholder={`Message Control Tower AI (${taskId ? `Task ${taskId}` : 'Assistant'})...`}
+        />
+      </div>
     </div>
   );
 };
