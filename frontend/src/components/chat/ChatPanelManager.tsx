@@ -8,6 +8,7 @@ interface ChatPanelManagerProps {
   taskId?: string;
   taskTitle?: string;
   task?: Task;
+  onTaskAction?: () => Promise<void> | void;
   defaultMode?: 'docked' | 'floating' | 'collapsed';
   className?: string;
 }
@@ -17,6 +18,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
   taskId,
   taskTitle,
   task,
+  onTaskAction,
   defaultMode = 'docked',
   className = '',
 }) => {
@@ -78,6 +80,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
           taskId={taskId}
           taskTitle={taskTitle}
           task={task}
+          onTaskAction={onTaskAction}
           className="rounded-t-none h-full border-t-0"
         />
       </div>
@@ -131,6 +134,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
         taskId={taskId}
         taskTitle={taskTitle}
         task={task}
+        onTaskAction={onTaskAction}
         className="border-0 rounded-t-none flex-1 min-h-[500px]"
       />
     </div>

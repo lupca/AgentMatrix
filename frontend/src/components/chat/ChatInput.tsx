@@ -4,7 +4,8 @@ import { Task } from '../../types/task';
 import { QuickActions } from './QuickActions';
 
 interface ChatInputProps {
-  onSendMessage: (message: string) => void;
+  onSendMessage: (message: string) => Promise<void> | void;
+  onTaskAction?: () => Promise<void> | void;
   disabled?: boolean;
   isStreaming?: boolean;
   placeholder?: string;
@@ -13,6 +14,7 @@ interface ChatInputProps {
 
 export const ChatInput: React.FC<ChatInputProps> = ({
   onSendMessage,
+  onTaskAction,
   disabled = false,
   isStreaming = false,
   placeholder = 'Ask Control Tower AI assistant...',
@@ -62,6 +64,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         <QuickActions
           task={task}
           onSendCommand={onSendMessage}
+          onActionComplete={onTaskAction}
           disabled={disabled || isStreaming}
         />
       )}

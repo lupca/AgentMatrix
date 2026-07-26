@@ -99,6 +99,8 @@ export const DispatchButton: React.FC<DispatchButtonProps> = ({
   };
 
   const disabled = loadingAgents || isDispatching || agents.length === 0;
+  const suggestedAgentIds = new Set(suggestions.map((suggestion) => suggestion.agent_id));
+  const remainingAgents = agents.filter((agent) => !suggestedAgentIds.has(agent.id));
 
   return (
     <div className="flex items-center gap-2">
@@ -118,24 +120,25 @@ export const DispatchButton: React.FC<DispatchButtonProps> = ({
           {agents.length === 0 ? (
             <option value="">No agents available</option>
           ) : (
-            (suggestions.length > 0
-              ? suggestions.map((suggestion) => {
-                  const agent = agents.find((item) => item.id === suggestion.agent_id);
-                  return (
-                    <option
-                      key={suggestion.agent_id}
-                      value={suggestion.agent_id}
-                      title={suggestion.reason}
-                    >
-                      {agent?.name || suggestion.agent_id} · {Math.round(suggestion.score * 100)}% — {suggestion.reason}
-                    </option>
-                  );
-                })
-              : agents.map((agent) => (
-                  <option key={agent.id} value={agent.id}>
-                    {agent.name || agent.id} ({agent.id})
+            <>
+              {suggestions.map((suggestion) => {
+                const agent = agents.find((item) => item.id === suggestion.agent_id);
+                return (
+                  <option
+                    key={suggestion.agent_id}
+                    value={suggestion.agent_id}
+                    title={suggestion.reason}
+                  >
+                    {agent?.name || suggestion.agent_id} · {Math.round(suggestion.score * 100)}% — {suggestion.reason}
                   </option>
-                )))
+                );
+              })}
+              {remainingAgents.map((agent) => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name || agent.id} ({agent.id})
+                </option>
+              ))}
+            </>
           )}
         </select>
       </div>

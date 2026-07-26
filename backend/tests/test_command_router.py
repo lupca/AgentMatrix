@@ -1,6 +1,7 @@
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from unittest.mock import patch
 from app.db.base import Base
 from app.services.command_router import CommandRouter, COMMANDS
 
@@ -73,4 +74,45 @@ async def test_command_router_get_status(db_session):
     assert res_list.get("status") == "success"
     assert len(res_list.get("tasks", [])) > 0
 
+
+@pytest.mark.asyncio
+async def test_command_router_persists_run_before_enqueueing(db_session):
+    from app.db.models import Agent, AgentRun, Project, Task
+
+    db_session.add(Project(id="proj-1", name="Test Project"))
+    db_session.add(
+        Agent(
+            id="@agent-1",
+            name="Agent 1",
+            role="executor",
+            cli="codex",
+        )
+    )
+    db_session.add(
+        Task(
+            id="TASK-101",
+            project="proj-1",
+            title="Dispatch task",
+            status="todo",
+            current_gate="spec",
+        )
+    )
+    db_session.commit()
+
+    queued_run_ids = []
+
+    def assert_run_exists(run_id, *_args):
+        queued_run_ids.append(run_id)
+        run = db_session.get(AgentRun, run_id)
+        assert run is not None
+        assert run.status == "queued"
+
+    with patch("app.workers.agent_runner.run_agent.send", side_effect=assert_run_exists):
+        result = await CommandRouter(db_session).execute(
+            "dispatch_task", "TASK-101 @agent-1", "session-1"
+        )
+
+    assert result["action"] == "dispatched"
+    assert queued_run_ids == [result["run_id"]]
+    assert db_session.get(AgentRun, result["run_id"]).agent_id == "@agent-1"
 

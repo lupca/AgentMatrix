@@ -10,6 +10,7 @@ interface ChatPanelProps {
   taskId?: string;
   taskTitle?: string;
   task?: Task;
+  onTaskAction?: () => Promise<void> | void;
   onClose?: () => void;
   className?: string;
 }
@@ -19,6 +20,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   taskId,
   taskTitle,
   task,
+  onTaskAction,
   onClose,
   className = '',
 }) => {
@@ -324,6 +326,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         disabled={loadingHistory}
         isStreaming={isStreaming}
         task={task}
+        onTaskAction={onTaskAction}
         placeholder={`Message Control Tower AI (${taskId ? `Task ${taskId}` : 'Assistant'})...`}
       />
     </div>

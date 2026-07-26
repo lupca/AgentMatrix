@@ -2,7 +2,7 @@ import re
 from typing import Tuple, Optional
 from datetime import datetime
 import uuid
-from app.db.models import Task, Session as SessionModel
+from app.db.models import AgentRun, Task, Session as SessionModel
 
 COMMANDS = {
     '/pm': 'create_task',
@@ -74,6 +74,7 @@ class CommandRouter:
         import uuid
         from app.db.models import Agent
         from app.services.agent_matcher import AgentMatcher
+        from app.services.command_builder import _infer_cli
 
         parts = args.strip().split()
         if not parts:
@@ -90,19 +91,37 @@ class CommandRouter:
             agent_id = suggestions[0].agent_id if suggestions else None
         if not agent_id:
             return {'error': 'No available agent found for this task'}
-        if not self.db.query(Agent).filter(Agent.id == agent_id).first():
+        agent = self.db.query(Agent).filter(Agent.id == agent_id).first()
+        if not agent:
             return {'error': f'Agent {agent_id} not found'}
         
         run_id = str(uuid.uuid4())
         command = f'echo "Executing task {task_id} with agent {agent_id}"'
         repo_root = '/tmp'
-        
-        run_agent.send(run_id, task_id, command, repo_root)
-        
+
+        run = AgentRun(
+            id=run_id,
+            task_id=task_id,
+            agent_id=agent_id,
+            cli=(agent.cli or _infer_cli(agent.model, agent.id)).strip().lower(),
+            command=command,
+            status='queued',
+        )
         task.status = 'dispatched'
         task.executor = agent_id
         task.updated_at = datetime.utcnow()
+        self.db.add(run)
         self.db.commit()
+
+        try:
+            run_agent.send(run_id, task_id, command, repo_root)
+        except Exception as exc:
+            run.status = 'failed'
+            run.error_message = f'Could not queue run: {exc}'
+            run.completed_at = datetime.utcnow()
+            task.status = 'todo'
+            self.db.commit()
+            return {'error': run.error_message, 'run_id': run_id}
         
         return {'action': 'dispatched', 'task_id': task_id, 'run_id': run_id, 'agent': agent_id}
 

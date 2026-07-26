@@ -148,6 +148,7 @@ export const TaskDetailPage: React.FC = () => {
             taskId={task.id}
             taskTitle={task.title}
             task={task}
+            onTaskAction={fetchTaskDetail}
             defaultMode="docked"
           />
         </div>

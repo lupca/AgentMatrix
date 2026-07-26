@@ -28,7 +28,8 @@ export const getActionsForStatus = (status: string): QuickAction[] => {
 
 interface QuickActionsProps {
   task: Task;
-  onSendCommand: (command: string) => void;
+  onSendCommand: (command: string) => Promise<void> | void;
+  onActionComplete?: () => Promise<void> | void;
   disabled?: boolean;
 }
 
@@ -48,6 +49,7 @@ const commandFor = (action: QuickActionId, task: Task, value?: string) => {
 export const QuickActions: React.FC<QuickActionsProps> = ({
   task,
   onSendCommand,
+  onActionComplete,
   disabled = false,
 }) => {
   const [verdict, setVerdict] = useState('');
@@ -61,6 +63,19 @@ export const QuickActions: React.FC<QuickActionsProps> = ({
     cancel: CircleStop,
     verdict: ShieldCheck,
   } satisfies Record<QuickActionId, React.ComponentType<{ className?: string }>>;
+
+  const handleAction = async (action: QuickActionId, value?: string) => {
+    const command = commandFor(action, task, value);
+    if (!command) return;
+
+    try {
+      await onSendCommand(command);
+    } finally {
+      if (action !== 'status') {
+        await onActionComplete?.();
+      }
+    }
+  };
 
   return (
     <div className="flex flex-wrap items-center gap-1.5" aria-label="Task quick actions">
@@ -76,7 +91,7 @@ export const QuickActions: React.FC<QuickActionsProps> = ({
                 onChange={(event) => {
                   const value = event.target.value;
                   setVerdict(value);
-                  if (value) onSendCommand(commandFor(action.id, task, value));
+                  if (value) void handleAction(action.id, value);
                 }}
                 disabled={disabled}
                 className="h-7 appearance-none rounded-lg border border-purple-500/30 bg-purple-500/10 py-1 pl-7 pr-7 text-[11px] font-semibold text-purple-200 outline-none hover:bg-purple-500/20 disabled:pointer-events-none disabled:opacity-40"
@@ -94,7 +109,7 @@ export const QuickActions: React.FC<QuickActionsProps> = ({
           <button
             key={action.id}
             type="button"
-            onClick={() => onSendCommand(commandFor(action.id, task))}
+            onClick={() => void handleAction(action.id)}
             disabled={disabled}
             className="inline-flex h-7 items-center gap-1 rounded-lg border border-gray-700 bg-gray-900 px-2.5 text-[11px] font-semibold text-gray-300 transition-colors hover:border-indigo-500/50 hover:bg-gray-800 hover:text-white disabled:pointer-events-none disabled:opacity-40"
           >
