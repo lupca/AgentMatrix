@@ -1,6 +1,9 @@
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
 import { useAppStore } from './lib/store';
-import { LayoutDashboard, CheckSquare, Settings as SettingsIcon, Moon, Sun } from 'lucide-react';
+import { LayoutDashboard, CheckSquare, LayoutGrid, Settings as SettingsIcon, Moon, Sun } from 'lucide-react';
+import Dashboard from './pages/Dashboard';
+import TasksPage from './pages/Tasks';
+import KanbanPage from './pages/Kanban';
 
 function Navigation() {
   const location = useLocation();
@@ -9,6 +12,7 @@ function Navigation() {
   const navItems = [
     { path: '/', label: 'Dashboard', icon: LayoutDashboard },
     { path: '/tasks', label: 'Tasks', icon: CheckSquare },
+    { path: '/kanban', label: 'Kanban', icon: LayoutGrid },
     { path: '/settings', label: 'Settings', icon: SettingsIcon },
   ];
 
@@ -89,18 +93,6 @@ function DashboardPage() {
   );
 }
 
-function TasksPage() {
-  return (
-    <div className="p-6 space-y-4">
-      <h1 className="text-2xl font-bold text-white">Tasks Overview</h1>
-      <p className="text-gray-400 text-sm">Manage and track LangGraph task executions.</p>
-      <div className="p-8 rounded-xl border border-dashed border-gray-800 bg-gray-900/30 text-center text-gray-400">
-        No active tasks found in current session.
-      </div>
-    </div>
-  );
-}
-
 function SettingsPage() {
   return (
     <div className="p-6 space-y-4">
@@ -128,8 +120,9 @@ export default function App() {
         <Navigation />
         <main className="flex-1 max-w-7xl w-full mx-auto">
           <Routes>
-            <Route path="/" element={<DashboardPage />} />
+            <Route path="/" element={<Dashboard />} />
             <Route path="/tasks" element={<TasksPage />} />
+            <Route path="/kanban" element={<KanbanPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>
@@ -137,3 +130,4 @@ export default function App() {
     </BrowserRouter>
   );
 }
+
