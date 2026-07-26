@@ -1,14 +1,32 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from app.db.base import Base, engine
-from app.api import tasks, sessions, audit
+from app.api import tasks, sessions, audit, chat, ws
 
 # Ensure tables are created
 Base.metadata.create_all(bind=engine)
+
+# Auto-migration patch: Ensure session_id exists on tasks table
+try:
+    with engine.connect() as conn:
+        conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS session_id VARCHAR(36);"))
+        conn.commit()
+except Exception as err:
+    print(f"Migration notice: {err}")
 
 app = FastAPI(
     title="Control Tower V2 API",
     description="FastAPI CRUD & State Management for Control Tower V2",
     version="0.1.0"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 @app.get("/health", tags=["health"])
@@ -18,3 +36,5 @@ def health_check():
 app.include_router(tasks.router)
 app.include_router(sessions.router)
 app.include_router(audit.router)
+app.include_router(chat.router)
+app.include_router(ws.router)

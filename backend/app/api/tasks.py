@@ -1,8 +1,9 @@
 import re
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.db.base import get_db
-from app.db.models import Task as TaskModel, AuditLog as AuditLogModel
+from app.db.models import Task as TaskModel, Session as SessionModel, AuditLog as AuditLogModel
 from app.schemas.task import Task, TaskCreate, TaskUpdate
 from app.schemas.audit import AuditLog
 
@@ -69,8 +70,20 @@ def create_task(task_in: TaskCreate, db: Session = Depends(get_db)):
                 detail=f"Task with ID '{task_id}' already exists."
             )
 
+    if not task_data.get("session_id"):
+        task_data["session_id"] = str(uuid.uuid4())
+
     db_task = TaskModel(**task_data)
     db.add(db_task)
+
+    # Ensure Session entry exists
+    db_session = SessionModel(
+        id=db_task.session_id,
+        task_id=db_task.id,
+        thread_id=db_task.session_id,
+        messages=[]
+    )
+    db.add(db_session)
 
     # Auto audit log entry
     audit_entry = AuditLogModel(
@@ -98,6 +111,10 @@ def get_task(id: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Task '{id}' not found."
         )
+    if not db_task.session_id:
+        db_task.session_id = str(uuid.uuid4())
+        db.commit()
+        db.refresh(db_task)
     return db_task
 
 
@@ -142,3 +159,35 @@ def get_task_history(id: str, db: Session = Depends(get_db)):
         )
     history = db.query(AuditLogModel).filter(AuditLogModel.task_id == id).order_by(AuditLogModel.created_at.asc()).all()
     return history
+
+
+@router.get("/{id}/messages")
+def get_task_messages(id: str, db: Session = Depends(get_db)):
+    db_task = db.query(TaskModel).filter(TaskModel.id == id).first()
+    if not db_task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Task '{id}' not found."
+        )
+
+    db_session = db.query(SessionModel).filter(
+        (SessionModel.task_id == id) | (SessionModel.id == db_task.session_id)
+    ).first()
+
+    if not db_session:
+        if not db_task.session_id:
+            db_task.session_id = str(uuid.uuid4())
+            db.commit()
+            db.refresh(db_task)
+
+        db_session = SessionModel(
+            id=db_task.session_id,
+            task_id=db_task.id,
+            thread_id=db_task.session_id,
+            messages=[]
+        )
+        db.add(db_session)
+        db.commit()
+        db.refresh(db_session)
+
+    return db_session.messages or []

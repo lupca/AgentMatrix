@@ -21,9 +21,11 @@ class TaskCreate(BaseModel):
     verdict: str | None = None
     predicted_success: str | None = None
     prediction_factors: dict[str, Any] | None = None
+    session_id: str | None = None
     deadline: date | None = None
 
 class TaskUpdate(BaseModel):
+    session_id: str | None = None
     project: str | None = None
     title: str | None = None
     status: str | None = None
@@ -47,6 +49,7 @@ class TaskUpdate(BaseModel):
 
 class Task(BaseModel):
     id: str
+    session_id: str | None = None
     project: str
     title: str
     status: str
