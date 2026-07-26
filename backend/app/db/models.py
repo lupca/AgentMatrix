@@ -234,6 +234,7 @@ class Session(Base):
             "context_level",
             "project_id",
             "status",
+            "pinned",
             "last_activity_at",
         ),
     )

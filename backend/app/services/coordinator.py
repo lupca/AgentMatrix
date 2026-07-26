@@ -224,6 +224,8 @@ class CoordinatorService:
             **metadata,
         }
         db_session.messages = list(db_session.messages or []) + [message]
+        db_session.message_count = len(db_session.messages)
+        db_session.last_activity_at = datetime.now(timezone.utc)
         self.db.commit()
         return message
 

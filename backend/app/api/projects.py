@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.db.base import get_db
-from app.db.models import Project as ProjectModel
+from app.db.models import ContextLevel, Project as ProjectModel, Session as SessionModel
 from app.schemas.project import Project, ProjectCreate, ProjectUpdate
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
@@ -74,6 +74,18 @@ def delete_project(id: str, db: Session = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Project '{id}' not found."
         )
+
+    # Sessions scoped to this project would otherwise violate
+    # ck_sessions_context_level_consistency once project_id is nulled out by
+    # the FK's ON DELETE SET NULL, so demote them to global context first.
+    db.query(SessionModel).filter(SessionModel.project_id == id).update(
+        {
+            SessionModel.context_level: ContextLevel.GLOBAL.value,
+            SessionModel.project_id: None,
+            SessionModel.task_id: None,
+        },
+        synchronize_session=False,
+    )
 
     db.delete(db_project)
     db.commit()

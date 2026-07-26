@@ -20,6 +20,7 @@ class SessionUpdate(BaseModel):
     title: str | None = None
     status: SessionStatus | None = None
     pinned: bool | None = None
+    task_id: str | None = None
     thread_id: str | None = None
     current_gate: str | None = None
     selected_provider: str | None = None

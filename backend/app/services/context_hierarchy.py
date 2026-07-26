@@ -251,5 +251,6 @@ class ContextHierarchy:
             "status": "complete",
         }
         session.messages = [summary_msg] + kept
+        session.message_count = len(session.messages)
         self.db.commit()
         return True

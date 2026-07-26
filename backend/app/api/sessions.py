@@ -52,7 +52,7 @@ def _validate_model_selection(
 def _resolve_context(session_data: dict, db: Session) -> dict:
     """Derive project_id from task_id where possible and enforce context-level consistency."""
 
-    context_level = session_data.get("context_level", ContextLevel.GLOBAL)
+    context_level = session_data.get("context_level")
     task_id = session_data.get("task_id")
     project_id = session_data.get("project_id")
 
@@ -71,6 +71,16 @@ def _resolve_context(session_data: dict, db: Session) -> dict:
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail=f"project_id '{project_id}' does not match task's project '{task.project}'.",
             )
+
+    if context_level is None:
+        # Client didn't specify context_level explicitly: infer it from
+        # whichever of task_id/project_id was provided.
+        if task_id is not None:
+            context_level = ContextLevel.TASK
+        elif project_id is not None:
+            context_level = ContextLevel.PROJECT
+        else:
+            context_level = ContextLevel.GLOBAL
 
     if context_level == ContextLevel.GLOBAL and (project_id is not None or task_id is not None):
         raise HTTPException(
@@ -162,10 +172,15 @@ def update_session(id: str, session_in: SessionUpdate, db: Session = Depends(get
             detail=f"Session '{id}' not found."
         )
 
-    update_data = _validate_model_selection(
-        session_in.model_dump(exclude_unset=True),
-        db_session,
-    )
+    raw_update_data = session_in.model_dump(exclude_unset=True)
+    if "task_id" in raw_update_data and raw_update_data["task_id"] != db_session.task_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="task_id cannot be changed via PATCH; create a new session instead.",
+        )
+    raw_update_data.pop("task_id", None)
+
+    update_data = _validate_model_selection(raw_update_data, db_session)
     if "messages" in update_data:
         messages = update_data["messages"]
         update_data["message_count"] = len(messages) if messages else 0
