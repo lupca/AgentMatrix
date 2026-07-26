@@ -174,6 +174,9 @@ class TestErrorHandling:
                 assert result == json.dumps(data, ensure_ascii=False)
 
 
+from unittest.mock import patch, MagicMock, AsyncMock
+
+
 class TestGraphClientIntegration:
     """Integration tests for graph_client compression."""
 
@@ -185,9 +188,9 @@ class TestGraphClientIntegration:
         # Mock MCPClient
         with patch("app.services.graph_client.MCPClient") as MockMCP:
             mock_client = MagicMock()
-            mock_client.__aenter__ = MagicMock(return_value=mock_client)
-            mock_client.__aexit__ = MagicMock(return_value=None)
-            mock_client.call_tool = MagicMock(return_value={
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.call_tool = AsyncMock(return_value={
                 "impacted_files": ["file1.py", "file2.py", "file3.py"]
             })
             MockMCP.return_value = mock_client
@@ -209,9 +212,9 @@ class TestGraphClientIntegration:
 
         with patch("app.services.graph_client.MCPClient") as MockMCP:
             mock_client = MagicMock()
-            mock_client.__aenter__ = MagicMock(return_value=mock_client)
-            mock_client.__aexit__ = MagicMock(return_value=None)
-            mock_client.call_tool = MagicMock(return_value={
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.call_tool = AsyncMock(return_value={
                 "results": [{"file_path": "test_main.py"}, {"file_path": "test_utils.py"}]
             })
             MockMCP.return_value = mock_client
@@ -231,9 +234,9 @@ class TestGraphClientIntegration:
 
         with patch("app.services.graph_client.MCPClient") as MockMCP:
             mock_client = MagicMock()
-            mock_client.__aenter__ = MagicMock(return_value=mock_client)
-            mock_client.__aexit__ = MagicMock(return_value=None)
-            mock_client.call_tool = MagicMock(return_value={
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+            mock_client.call_tool = AsyncMock(return_value={
                 "affected_flows": [{"name": "user-login"}, {"name": "task-create"}]
             })
             MockMCP.return_value = mock_client
@@ -253,15 +256,15 @@ class TestGraphClientIntegration:
 
         with patch("app.services.graph_client.MCPClient") as MockMCP:
             mock_client = MagicMock()
-            mock_client.__aenter__ = MagicMock(return_value=mock_client)
-            mock_client.__aexit__ = MagicMock(return_value=None)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
 
             # Simulate large MCP responses
             large_files = [f"path/to/module_{i}/file_{i}.py" for i in range(50)]
             large_tests = [{"file_path": f"tests/test_{i}.py"} for i in range(30)]
             large_flows = [{"name": f"flow-{i}"} for i in range(20)]
 
-            mock_client.call_tool = MagicMock(side_effect=[
+            mock_client.call_tool = AsyncMock(side_effect=[
                 {"impacted_files": large_files},
                 {"results": large_tests},
                 {"affected_flows": large_flows},
