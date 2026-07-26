@@ -31,8 +31,8 @@ export const TaskDetailPage: React.FC = () => {
       }
 
       if (!taskData) {
-        // Fallback realistic task object if backend doesn't have this task ID yet
-        taskData = getFallbackTask(id);
+        setError(`Task '${id}' not found`);
+        return;
       }
 
       setTask(taskData);
@@ -89,58 +89,6 @@ export const TaskDetailPage: React.FC = () => {
       console.error('Failed to approve task prompt:', err);
     }
   };
-
-  const getFallbackTask = (taskId: string): Task => ({
-    id: taskId,
-    session_id: `session-${taskId.toLowerCase()}`,
-    project: 'CTV2',
-    title: `CTV2 Task Detail & Copilot Chat integration for ${taskId}`,
-    raw_input: `Implement comprehensive Task Detail view and real-time SSE AI Chat integration for Task ${taskId}. Ensure full spec rendering, metadata insights, and interactive chat capabilities.`,
-    status: 'dispatched',
-    current_gate: 'gate-2-code-spec',
-    mode: 'autonomous',
-    priority: 'P0',
-    risk: 'medium',
-    executor: 'CodeAgent-01',
-    reviewer: 'LeadReviewer-01',
-    acceptance_criteria: [
-      'Render TaskHeader with navigation breadcrumbs and action controls',
-      'Render TaskSpec with plan breakdown and acceptance criteria',
-      'Render TaskMeta with assignee and predicted success stats',
-      'Render ChatPanel with SSE connection to /api/chat',
-      'Provide ChatPanelManager for flexible docked/floating panel states',
-    ],
-    files: [
-      'frontend/src/pages/TaskDetail.tsx',
-      'frontend/src/components/task/TaskHeader.tsx',
-      'frontend/src/components/task/TaskSpec.tsx',
-      'frontend/src/components/task/TaskMeta.tsx',
-      'frontend/src/components/chat/ChatPanel.tsx',
-      'frontend/src/components/chat/ChatMessage.tsx',
-      'frontend/src/components/chat/ChatInput.tsx',
-      'frontend/src/components/chat/ChatPanelManager.tsx',
-    ],
-    tests: ['frontend/src/pages/__tests__/TaskDetail.test.tsx'],
-    flows: ['langgraph-spec-flow', 'langgraph-code-gen-flow'],
-    plan: `1. Define UI layout with split task view and sidecar chat.
-2. Connect ChatPanel to /api/chat endpoint using event-stream reader.
-3. Add quick action prompts and human-in-the-loop approval triggers.
-4. Verify full type checking and git commit.`,
-    verdict: 'Approved for production integration',
-    findings: [
-      'SSE event stream yields smooth real-time response rendering',
-      'Floating mode allows flexible multitasking across screens',
-    ],
-    predicted_success: '0.94',
-    prediction_factors: {
-      code_complexity: 0.88,
-      agent_confidence: 0.96,
-      risk_level: 0.9,
-    },
-    awaiting_approval: false,
-    created_at: new Date(Date.now() - 3600000 * 24).toISOString(),
-    updated_at: new Date().toISOString(),
-  });
 
   if (loading) {
     return (
