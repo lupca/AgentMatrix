@@ -138,3 +138,18 @@ class Agent(Base):
     status = Column(String(20), nullable=False, default="idle")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class KnowledgeItem(Base):
+    __tablename__ = "knowledge_items"
+
+    id = Column(String(50), primary_key=True)
+    title = Column(String(200), nullable=False)
+    category = Column(String(50), nullable=True, default="general", index=True)
+    content = Column(Text, nullable=False, default="")
+    tags = Column(JSON, default=list)
+    project = Column(String(50), nullable=True, index=True)
+    author = Column(String(50), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
