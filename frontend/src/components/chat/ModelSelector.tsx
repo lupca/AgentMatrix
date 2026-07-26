@@ -11,36 +11,11 @@ export interface CoordinatorModelOption {
   provider: CoordinatorProvider;
 }
 
-export const MODELS: CoordinatorModelOption[] = [
-  {
-    label: 'Claude Sonnet',
-    value: 'claude-sonnet-4-20250514',
-    provider: 'anthropic',
-  },
-  {
-    label: 'Claude Opus',
-    value: 'claude-opus-4-5-20251101',
-    provider: 'anthropic',
-  },
-  {
-    label: 'Gemini Pro',
-    value: 'gemini-2.5-pro',
-    provider: 'google',
-  },
-  {
-    label: 'Gemini Flash',
-    value: 'gemini-2.5-flash',
-    provider: 'google',
-  },
-];
-
-export const MODEL_OPTIONS = MODELS;
-
-export const DEFAULT_COORDINATOR_MODEL = MODELS[0].value;
+// No hardcoded fallback - fetch from API only
+export const DEFAULT_COORDINATOR_MODEL = 'claude-sonnet-4-20250514';
 
 export function providerForModel(model: string): CoordinatorProvider {
-  return MODELS.find((option) => option.value === model)?.provider ||
-    (model.toLowerCase().includes('gemini') ? 'google' : 'anthropic');
+  return model.toLowerCase().includes('gemini') ? 'google' : 'anthropic';
 }
 
 function optionForAgent(agent: Agent): CoordinatorModelOption | null {
@@ -86,7 +61,9 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
   isLoading = false,
   className = '',
 }) => {
-  const [models, setModels] = useState<CoordinatorModelOption[]>(MODELS);
+  const [models, setModels] = useState<CoordinatorModelOption[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const currentModelRef = useRef(currentModel);
 
   useEffect(() => {
@@ -95,34 +72,67 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
 
   useEffect(() => {
     let mounted = true;
-    api.get<Agent[]>('/agents?role=coordinator&status=idle')
+    setLoading(true);
+    setError(null);
+
+    api.get<Agent[]>('/agents?role=coordinator')
       .then((agents) => {
         if (!mounted) return;
         const options = agents
           .map(optionForAgent)
           .filter((option): option is CoordinatorModelOption => option !== null);
-        if (options.length > 0) {
-          const defaultOption = agents.find((agent) => agent.is_default && agent.model);
-          const orderedOptions = defaultOption
-            ? [optionForAgent(defaultOption)!, ...options.filter((option) => option.value !== defaultOption.model)]
+
+        if (options.length === 0) {
+          setError('No coordinator agents configured. Go to Agents page to add.');
+          setModels([]);
+        } else {
+          const defaultAgent = agents.find((agent) => agent.is_default && agent.model);
+          const orderedOptions = defaultAgent
+            ? [optionForAgent(defaultAgent)!, ...options.filter((o) => o.value !== defaultAgent.model)]
             : options;
           setModels(orderedOptions);
-          if (!currentModelRef.current && defaultOption?.model) {
-            onDefaultModelChange?.(defaultOption.model);
+          if (!currentModelRef.current && defaultAgent?.model) {
+            onDefaultModelChange?.(defaultAgent.model);
           }
         }
       })
-      .catch(() => {
-        // Keep the built-in list available when the roster API is unavailable.
+      .catch((err) => {
+        if (!mounted) return;
+        setError(`Failed to load coordinators: ${err.message || 'API error'}`);
+        setModels([]);
+      })
+      .finally(() => {
+        if (mounted) setLoading(false);
       });
+
     return () => { mounted = false; };
   }, []);
 
   const defaultOption = models[0];
-  const selectedModel = currentModel || defaultOption?.value || DEFAULT_COORDINATOR_MODEL;
+  const selectedModel = currentModel || defaultOption?.value || '';
   const selectedOption = models.find((option) => option.value === selectedModel);
-  const provider = selectedOption?.provider || providerForModel(selectedModel);
-  const isDisabled = disabled || isLoading;
+  const provider = selectedOption?.provider || (selectedModel ? providerForModel(selectedModel) : 'anthropic');
+  const isDisabled = disabled || isLoading || loading || models.length === 0;
+
+  // Show error state
+  if (error) {
+    return (
+      <div className={`flex items-center gap-2 ${className}`}>
+        <span className="text-xs text-red-400">{error}</span>
+        <a href="/agents" className="text-xs text-indigo-400 hover:underline">Configure</a>
+      </div>
+    );
+  }
+
+  // Show loading state
+  if (loading) {
+    return (
+      <div className={`flex items-center gap-2 ${className}`}>
+        <Loader2 className="h-4 w-4 animate-spin text-gray-400" />
+        <span className="text-xs text-gray-500">Loading models...</span>
+      </div>
+    );
+  }
 
   return (
     <div className={`flex items-center gap-2 ${className}`}>
@@ -144,9 +154,6 @@ export const ModelSelector: React.FC<ModelSelectorProps> = ({
           aria-busy={isLoading}
           className="h-8 min-w-40 appearance-none rounded-lg border border-gray-700 bg-gray-950 py-1.5 pl-8 pr-8 text-xs font-medium text-gray-200 outline-none transition-colors hover:border-gray-600 focus:border-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {!selectedOption && currentModel && (
-            <option value={currentModel}>{currentModel}</option>
-          )}
           {models.map((model) => (
             <option key={model.value} value={model.value}>
               {model.label}

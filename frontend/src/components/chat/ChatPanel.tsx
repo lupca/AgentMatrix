@@ -8,7 +8,6 @@ import { Task } from '../../types/task';
 import { Bot, RefreshCw, Trash2, AlertCircle } from 'lucide-react';
 import {
   DEFAULT_COORDINATOR_MODEL,
-  MODELS,
   providerForModel,
 } from './ModelSelector';
 import { ChatSession, useChat } from '../../hooks/useChat';
@@ -158,8 +157,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         (updatedSession.selected_provider as 'anthropic' | 'google' | null) ||
           providerForModel(persistedModel),
       );
-      const modelLabel = MODELS.find((model) => model.value === persistedModel)?.label;
-      showSuccess(`Coordinator switched to ${modelLabel || persistedModel}`);
+      showSuccess(`Coordinator switched to ${persistedModel}`);
     } catch (err) {
       setSelectedModel(previousModel);
       setSelectedProvider(previousProvider);

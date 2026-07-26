@@ -10,9 +10,12 @@ import {
   Plus,
   RefreshCw,
   Filter,
-  ShieldCheck,
   AlertCircle,
+  ChevronLeft,
+  ChevronRight,
 } from 'lucide-react';
+
+const PAGE_SIZE = 12;
 
 export const AgentsPage: React.FC = () => {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -25,6 +28,7 @@ export const AgentsPage: React.FC = () => {
   const [roleFilter, setRoleFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [page, setPage] = useState<number>(1);
 
   const [showModal, setShowModal] = useState<boolean>(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
@@ -36,8 +40,8 @@ export const AgentsPage: React.FC = () => {
     setError(null);
 
     try {
-      // 1. Fetch agents
-      const agentList = await api.get<Agent[]>('/agents');
+      // 1. Fetch agents (limit=100 to get all)
+      const agentList = await api.get<Agent[]>('/agents?limit=100');
 
       // 2. Fetch agent stats
       let stats: AgentStatsType[] = [];
@@ -131,6 +135,15 @@ export const AgentsPage: React.FC = () => {
 
     return matchesSearch && matchesRole && matchesStatus;
   });
+
+  // Pagination
+  const totalPages = Math.ceil(filteredAgents.length / PAGE_SIZE);
+  const paginatedAgents = filteredAgents.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  // Reset page when filters change
+  useEffect(() => {
+    setPage(1);
+  }, [search, roleFilter, statusFilter]);
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto min-h-[calc(100vh-4rem)]">
@@ -237,7 +250,7 @@ export const AgentsPage: React.FC = () => {
                   : 'bg-gray-950/60 text-gray-400 hover:text-gray-200 border border-gray-800/60'
               }`}
             >
-              {label} ({role === 'all' ? agents.length : agents.filter((agent) => agent.role === role).length})
+              {label} ({role === 'all' ? agents.length : agents.filter((agent) => agent.role.toLowerCase() === role.toLowerCase()).length})
             </button>
           ))}
         </div>
@@ -259,17 +272,42 @@ export const AgentsPage: React.FC = () => {
           </p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredAgents.map((agent) => (
-            <AgentCard
-              key={agent.id}
-              agent={agent}
-              stats={statsMap[agent.id]}
-              onEdit={openEditModal}
-              onSetDefault={handleSetDefault}
-            />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {paginatedAgents.map((agent) => (
+              <AgentCard
+                key={agent.id}
+                agent={agent}
+                stats={statsMap[agent.id]}
+                onEdit={openEditModal}
+                onSetDefault={handleSetDefault}
+              />
+            ))}
+          </div>
+
+          {/* Pagination */}
+          {totalPages > 1 && (
+            <div className="flex items-center justify-center gap-2 pt-4">
+              <button
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <span className="text-xs text-gray-400 px-3">
+                Page {page} of {totalPages} ({filteredAgents.length} agents)
+              </span>
+              <button
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages}
+                className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
+        </>
       )}
 
       {/* Add/edit agent modal */}

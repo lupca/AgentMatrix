@@ -2,7 +2,6 @@ import { useCallback, useState } from 'react';
 import { api } from '../lib/api';
 import {
   CoordinatorModelOption,
-  MODELS,
   providerForModel,
 } from '../components/chat/ModelSelector';
 
@@ -13,8 +12,9 @@ export interface ChatSession {
   messages?: Array<Record<string, unknown>> | null;
 }
 
-export function modelOptionForValue(model: string): CoordinatorModelOption | undefined {
-  return MODELS.find((option) => option.value === model);
+export function modelOptionForValue(model: string): CoordinatorModelOption {
+  const provider = providerForModel(model);
+  return { value: model, label: model, provider };
 }
 
 /** Persist the coordinator selection for a session. */
