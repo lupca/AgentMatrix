@@ -1,5 +1,17 @@
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from app.db.base import Base
 from app.services.command_router import CommandRouter, COMMANDS
+
+@pytest.fixture
+def db_session():
+    engine = create_engine('sqlite:///:memory:')
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    yield session
+    session.close()
 
 def test_command_router_parse():
     router = CommandRouter(None)
@@ -33,3 +45,32 @@ async def test_command_router_execute():
 
     res_unknown = await router.execute("non_existent_command", "", "session-1")
     assert "error" in res_unknown
+
+@pytest.mark.asyncio
+async def test_command_router_get_status(db_session):
+    from app.db.models import Task, Project
+    
+    project = Project(id="proj-1", name="Test Project")
+    db_session.add(project)
+    
+    task = Task(
+        id="TASK-100",
+        project="proj-1",
+        title="Test Status Task",
+        status="todo",
+        current_gate="spec"
+    )
+    db_session.add(task)
+    db_session.commit()
+    
+    router = CommandRouter(db_session)
+    res = await router.execute("get_status", "TASK-100", "session-1")
+    assert res.get("status") == "success"
+    assert res.get("task", {}).get("id") == "TASK-100"
+    assert res.get("task", {}).get("title") == "Test Status Task"
+
+    res_list = await router.execute("get_status", "", "session-1")
+    assert res_list.get("status") == "success"
+    assert len(res_list.get("tasks", [])) > 0
+
+

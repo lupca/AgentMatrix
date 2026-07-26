@@ -52,5 +52,29 @@ services:
       backend:
         condition: service_healthy
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: ./backend
+    command: dramatiq app.workers.agent_runner
+    depends_on:
+      redis:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://ct:secret@db:5432/control_tower
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - /home/lupca/projects:/home/lupca/projects:rw
+
 volumes:
   pgdata:
