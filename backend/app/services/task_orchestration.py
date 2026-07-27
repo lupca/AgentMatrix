@@ -130,7 +130,11 @@ class TaskOrchestrationService:
 
     def resolve_autonomy(self, project: Project | str | None) -> AutonomyPolicy:
         """Resolve project policy over global settings, failing safe per key."""
-        project_row = project if isinstance(project, Project) else self.db.get(Project, project)
+        project_row = (
+            project
+            if isinstance(project, Project)
+            else (self.db.get(Project, project) if project is not None else None)
+        )
         override = project_row.autonomy_policy if project_row is not None else None
         override = override if isinstance(override, dict) else {}
 

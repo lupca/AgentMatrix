@@ -909,6 +909,48 @@ def test_advance_task_changes_requested_escalates_at_round_cap(driver_db):
     run_agent_mock.send.assert_not_called()
 
 
+def test_advance_task_changes_requested_escalates_at_custom_policy_round_cap(driver_db):
+    factory, run_agent_mock = driver_db
+    db = factory()
+    proj = Project(id="POLICY-PROJ", name="Policy", autonomy_policy={"auto_max_rounds": 1})
+    db.add(proj)
+    db.commit()
+    db.close()
+
+    _driver_task(
+        factory,
+        "ADV-POLICY-ROUND",
+        project="POLICY-PROJ",
+        status="changes-requested",
+        executor="@executor",
+        acceptance_criteria=["Tests pass"],
+    )
+    db = factory()
+    db.add(
+        GateRecord(
+            task_id="ADV-POLICY-ROUND",
+            gate_type="replan",
+            status="approved",
+            actor="system:orchestration-driver",
+            idempotency_key="replan-policy-0",
+            input_hash="hash-0",
+        )
+    )
+    db.commit()
+    db.close()
+
+    outcome = runner.advance_task.fn("ADV-POLICY-ROUND", "manual")
+
+    assert outcome == "escalated_round_limit"
+    db = factory()
+    task = db.get(Task, "ADV-POLICY-ROUND")
+    assert task.status == "failed"
+    assert task.awaiting_approval is True
+    db.close()
+    run_agent_mock.send.assert_not_called()
+
+
+
 def test_advance_task_terminal_statuses_are_a_noop(driver_db):
     factory, run_agent_mock = driver_db
     _driver_task(

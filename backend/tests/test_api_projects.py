@@ -90,3 +90,22 @@ def test_build_graph(client):
     assert res.status_code == 200
     assert res.json() == {"status": "building", "project_id": "proj-graph-test"}
 
+
+def test_create_and_patch_project_autonomy_policy(client):
+    policy = {"autonomy": "auto", "auto_max_risk": "normal", "auto_max_rounds": 4}
+    res = client.post(
+        "/api/projects",
+        json={"id": "auto-policy-proj", "name": "Policy Proj", "autonomy_policy": policy},
+    )
+    assert res.status_code == 201
+    assert res.json()["autonomy_policy"] == policy
+
+    updated_policy = {"autonomy": "plan-only", "auto_max_risk": "low", "auto_max_rounds": 2}
+    patch_res = client.patch(
+        "/api/projects/auto-policy-proj",
+        json={"autonomy_policy": updated_policy},
+    )
+    assert patch_res.status_code == 200
+    assert patch_res.json()["autonomy_policy"] == updated_policy
+
+

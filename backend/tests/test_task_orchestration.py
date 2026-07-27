@@ -784,3 +784,124 @@ def test_record_execution_failure_wakes_dependents(orchestration, db_session):
         )
 
     driver_actor.send.assert_called_once_with("DEP-019", "dependency_closed")
+
+
+# ---------------------------------------------------------------------------
+# Autonomy policy: Settings + Project override (CTV2-093)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_autonomy_defaults_and_fallbacks(orchestration, db_session):
+    # Safe defaults when no setting or project override exists
+    policy = orchestration.resolve_autonomy(None)
+    assert policy.autonomy == "supervised"
+    assert policy.auto_max_risk == "normal"
+    assert policy.auto_max_rounds == 3
+
+    # Invalid setting values fail-safe to defaults
+    db_session.add(Setting(key="autonomy", value="INVALID"))
+    db_session.add(Setting(key="auto_max_risk", value="CRITICAL"))
+    db_session.add(Setting(key="auto_max_rounds", value="NOT_NUMERIC"))
+    db_session.commit()
+
+    policy = orchestration.resolve_autonomy(None)
+    assert policy.autonomy == "supervised"
+    assert policy.auto_max_risk == "normal"
+    assert policy.auto_max_rounds == 3
+
+
+def test_resolve_autonomy_project_override_wins_global_setting(orchestration, db_session):
+    db_session.add(Setting(key="autonomy", value="supervised"))
+    db_session.add(Setting(key="auto_max_risk", value="low"))
+    db_session.add(Setting(key="auto_max_rounds", value=2))
+
+    project = Project(
+        id="OVERRIDE-PROJ",
+        name="Override Project",
+        autonomy_policy={
+            "autonomy": "auto",
+            "auto_max_risk": "normal",
+            "auto_max_rounds": 5,
+        },
+    )
+    db_session.add(project)
+    db_session.commit()
+
+    policy = orchestration.resolve_autonomy(project)
+    assert policy.autonomy == "auto"
+    assert policy.auto_max_risk == "normal"
+    assert policy.auto_max_rounds == 5
+
+    # Test passing project ID string
+    policy_by_id = orchestration.resolve_autonomy("OVERRIDE-PROJ")
+    assert policy_by_id.autonomy == "auto"
+
+
+def test_mode_for_task_matrix(orchestration, db_session):
+    # Global policy: auto, max_risk: normal
+    db_session.add(Setting(key="autonomy", value="auto"))
+    db_session.add(Setting(key="auto_max_risk", value="normal"))
+    db_session.commit()
+
+    proj = Project(id="MATRIX-PROJ", name="Matrix")
+    db_session.add(proj)
+    db_session.commit()
+
+    task_low = _task(db_session, "MAT-001", mode="supervised")
+    task_low.project = "MATRIX-PROJ"
+    task_low.risk = "low"
+
+    task_normal = _task(db_session, "MAT-002", mode="supervised")
+    task_normal.project = "MATRIX-PROJ"
+    task_normal.risk = "normal"
+
+    task_high = _task(db_session, "MAT-003", mode="supervised")
+    task_high.project = "MATRIX-PROJ"
+    task_high.risk = "high"
+
+    # risk low/normal <= auto_max_risk normal -> bypass
+    assert orchestration.mode_for_task(task_low) == "bypass"
+    assert orchestration.mode_for_task(task_normal) == "bypass"
+    # risk high > auto_max_risk normal -> supervised
+    assert orchestration.mode_for_task(task_high) == "supervised"
+
+    # Project override autonomy=plan-only
+    proj.autonomy_policy = {"autonomy": "plan-only"}
+    db_session.commit()
+    assert orchestration.mode_for_task(task_low) == "plan-only"
+    assert orchestration.mode_for_task(task_high) == "plan-only"
+
+
+def test_write_spec_plan_updates_task_mode_by_policy(orchestration, db_session):
+    db_session.add(Setting(key="autonomy", value="auto"))
+    db_session.add(Setting(key="auto_max_risk", value="normal"))
+    db_session.commit()
+
+    task_low = _task(db_session, "SPEC-MODE-001", mode="supervised")
+    orchestration.write_spec_plan(
+        task_id=task_low.id,
+        actor="@planner",
+        acceptance_criteria=["AC1"],
+        plan="Plan",
+        files=[],
+        tests=[],
+        risk="low",
+        flows=[],
+    )
+    db_session.refresh(task_low)
+    assert task_low.mode == "bypass"
+
+    task_high = _task(db_session, "SPEC-MODE-002", mode="supervised")
+    orchestration.write_spec_plan(
+        task_id=task_high.id,
+        actor="@planner",
+        acceptance_criteria=["AC1"],
+        plan="Plan",
+        files=[],
+        tests=[],
+        risk="high",
+        flows=[],
+    )
+    db_session.refresh(task_high)
+    assert task_high.mode == "supervised"
+

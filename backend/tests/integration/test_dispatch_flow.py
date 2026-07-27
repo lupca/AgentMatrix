@@ -70,7 +70,7 @@ def test_dispatch_creates_run_and_queues(dispatch_context):
     assert data["status"] == "queued"
     assert run.status == "queued"
     assert run.dramatiq_message_id == "message-123"
-    assert run.timeout_seconds == 14_400
+    assert run.timeout_seconds == 900
     assert db.get(Task, "T-INT-001").status == "dispatched"
     actor.send.assert_called_once()
 
