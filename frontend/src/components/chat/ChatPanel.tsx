@@ -111,13 +111,24 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       }
 
       if (sessionData && Array.isArray(sessionData.messages)) {
-        const formattedMessages: Message[] = sessionData.messages.map((m: any) => ({
-          id: m.id || `msg-${Math.random()}`,
-          role: m.role || 'assistant',
-          content: m.content || '',
-          timestamp: m.timestamp || new Date().toISOString(),
-          toolCalls: m.tool_calls || m.toolCalls || undefined,
-        }));
+        const formattedMessages: Message[] = sessionData.messages.map((m: any) => {
+          // Map tool_calls from DB format (input) to frontend format (arguments)
+          const rawToolCalls = m.tool_calls || m.toolCalls;
+          const toolCalls = rawToolCalls?.map((tc: any) => ({
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.arguments || tc.input,
+            result: tc.result,
+            status: tc.status,
+          }));
+          return {
+            id: m.id || `msg-${Math.random()}`,
+            role: m.role || 'assistant',
+            content: m.content || '',
+            timestamp: m.timestamp || new Date().toISOString(),
+            toolCalls,
+          };
+        });
         setMessages(formattedMessages);
       } else {
         // Default initial welcome message
