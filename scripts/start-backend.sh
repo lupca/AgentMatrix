@@ -9,6 +9,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BACKEND_DIR="$PROJECT_DIR/backend"
 PID_FILE="$PROJECT_DIR/.backend.pid"
 LOG_FILE="$PROJECT_DIR/backend.log"
+WORKER_PID_FILE="$PROJECT_DIR/.worker.pid"
+WORKER_LOG_FILE="$PROJECT_DIR/worker.log"
 
 # Check if already running
 if [ -f "$PID_FILE" ]; then
@@ -18,6 +20,13 @@ if [ -f "$PID_FILE" ]; then
         exit 0
     fi
     rm "$PID_FILE"
+fi
+
+if [ -f "$WORKER_PID_FILE" ]; then
+    WORKER_PID=$(cat "$WORKER_PID_FILE")
+    if ! kill -0 "$WORKER_PID" 2>/dev/null; then
+        rm "$WORKER_PID_FILE"
+    fi
 fi
 
 # Ensure DB and Redis are running
@@ -56,6 +65,11 @@ echo "Starting backend on port 8001..."
 nohup uvicorn app.main:app --host 0.0.0.0 --port 8001 > "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 
+# Start worker
+echo "Starting Dramatiq worker..."
+nohup dramatiq app.workers.agent_runner > "$WORKER_LOG_FILE" 2>&1 &
+echo $! > "$WORKER_PID_FILE"
+
 sleep 3
 # Retry health check a few times
 for i in 1 2 3 4 5; do
@@ -67,6 +81,7 @@ done
 
 if curl -s http://localhost:8001/health > /dev/null; then
     echo "Backend started successfully (PID: $(cat $PID_FILE))"
+    echo "Worker started successfully (PID: $(cat $WORKER_PID_FILE))"
     echo "Log: $LOG_FILE"
 else
     echo "Backend failed to start. Check $LOG_FILE"
