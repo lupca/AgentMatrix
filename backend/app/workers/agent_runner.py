@@ -19,7 +19,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.base import SessionLocal
-from app.db.models import AgentOutputChunk, AgentRun
+from app.db.models import AgentOutputChunk, AgentRun, AuditLog, Task
+from app.services.agent_matcher import AgentMatcher
 from app.services.command_builder import _is_review_task, review_result_path
 from app.schemas.task import ReviewResult
 from app.services.process_manager import ProcessManager, ProcessResult, ProcessStatus
@@ -35,6 +36,11 @@ from app.workers.output_streamer import (
 logger = logging.getLogger(__name__)
 
 OUTPUT_CHUNK_LINES = max(1, int(os.getenv("AGENT_OUTPUT_CHUNK_LINES", "100")))
+
+# Cap on changes-requested -> todo replan rounds, and on consecutive
+# advance_task calls that see the same actionable status with no forward
+# movement. Read from a constant for now; CTV2-093 moves this to policy.
+AUTO_MAX_ROUNDS = max(1, int(os.getenv("AUTO_MAX_ROUNDS", "3")))
 
 
 class AgentExecutionError(RuntimeError):
@@ -149,6 +155,24 @@ def publish_status(run_id: str, status: str, **kwargs) -> None:
     )
 
 
+def _nudge_driver(task_id: str, trigger: str) -> None:
+    """Best-effort event-driven wake-up of the orchestration driver.
+
+    Never allowed to fail the caller: a dropped nudge just leaves the task
+    waiting for the next trigger (or a manual command) instead of crashing an
+    otherwise-successful run/gate transition.
+    """
+    try:
+        advance_task.send(task_id, trigger)
+    except Exception:
+        logger.warning(
+            "Could not enqueue advance_task for task %s (trigger=%s)",
+            task_id,
+            trigger,
+            exc_info=True,
+        )
+
+
 def _publish(run_id: str, payload: dict) -> None:
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     for attempt in range(3):
@@ -255,6 +279,7 @@ def run_agent(
                 idempotency_key=f"run:{run.id}:missing-base",
                 run_id=run.id,
             )
+            _nudge_driver(task_id, "run_agent_completed")
             return None
         if _has_uncommitted_changes(repo_root):
             logger.warning(
@@ -436,6 +461,7 @@ def run_agent(
                 run_id=run.id,
             )
         db.commit()
+        _nudge_driver(task_id, "run_agent_completed")
 
         effective_error = run.error_message or result.error
         publish_status(
@@ -461,10 +487,284 @@ def run_agent(
             publish_status(run_id, "retrying", error=str(exc))
             raise
         publish_status(run_id, "failed", error=str(exc))
+        _nudge_driver(task_id, "run_agent_completed")
         return None
     finally:
         process_manager.terminate()
         db.close()
+
+
+# Statuses where the driver takes a mechanical action rather than waiting.
+_ACTIONABLE_STATUSES = {"todo", "awaiting-review", "changes-requested"}
+
+
+@dramatiq.actor(
+    broker=redis_broker,
+    max_retries=0,
+    time_limit=60_000,
+)
+def advance_task(task_id: str, trigger: str) -> str:
+    """Event-driven, 0-token orchestration driver.
+
+    Reads (status, mode, awaiting_approval), applies the §3.1 decision table,
+    and calls TaskOrchestrationService for the next mechanical transition. It
+    is invoked after run_agent finishes, after a gate is approved, after a
+    review run completes, and after a `changes` verdict is recorded -- never
+    polled. It never sets task fields itself.
+    """
+    db: Session = SessionLocal()
+    try:
+        task = db.query(Task).filter(Task.id == task_id).with_for_update().first()
+        if task is None:
+            logger.warning("advance_task: task %s not found", task_id)
+            return "not_found"
+
+        status_before = task.status
+        if task.awaiting_approval:
+            # Already parked for a human decision (a gate pending, or a
+            # brake escalation) -- that is the correct stopped state, not a
+            # driver loop, so it never counts toward the stall cap.
+            outcome = "gate_pending"
+        elif _advance_task_stalled(db, task_id, status_before):
+            _escalate(
+                db,
+                task,
+                f"advance_task made no progress after {AUTO_MAX_ROUNDS} calls "
+                f"at status {status_before!r}; escalating instead of looping",
+            )
+            outcome = "escalated_stall"
+        else:
+            service = TaskOrchestrationService(db)
+            outcome = _advance_task_step(db, service, task)
+
+        db.add(
+            AuditLog(
+                task_id=task_id,
+                action=f"advance_task:{trigger}",
+                actor="system:orchestration-driver",
+                details={
+                    "status_before": status_before,
+                    "status_after": task.status,
+                    "outcome": outcome,
+                },
+            )
+        )
+        db.commit()
+        logger.info(
+            "advance_task: task %s trigger=%s %s -> %s (%s)",
+            task_id,
+            trigger,
+            status_before,
+            task.status,
+            outcome,
+        )
+        return outcome
+    finally:
+        db.close()
+
+
+def _advance_task_stalled(db: Session, task_id: str, current_status: str) -> bool:
+    """Detect AUTO_MAX_ROUNDS consecutive calls stuck at the same actionable status.
+
+    Only actionable statuses can stall this way -- `dispatched`/`in-review`
+    are expected to sit unchanged between events, and `done`/`failed` are
+    terminal, so neither is a loop.
+    """
+    if current_status not in _ACTIONABLE_STATUSES:
+        return False
+    recent = (
+        db.query(AuditLog)
+        .filter(AuditLog.task_id == task_id, AuditLog.action.like("advance_task:%"))
+        .order_by(AuditLog.id.desc())
+        .limit(AUTO_MAX_ROUNDS)
+        .all()
+    )
+    if len(recent) < AUTO_MAX_ROUNDS:
+        return False
+    return all(
+        isinstance(entry.details, dict)
+        and entry.details.get("status_before") == current_status
+        and entry.details.get("status_after") == current_status
+        for entry in recent
+    )
+
+
+def _escalate(db: Session, task: Task, reason: str) -> None:
+    task.status = "failed"
+    task.error = reason
+    task.awaiting_approval = True
+    task.approval_prompt = reason
+    task.updated_at = datetime.now(timezone.utc)
+
+
+def _advance_task_step(
+    db: Session,
+    service: TaskOrchestrationService,
+    task: Task,
+) -> str:
+    if task.awaiting_approval:
+        return "gate_pending"
+    if task.status == "todo":
+        return _advance_todo(db, service, task)
+    if task.status == "awaiting-review":
+        return _advance_awaiting_review(db, service, task)
+    if task.status == "changes-requested":
+        return _advance_changes_requested(db, service, task)
+    if task.status in {"dispatched", "in-review"}:
+        return "waiting"
+    if task.status in {"done", "failed"}:
+        return "terminal"
+    return "unhandled_status"
+
+
+def _advance_todo(db: Session, service: TaskOrchestrationService, task: Task) -> str:
+    if not (task.acceptance_criteria or []) and not task.legacy_no_ac:
+        _escalate(
+            db,
+            task,
+            "todo task has no acceptance_criteria; refusing to dispatch (fail-closed)",
+        )
+        return "escalated_missing_ac"
+
+    brake = service.check_brakes(task, for_spawn=False, audit=True)
+    if not brake.allowed:
+        return f"brake:{brake.code}"
+
+    return _dispatch_execute(db, service, task)
+
+
+def _dispatch_execute(db: Session, service: TaskOrchestrationService, task: Task) -> str:
+    agent_id = task.executor
+    if not agent_id:
+        suggestions = AgentMatcher(db).suggest_agents(task, top_n=1)
+        agent_id = suggestions[0].agent_id if suggestions else None
+    if not agent_id:
+        _escalate(db, task, "no available executor agent found for dispatch")
+        return "escalated_no_agent"
+
+    round_ = service.changes_round_count(task.id)
+    try:
+        result = service.request_dispatch(
+            task_id=task.id,
+            agent_id=agent_id,
+            actor="system:orchestration-driver",
+            idempotency_key=f"advance:{task.id}:dispatch:r{round_}",
+        )
+    except OrchestrationError as exc:
+        _escalate(db, task, f"dispatch failed: {exc}")
+        return "escalated_dispatch_error"
+
+    if not result.applied:
+        return "gate_pending"
+    run = result.agent_run
+    if run is None:
+        return "dispatch_no_run"
+    _enqueue_run(service, run, result.context or {}, task_id=task.id)
+    return "dispatched"
+
+
+def _advance_awaiting_review(
+    db: Session,
+    service: TaskOrchestrationService,
+    task: Task,
+) -> str:
+    if not task.result_ref or not task.result_ref.strip():
+        return "waiting_result_ref"
+
+    brake = service.check_brakes(task, for_spawn=False, audit=True)
+    if not brake.allowed:
+        return f"brake:{brake.code}"
+
+    executor_norm = (task.executor or "").strip().casefold()
+    suggestions = AgentMatcher(db).suggest_agents(task, top_n=5)
+    independent = [
+        s for s in suggestions if s.agent_id.strip().casefold() != executor_norm
+    ]
+    if not independent:
+        _escalate(db, task, f"no independent reviewer available for task {task.id}")
+        return "escalated_no_reviewer"
+    reviewer = independent[0].agent_id
+
+    round_ = service.changes_round_count(task.id)
+    try:
+        result = service.request_review(
+            task_id=task.id,
+            reviewer=reviewer,
+            actor="system:orchestration-driver",
+            idempotency_key=f"advance:{task.id}:review:r{round_}",
+        )
+    except OrchestrationError as exc:
+        _escalate(db, task, f"review request failed: {exc}")
+        return "escalated_review_error"
+
+    if not result.applied:
+        return "gate_pending"
+    run = result.agent_run
+    if run is None:
+        return "review_no_run"
+    _enqueue_run(service, run, result.context or {}, task_id=task.id)
+    return "review_requested"
+
+
+def _advance_changes_requested(
+    db: Session,
+    service: TaskOrchestrationService,
+    task: Task,
+) -> str:
+    round_ = service.changes_round_count(task.id)
+    if round_ >= AUTO_MAX_ROUNDS:
+        _escalate(
+            db,
+            task,
+            f"changes-requested round limit reached ({round_}/{AUTO_MAX_ROUNDS}); "
+            "escalating for a human replan",
+        )
+        return "escalated_round_limit"
+
+    brake = service.check_brakes(task, for_spawn=False, audit=True)
+    if not brake.allowed:
+        return f"brake:{brake.code}"
+
+    try:
+        service.reopen_for_replan(
+            task_id=task.id,
+            actor="system:orchestration-driver",
+            idempotency_key=f"advance:{task.id}:replan:r{round_}",
+        )
+    except OrchestrationError as exc:
+        _escalate(db, task, f"reopen for replan failed: {exc}")
+        return "escalated_replan_error"
+
+    return _dispatch_execute(db, service, task)
+
+
+def _enqueue_run(
+    service: TaskOrchestrationService,
+    run: AgentRun,
+    context: dict,
+    *,
+    task_id: str,
+) -> None:
+    try:
+        message = run_agent.send(
+            run.id,
+            run.task_id,
+            run.command,
+            str(context["repo_root"]),
+            run.timeout_seconds,
+        )
+        message_id = getattr(message, "message_id", None)
+        if message_id:
+            run.dramatiq_message_id = str(message_id)
+            service.db.commit()
+    except Exception as exc:
+        error = f"Could not queue run: {exc}"
+        service.record_dispatch_queue_failure(
+            run_id=run.id,
+            error=error,
+            actor="system:orchestration-driver",
+            idempotency_key=f"advance:{task_id}:queue-failure:{run.id}",
+        )
 
 
 def _current_attempt(run: AgentRun) -> int:

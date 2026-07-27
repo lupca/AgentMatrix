@@ -679,6 +679,65 @@ class TaskOrchestrationService:
         self.db.refresh(task)
         return task
 
+    def reopen_for_replan(
+        self,
+        *,
+        task_id: str,
+        actor: str,
+        idempotency_key: str,
+        expected_status: str = "changes-requested",
+    ) -> TransitionResult:
+        """Reopen a changes-requested task back to `todo` for another round.
+
+        Mechanical only: it does not regenerate acceptance_criteria/plan
+        content. A real content replan is a separate, explicit call into
+        `write_spec_plan` before the task is re-dispatched; this method just
+        clears the terminal `changes-requested` state so `request_dispatch`
+        (which requires status "todo") can run again.
+        """
+        task = self._task(task_id)
+        payload = {"expected_status": expected_status}
+        input_hash = self._input_hash(payload)
+        existing = self._idempotent_record(task_id, idempotency_key, input_hash)
+        if existing is not None:
+            return self._result_for_record(task, existing)
+        self._assert_status(task, expected_status)
+        task.status = "todo"
+        task.current_gate = "plan"
+        task.verdict = None
+        task.updated_at = datetime.now(timezone.utc)
+        record = self._ledger_record(
+            task=task,
+            gate_type="replan",
+            status="approved",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=payload,
+            output_payload={"task_status": task.status},
+        )
+        self._audit(task, record)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        return TransitionResult(task, record, True)
+
+    def changes_round_count(self, task_id: str) -> int:
+        """Count completed changes-requested -> todo replan cycles for a task.
+
+        Used as the loop-cap counter for the orchestration driver
+        (`advance_task`): each `reopen_for_replan` call is one round.
+        """
+        return (
+            self.db.query(GateRecord)
+            .filter(
+                GateRecord.task_id == task_id,
+                GateRecord.gate_type == "replan",
+                GateRecord.status == "approved",
+            )
+            .count()
+        )
+
     def _request_gate(
         self,
         *,

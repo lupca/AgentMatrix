@@ -20,7 +20,7 @@ from app.services.task_orchestration import (
     TransitionConflictError,
     TransitionResult,
 )
-from app.workers.agent_runner import run_agent
+from app.workers.agent_runner import advance_task, run_agent
 from app.workers.output_streamer import publish_status, request_cancel
 
 router = APIRouter(prefix="/api", tags=["dispatch"])
@@ -119,12 +119,24 @@ def decide_gate(
         _raise_orchestration_http(exc)
     if result.agent_run is not None:
         _enqueue_dispatch(result, service)
+    if result.applied:
+        # A rejected gate is an explicit human "no" -- never treat it as a
+        # nudge to re-dispatch.
+        _nudge_driver(result.task.id, "gate_approved")
     agent_id = (
         result.agent_run.agent_id
         if result.agent_run is not None
         else str((result.gate_record.input_payload or {}).get("agent_id", ""))
     )
     return _dispatch_response(result, agent_id)
+
+
+def _nudge_driver(task_id: str, trigger: str) -> None:
+    """Best-effort wake-up of the orchestration driver; never fails the request."""
+    try:
+        advance_task.send(task_id, trigger)
+    except Exception:
+        pass
 
 
 def _dispatch_response(

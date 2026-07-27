@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.workers.agent_runner as runner
 from app.db.base import Base
-from app.db.models import AgentOutputChunk, AgentRun, Project, Setting, Task
+from app.db.models import Agent, AgentOutputChunk, AgentRun, AuditLog, GateRecord, Project, Setting, Task
 from app.services.process_manager import ProcessResult, ProcessStatus
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "review_results"
@@ -466,4 +466,312 @@ def test_update_missing_task_is_not_silent(worker_db):
     with pytest.raises(Exception, match="Task missing not found"):
         runner._update_task_status(db, "missing", "failed", error="error")
 
+    db.close()
+
+
+# ---------------------------------------------------------------------------
+# advance_task: orchestration driver (CTV2-089)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def driver_db(monkeypatch, tmp_path):
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    db = factory()
+    db.add(Project(id="project", name="Project", repo_root=str(tmp_path)))
+    db.add(Agent(id="@executor", name="Executor", role="executor", cli="codex", capabilities=["general"]))
+    db.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex", capabilities=["general"]))
+    db.commit()
+    db.close()
+    monkeypatch.setattr(runner, "SessionLocal", factory)
+    run_agent_mock = MagicMock()
+    run_agent_mock.send.return_value = MagicMock(message_id="msg-driver")
+    monkeypatch.setattr(runner, "run_agent", run_agent_mock)
+    yield factory, run_agent_mock
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def _driver_task(factory, task_id, **overrides):
+    db = factory()
+    fields = {
+        "id": task_id,
+        "project": "project",
+        "title": "Driver task",
+        "status": "todo",
+        "mode": "bypass",
+    }
+    fields.update(overrides)
+    db.add(Task(**fields))
+    db.commit()
+    db.close()
+
+
+def test_advance_task_missing_task_is_a_noop(driver_db):
+    factory, run_agent_mock = driver_db
+    assert runner.advance_task.fn("MISSING", "manual") == "not_found"
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_todo_missing_ac_escalates_fail_closed(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-001", acceptance_criteria=[])
+
+    outcome = runner.advance_task.fn("ADV-001", "manual")
+
+    assert outcome == "escalated_missing_ac"
+    db = factory()
+    task = db.get(Task, "ADV-001")
+    assert task.status == "failed"
+    assert task.awaiting_approval is True
+    db.close()
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_todo_with_ac_dispatches_the_best_matched_executor(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-002", acceptance_criteria=["Tests pass"])
+
+    outcome = runner.advance_task.fn("ADV-002", "manual")
+
+    assert outcome == "dispatched"
+    db = factory()
+    task = db.get(Task, "ADV-002")
+    assert task.status == "dispatched"
+    assert task.executor == "@executor"
+    assert db.query(AgentRun).filter(AgentRun.task_id == "ADV-002").count() == 1
+    db.close()
+    run_agent_mock.send.assert_called_once()
+
+
+def test_advance_task_supervised_todo_stops_at_gate_pending_and_never_loops(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-003", mode="supervised", acceptance_criteria=["Tests pass"])
+
+    outcome = runner.advance_task.fn("ADV-003", "manual")
+    assert outcome == "gate_pending"
+
+    db = factory()
+    task = db.get(Task, "ADV-003")
+    assert task.status == "todo"
+    assert task.awaiting_approval is True
+    db.close()
+    run_agent_mock.send.assert_not_called()
+
+    for _ in range(runner.AUTO_MAX_ROUNDS + 2):
+        assert runner.advance_task.fn("ADV-003", "manual") == "gate_pending"
+
+    db = factory()
+    task = db.get(Task, "ADV-003")
+    assert task.status == "todo"  # never silently escalated while parked for approval
+    db.close()
+
+
+def test_advance_task_respects_autonomy_kill_switch(driver_db):
+    factory, run_agent_mock = driver_db
+    db = factory()
+    db.add(Setting(key="autonomy_enabled", value=False))
+    db.commit()
+    db.close()
+    _driver_task(factory, "ADV-004", acceptance_criteria=["Tests pass"])
+
+    outcome = runner.advance_task.fn("ADV-004", "manual")
+
+    assert outcome == "brake:autonomy_disabled"
+    db = factory()
+    task = db.get(Task, "ADV-004")
+    assert task.status == "failed"
+    assert task.awaiting_approval is True
+    db.close()
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_awaiting_review_picks_independent_reviewer(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-005",
+        status="awaiting-review",
+        executor="@executor",
+        acceptance_criteria=["Tests pass"],
+        result_ref="base123..head456",
+    )
+
+    outcome = runner.advance_task.fn("ADV-005", "manual")
+
+    assert outcome == "review_requested"
+    db = factory()
+    task = db.get(Task, "ADV-005")
+    assert task.status == "in-review"
+    assert task.reviewer == "@reviewer"
+    db.close()
+    run_agent_mock.send.assert_called_once()
+
+
+def test_advance_task_awaiting_review_waits_for_result_ref(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-006",
+        status="awaiting-review",
+        executor="@executor",
+        acceptance_criteria=["Tests pass"],
+        result_ref=None,
+    )
+
+    outcome = runner.advance_task.fn("ADV-006", "manual")
+
+    assert outcome == "waiting_result_ref"
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_changes_requested_redispatches_under_round_cap(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-007",
+        status="changes-requested",
+        executor="@executor",
+        acceptance_criteria=["Tests pass"],
+    )
+
+    outcome = runner.advance_task.fn("ADV-007", "manual")
+
+    assert outcome == "dispatched"
+    db = factory()
+    task = db.get(Task, "ADV-007")
+    assert task.status == "dispatched"
+    db.close()
+    run_agent_mock.send.assert_called_once()
+
+
+def test_advance_task_changes_requested_escalates_at_round_cap(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-008",
+        status="changes-requested",
+        executor="@executor",
+        acceptance_criteria=["Tests pass"],
+    )
+    db = factory()
+    for i in range(runner.AUTO_MAX_ROUNDS):
+        db.add(
+            GateRecord(
+                task_id="ADV-008",
+                gate_type="replan",
+                status="approved",
+                actor="system:orchestration-driver",
+                idempotency_key=f"replan-{i}",
+                input_hash=f"hash-{i}",
+            )
+        )
+    db.commit()
+    db.close()
+
+    outcome = runner.advance_task.fn("ADV-008", "manual")
+
+    assert outcome == "escalated_round_limit"
+    db = factory()
+    task = db.get(Task, "ADV-008")
+    assert task.status == "failed"
+    assert task.awaiting_approval is True
+    db.close()
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_terminal_statuses_are_a_noop(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-009",
+        status="done",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="base123..head456",
+        acceptance_criteria=["Tests pass"],
+    )
+    _driver_task(factory, "ADV-010", status="failed", acceptance_criteria=["Tests pass"])
+
+    assert runner.advance_task.fn("ADV-009", "manual") == "terminal"
+    assert runner.advance_task.fn("ADV-010", "manual") == "terminal"
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_dispatched_and_in_review_wait_for_the_run(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-011", status="dispatched", executor="@executor")
+    _driver_task(factory, "ADV-012", status="in-review", executor="@executor", reviewer="@reviewer")
+
+    assert runner.advance_task.fn("ADV-011", "manual") == "waiting"
+    assert runner.advance_task.fn("ADV-012", "manual") == "waiting"
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_stalled_actionable_status_escalates_instead_of_looping(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-013",
+        status="awaiting-review",
+        executor="@executor",
+        acceptance_criteria=["Tests pass"],
+        result_ref=None,
+    )
+
+    outcomes = [runner.advance_task.fn("ADV-013", "manual") for _ in range(runner.AUTO_MAX_ROUNDS)]
+    assert outcomes == ["waiting_result_ref"] * runner.AUTO_MAX_ROUNDS
+
+    outcome = runner.advance_task.fn("ADV-013", "manual")
+
+    assert outcome == "escalated_stall"
+    db = factory()
+    task = db.get(Task, "ADV-013")
+    assert task.status == "failed"
+    assert task.awaiting_approval is True
+    db.close()
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_dispatch_idempotency_key_prevents_duplicate_run(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-014", acceptance_criteria=["Tests pass"])
+
+    first = runner.advance_task.fn("ADV-014", "manual")
+    assert first == "dispatched"
+
+    # Simulate a redelivered/duplicate advance_task trigger racing back to
+    # "todo" before the first dispatch's downstream effects are visible --
+    # the driver must not mint a second AgentRun for the same round.
+    db = factory()
+    task = db.get(Task, "ADV-014")
+    task.status = "todo"
+    db.commit()
+    db.close()
+
+    runner.advance_task.fn("ADV-014", "manual")
+
+    db = factory()
+    assert db.query(AgentRun).filter(AgentRun.task_id == "ADV-014").count() == 1
+    db.close()
+
+
+def test_advance_task_audit_trail_records_every_call(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-015", acceptance_criteria=["Tests pass"])
+
+    runner.advance_task.fn("ADV-015", "run_agent_completed")
+
+    db = factory()
+    entries = db.query(AuditLog).filter(AuditLog.action == "advance_task:run_agent_completed").all()
+    assert len(entries) == 1
+    assert entries[0].details["status_before"] == "todo"
+    assert entries[0].details["status_after"] == "dispatched"
+    assert entries[0].details["outcome"] == "dispatched"
     db.close()

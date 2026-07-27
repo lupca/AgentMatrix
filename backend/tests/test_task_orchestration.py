@@ -517,6 +517,79 @@ def test_write_spec_plan_rejects_empty_acceptance_criteria(orchestration, db_ses
         )
 
 
+def test_reopen_for_replan_transitions_changes_requested_to_todo(orchestration, db_session):
+    task = _task(db_session, "REPLAN-001", mode="bypass")
+    task.status = "changes-requested"
+    task.verdict = "changes"
+    db_session.commit()
+
+    result = orchestration.reopen_for_replan(
+        task_id=task.id,
+        actor="system:orchestration-driver",
+        idempotency_key="replan-1",
+    )
+
+    assert result.applied is True
+    assert result.task.status == "todo"
+    assert result.task.current_gate == "plan"
+    assert result.task.verdict is None
+    assert result.gate_record.gate_type == "replan"
+    assert orchestration.changes_round_count(task.id) == 1
+
+
+def test_reopen_for_replan_requires_changes_requested_status(orchestration, db_session):
+    task = _task(db_session, "REPLAN-002", mode="bypass")
+
+    with pytest.raises(TransitionConflictError):
+        orchestration.reopen_for_replan(
+            task_id=task.id,
+            actor="system:orchestration-driver",
+            idempotency_key="replan-2",
+        )
+
+
+def test_reopen_for_replan_is_idempotent(orchestration, db_session):
+    task = _task(db_session, "REPLAN-003", mode="bypass")
+    task.status = "changes-requested"
+    db_session.commit()
+
+    first = orchestration.reopen_for_replan(
+        task_id=task.id,
+        actor="system:orchestration-driver",
+        idempotency_key="replan-3",
+    )
+    # A same-key replay after the task has already moved on to "todo" must
+    # return the cached record rather than asserting the old pre-state.
+    second = orchestration.reopen_for_replan(
+        task_id=task.id,
+        actor="system:orchestration-driver",
+        idempotency_key="replan-3",
+    )
+
+    assert first.gate_record.id == second.gate_record.id
+    assert orchestration.changes_round_count(task.id) == 1
+
+
+def test_changes_round_count_only_counts_approved_replans(orchestration, db_session):
+    task = _task(db_session, "REPLAN-004", mode="bypass")
+    assert orchestration.changes_round_count(task.id) == 0
+
+    task.status = "changes-requested"
+    db_session.commit()
+    orchestration.reopen_for_replan(
+        task_id=task.id, actor="@driver", idempotency_key="replan-4a"
+    )
+    assert orchestration.changes_round_count(task.id) == 1
+
+    task = db_session.get(Task, task.id)
+    task.status = "changes-requested"
+    db_session.commit()
+    orchestration.reopen_for_replan(
+        task_id=task.id, actor="@driver", idempotency_key="replan-4b"
+    )
+    assert orchestration.changes_round_count(task.id) == 2
+
+
 def test_write_spec_plan_requires_todo_status(orchestration, db_session):
     task = _task(db_session, "SPEC-003")
     task.status = "dispatched"

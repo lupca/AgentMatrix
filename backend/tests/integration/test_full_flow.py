@@ -174,3 +174,99 @@ def test_create_dispatch_stream_and_complete_flow(client, db_session):
     final_task = client.get(f'/api/tasks/{task_id}')
     assert final_task.status_code == 200
     assert final_task.json()['status'] == 'done'
+
+
+def test_decide_gate_approval_nudges_orchestration_driver(client, db_session):
+    """A supervised gate approval must wake advance_task (CTV2-089)."""
+    project_id = 'test-e2e-driver-nudge'
+    agent_id = '@test-agent-driver'
+    repo_root = str(Path(__file__).resolve().parents[3])
+    db_session.add(Project(id=project_id, name='Driver Nudge', repo_root=repo_root))
+    db_session.add(
+        Agent(id=agent_id, name='Test Agent', role='executor', capabilities=['testing'], cli='codex', status='idle')
+    )
+    db_session.commit()
+
+    task = Task(
+        id='DRV-001',
+        project=project_id,
+        title='Driver nudge task',
+        status='todo',
+        mode='supervised',
+        acceptance_criteria=['Does the thing'],
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    pending = client.post(
+        '/api/dispatch',
+        json={
+            'task_id': task.id,
+            'agent_id': agent_id,
+            'actor': '@operator',
+            'idempotency_key': 'driver-nudge-dispatch',
+        },
+    )
+    assert pending.status_code == 200, pending.text
+    assert pending.json()['status'] == 'pending'
+
+    with patch('app.api.dispatch.run_agent') as run_agent_actor, patch(
+        'app.api.dispatch.advance_task'
+    ) as driver_actor:
+        run_agent_actor.send.return_value = MagicMock(message_id='driver-nudge-message')
+        approved = client.post(
+            f"/api/gates/{pending.json()['gate_record_id']}/decision",
+            json={
+                'decision': 'approved',
+                'actor': '@supervisor',
+                'idempotency_key': 'driver-nudge-approval',
+            },
+        )
+    assert approved.status_code == 200, approved.text
+    driver_actor.send.assert_called_once_with(task.id, 'gate_approved')
+
+
+def test_decide_gate_rejection_does_not_nudge_orchestration_driver(client, db_session):
+    """A rejected gate is an explicit human 'no' -- the driver must not auto-retry."""
+    project_id = 'test-e2e-driver-nudge-reject'
+    agent_id = '@test-agent-driver-reject'
+    repo_root = str(Path(__file__).resolve().parents[3])
+    db_session.add(Project(id=project_id, name='Driver Nudge Reject', repo_root=repo_root))
+    db_session.add(
+        Agent(id=agent_id, name='Test Agent', role='executor', capabilities=['testing'], cli='codex', status='idle')
+    )
+    db_session.commit()
+
+    task = Task(
+        id='DRV-002',
+        project=project_id,
+        title='Driver nudge reject task',
+        status='todo',
+        mode='supervised',
+        acceptance_criteria=['Does the thing'],
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    pending = client.post(
+        '/api/dispatch',
+        json={
+            'task_id': task.id,
+            'agent_id': agent_id,
+            'actor': '@operator',
+            'idempotency_key': 'driver-nudge-reject-dispatch',
+        },
+    )
+    assert pending.status_code == 200, pending.text
+
+    with patch('app.api.dispatch.advance_task') as driver_actor:
+        rejected = client.post(
+            f"/api/gates/{pending.json()['gate_record_id']}/decision",
+            json={
+                'decision': 'rejected',
+                'actor': '@supervisor',
+                'idempotency_key': 'driver-nudge-reject-approval',
+            },
+        )
+    assert rejected.status_code == 200, rejected.text
+    driver_actor.send.assert_not_called()
