@@ -731,14 +731,37 @@ class CommandRouter:
         if not task:
             return {'error': f'Task {task_id} not found'}
 
+        service = TaskOrchestrationService(self.db)
+        try:
+            gate_result = service.request_spec_plan_model(
+                task_id=task_id,
+                actor=f"chat:{session_id or 'anonymous'}",
+                idempotency_key=self._command_key(
+                    session_id, "spec_plan_model", args,
+                    attempt=self._spec_plan_model_attempt(task_id),
+                ),
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        if not gate_result.applied:
+            return {
+                'action': 'spec_plan_model_pending',
+                'task_id': task_id,
+                'gate_record_id': gate_result.gate_record.id,
+                'status': 'pending',
+                'suggested_model': (gate_result.context or {}).get('model_config'),
+            }
+
+        model_config = (gate_result.context or {}).get('model_config')
+
         repo_root, _error = self._research_repo_root(session_id)
 
         try:
-            result, flows = await generate_spec_plan(task, repo_root)
+            result, flows = await generate_spec_plan(task, repo_root, model_config)
         except SpecPlanGenerationError as exc:
             return {'error': str(exc)}
 
-        service = TaskOrchestrationService(self.db)
         try:
             updated = service.write_spec_plan(
                 task_id=task_id,
@@ -1149,6 +1172,23 @@ class CommandRouter:
             self.db.query(AgentRun).filter(AgentRun.task_id == task_id).count()
         )
         return existing_runs + 1
+
+    def _spec_plan_model_attempt(self, task_id: str) -> int:
+        """Number of times this task has already requested a spec/plan model gate.
+
+        Same rationale as ``_dispatch_attempt``: derived from persisted state
+        so retries get a fresh idempotency key instead of colliding with a
+        stale one.
+        """
+        existing = (
+            self.db.query(GateRecord)
+            .filter(
+                GateRecord.task_id == task_id,
+                GateRecord.gate_type == "spec_plan_model",
+            )
+            .count()
+        )
+        return existing + 1
 
     async def _handle_get_status(self, args: str, session_id: str) -> dict:
         if not self.db:

@@ -309,6 +309,7 @@ SETTINGS_WHITELIST: dict[str, str] = {
     "autonomy": "Task autonomy policy: plan-only, supervised, or auto.",
     "auto_max_risk": "Highest task risk eligible for automatic execution: low or normal.",
     "auto_max_rounds": "Maximum changes-requested replan rounds before escalation.",
+    "spec_plan_model": "Model/agent used for spec/plan generation (provider name, {provider,model} dict, or @agent_id).",
 }
 
 

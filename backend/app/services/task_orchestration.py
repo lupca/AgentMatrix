@@ -164,6 +164,131 @@ class TaskOrchestrationService:
         max_rounds = max(1, max_rounds)
         return self.AutonomyPolicy(autonomy, max_risk, max_rounds)
 
+    def resolve_spec_plan_model(self, project: Project | str | None) -> dict[str, Any]:
+        """Resolve the model/agent used to generate a task's spec/plan.
+
+        Fallback chain mirrors ``resolve_autonomy``: ``Project.autonomy_policy
+        ["spec_plan_model"]`` > ``Setting["spec_plan_model"]`` > env
+        ``LLM_PROVIDER``. The configured value may be a provider name, an
+        ``{"provider": ..., "model": ...}`` dict, or an ``Agent`` id (must
+        carry the ``coordinator`` or ``spec_plan`` capability to be honored).
+        """
+        from app.services.llm_client import LLM_PROVIDER as _env_provider
+
+        project_row = (
+            project
+            if isinstance(project, Project)
+            else (self.db.get(Project, project) if project is not None else None)
+        )
+        override = project_row.autonomy_policy if project_row is not None else None
+        override = override if isinstance(override, dict) else {}
+
+        raw = override.get("spec_plan_model")
+        source = "project"
+        if raw is None:
+            row = self.db.get(Setting, "spec_plan_model")
+            raw = row.value if row is not None else None
+            source = "setting"
+        if raw is None:
+            return {"agent_id": None, "provider": _env_provider, "model": None, "source": "env"}
+
+        if isinstance(raw, dict):
+            return {
+                "agent_id": raw.get("agent_id"),
+                "provider": raw.get("provider") or _env_provider,
+                "model": raw.get("model"),
+                "source": source,
+            }
+
+        if isinstance(raw, str) and raw.startswith("@"):
+            agent = self.db.get(Agent, raw)
+            capabilities = set(agent.capabilities or []) if agent is not None else set()
+            if agent is not None and capabilities & {"coordinator", "spec_plan"}:
+                return {
+                    "agent_id": agent.id,
+                    "provider": agent.provider or _env_provider,
+                    "model": agent.model,
+                    "source": source,
+                }
+            return {"agent_id": None, "provider": _env_provider, "model": None, "source": "env"}
+
+        if isinstance(raw, str) and raw.strip():
+            return {"agent_id": None, "provider": raw.strip(), "model": None, "source": source}
+
+        return {"agent_id": None, "provider": _env_provider, "model": None, "source": "env"}
+
+    def request_spec_plan_model(
+        self,
+        *,
+        task_id: str,
+        actor: str,
+        idempotency_key: str,
+    ) -> TransitionResult:
+        """Gate spec/plan model selection like the Dispatch Gate.
+
+        supervised (or plan-only): opens a pending ``GateRecord`` asking a
+        human to confirm the suggested model/agent. bypass: auto-selects the
+        resolved model and records an ``auto-approved:spec_plan_model``
+        audit entry immediately.
+        """
+        task = self._task(task_id)
+        suggested = self.resolve_spec_plan_model(task.project)
+        payload = {"suggested_model": suggested}
+        input_hash = self._input_hash(payload)
+        existing = self._idempotent_record(task_id, idempotency_key, input_hash)
+        if existing is not None:
+            return self._result_for_record(task, existing)
+
+        bypass = self.resolve_autonomy(task.project).autonomy == "auto"
+
+        if bypass:
+            record = self._ledger_record(
+                task=task,
+                gate_type="spec_plan_model",
+                status="approved",
+                actor=actor,
+                idempotency_key=idempotency_key,
+                input_hash=input_hash,
+                payload=payload,
+                output_payload=suggested,
+            )
+            self.db.add(
+                AuditLog(
+                    task_id=task.id,
+                    action="auto-approved:spec_plan_model",
+                    actor=actor,
+                    details={"model": suggested},
+                )
+            )
+            self._audit(task, record)
+            self.db.commit()
+            self.db.refresh(task)
+            self.db.refresh(record)
+            return TransitionResult(
+                task=task, gate_record=record, applied=True, context={"model_config": suggested}
+            )
+
+        record = self._ledger_record(
+            task=task,
+            gate_type="spec_plan_model",
+            status="pending",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=payload,
+        )
+        task.awaiting_approval = True
+        task.approval_prompt = (
+            f"Choose model/agent for spec/plan generation (suggested: {suggested})"
+        )
+        self._audit(task, record)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        return TransitionResult(
+            task=task, gate_record=record, applied=False, context={"model_config": suggested}
+        )
+
     def mode_for_task(self, task: Task, *, risk: str | None = None) -> str:
         policy = self.resolve_autonomy(task.project)
         if policy.autonomy == "plan-only":

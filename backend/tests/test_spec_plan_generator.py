@@ -103,3 +103,22 @@ async def test_generate_spec_plan_rejects_empty_acceptance_criteria():
     ):
         with pytest.raises(SpecPlanGenerationError):
             await generate_spec_plan(task, None)
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_forwards_resolved_model_config():
+    task = _task()
+    llm_client_cls = __import__("app.services.llm_client", fromlist=["LLMClient"]).LLMClient
+    with patch(
+        "app.services.spec_plan_generator.LLMClient", wraps=llm_client_cls
+    ) as mock_client_cls, patch.object(
+        llm_client_cls,
+        "complete",
+        return_value=json.dumps(_valid_payload()),
+    ) as mock_complete:
+        await generate_spec_plan(
+            task, None, model_config={"provider": "anthropic", "model": "claude-3-5-sonnet-latest"}
+        )
+
+    mock_client_cls.assert_called_once_with(provider="anthropic")
+    assert mock_complete.call_args.kwargs["model"] == "claude-3-5-sonnet-latest"

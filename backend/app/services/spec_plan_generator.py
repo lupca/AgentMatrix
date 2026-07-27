@@ -62,10 +62,16 @@ def _parse_json(content: str) -> dict:
 
 
 async def generate_spec_plan(
-    task: Task, repo_root: str | None
+    task: Task, repo_root: str | None, model_config: dict | None = None
 ) -> tuple[SpecPlanResult, list[str]]:
     """Call the LLM once (with one retry on schema mismatch) and ground its
-    file claims and flows in the code graph. Returns (result, flows)."""
+    file claims and flows in the code graph. Returns (result, flows).
+
+    ``model_config`` (as returned by
+    ``TaskOrchestrationService.resolve_spec_plan_model``) selects the
+    provider/model; when omitted, ``LLMClient`` falls back to the env-var
+    default provider.
+    """
 
     graph_candidates: list[str] = []
     if repo_root:
@@ -82,7 +88,9 @@ async def generate_spec_plan(
         except Exception:
             graph_candidates = []
 
-    llm = LLMClient()
+    model_config = model_config or {}
+    llm = LLMClient(provider=model_config.get("provider"))
+    selected_model = model_config.get("model")
     retry_reason: str | None = None
     result: SpecPlanResult | None = None
     last_error: Exception | None = None
@@ -92,6 +100,7 @@ async def generate_spec_plan(
         content = await asyncio.to_thread(
             llm.complete,
             messages=[{"role": "user", "content": prompt}],
+            model=selected_model,
             max_tokens=1200,
             temperature=0.3,
             operation="spec_plan",

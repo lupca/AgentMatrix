@@ -984,11 +984,24 @@ async def test_get_minimal_context_graph_unavailable_returns_structured_error(db
 async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     """CTV2-091: /spec-plan runs the (mocked) LLM+graph generator and writes
     the result onto the task via TaskOrchestrationService, which is the only
-    thing that lets a subsequent dispatch through."""
-    from app.db.models import Project, Task
+    thing that lets a subsequent dispatch through.
+
+    CTV2-106: model selection is gated like Dispatch Gate, so the project is
+    set to auto/bypass autonomy here to exercise the immediate-write path;
+    the supervised pending-gate path is covered by
+    test_generate_spec_plan_supervised_mode_returns_pending_gate below."""
+    from app.db.models import Project, Setting, Task
     from app.schemas.task import SpecPlanResult
 
-    db_session.add(Project(id="proj-spec", name="Spec Project", repo_root="/tmp"))
+    db_session.add(
+        Project(
+            id="proj-spec",
+            name="Spec Project",
+            repo_root="/tmp",
+            autonomy_policy={"autonomy": "auto"},
+        )
+    )
+    db_session.add(Setting(key="auto_max_risk", value="normal"))
     db_session.add(
         Task(
             id="TASK-SPEC",
@@ -1024,6 +1037,42 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     task = db_session.get(Task, "TASK-SPEC")
     assert task.acceptance_criteria == ["Does the thing"]
     assert task.current_gate == "plan"
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_supervised_mode_returns_pending_gate(db_session):
+    """CTV2-106: with no autonomy override (default supervised), /spec-plan
+    must not call the LLM directly — it opens a pending spec_plan_model gate
+    and waits for a human to confirm the suggested model/agent."""
+    from app.db.models import Project, Task
+
+    db_session.add(Project(id="proj-spec-supervised", name="Supervised Spec Project", repo_root="/tmp"))
+    db_session.add(
+        Task(
+            id="TASK-SPEC-SUP",
+            project="proj-spec-supervised",
+            title="Needs a spec",
+            status="todo",
+            acceptance_criteria=[],
+        )
+    )
+    db_session.commit()
+
+    with patch(
+        "app.services.spec_plan_generator.generate_spec_plan",
+        new=AsyncMock(side_effect=AssertionError("LLM must not be called in supervised mode")),
+    ):
+        result = await CommandRouter(db_session).execute(
+            "generate_spec_plan", "TASK-SPEC-SUP", "session-1"
+        )
+
+    assert result["action"] == "spec_plan_model_pending"
+    assert result["status"] == "pending"
+    assert "gate_record_id" in result
+
+    task = db_session.get(Task, "TASK-SPEC-SUP")
+    assert task.acceptance_criteria == []
+    assert task.awaiting_approval is True
 
 
 @pytest.mark.asyncio
