@@ -9,6 +9,15 @@ from typing import Optional
 from app.db.models import Agent, Project, Task
 
 SUPPORTED_CLIS = {"agy", "codex", "claude"}
+_EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
+
+
+def _model_has_effort_suffix(model: str | None) -> bool:
+    """Check if model name already includes effort level (e.g. gemini-3.6-flash-low)."""
+    if not model:
+        return False
+    lowered = model.lower()
+    return any(lowered.endswith(suffix) for suffix in _EFFORT_SUFFIXES)
 
 
 def review_result_path(repo_root: str, task_id: str) -> str:
@@ -38,31 +47,29 @@ def build_dispatch_command(
         raise ValueError(f"Project repository does not exist: {repo_root}")
 
     resolved_effort = effort or agent.effort or "medium"
+    model_has_effort = _model_has_effort_suffix(agent.model)
     prompt = _task_prompt(task, review_result_path(repo_root, task.id))
     if cli == "codex":
         argv = ["codex", "exec"]
         if agent.model:
             argv.extend(["-m", agent.model])
-        argv.extend(
-            [
-                "-c",
-                f"model_reasoning_effort={resolved_effort}",
-                "--dangerously-bypass-approvals-and-sandbox",
-                prompt,
-            ]
-        )
+        if not model_has_effort:
+            argv.extend(["-c", f"model_reasoning_effort={resolved_effort}"])
+        argv.extend(["--dangerously-bypass-approvals-and-sandbox", prompt])
     elif cli == "claude":
         argv = ["claude"]
         if agent.model:
             argv.extend(["--model", agent.model])
-        argv.extend(["--effort", resolved_effort, "-p", prompt, "--dangerously-skip-permissions"])
+        if not model_has_effort:
+            argv.extend(["--effort", resolved_effort])
+        argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
     else:
         argv = ["agy"]
         if agent.model:
             argv.extend(["--model", agent.model])
-        argv.extend(
-            ["--effort", resolved_effort, "--print", prompt, "--dangerously-skip-permissions"]
-        )
+        if not model_has_effort:
+            argv.extend(["--effort", resolved_effort])
+        argv.extend(["--print", prompt, "--dangerously-skip-permissions"])
 
     return shlex.join(argv), repo_root, cli
 
@@ -101,27 +108,28 @@ def build_review_command(
     prompt = _review_prompt(
         task, base_ref, head_ref, review_result_path(repo_root, task.id)
     )
+    resolved_effort = agent.effort or "medium"
+    model_has_effort = _model_has_effort_suffix(agent.model)
     if cli == "codex":
         argv = ["codex", "exec"]
         if agent.model:
             argv.extend(["-m", agent.model])
-        argv.extend(
-            [
-                "-c",
-                f"model_reasoning_effort={agent.effort or 'medium'}",
-                "--dangerously-bypass-approvals-and-sandbox",
-                prompt,
-            ]
-        )
+        if not model_has_effort:
+            argv.extend(["-c", f"model_reasoning_effort={resolved_effort}"])
+        argv.extend(["--dangerously-bypass-approvals-and-sandbox", prompt])
     elif cli == "claude":
         argv = ["claude"]
         if agent.model:
             argv.extend(["--model", agent.model])
+        if not model_has_effort:
+            argv.extend(["--effort", resolved_effort])
         argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
     else:
         argv = ["agy"]
         if agent.model:
             argv.extend(["--model", agent.model])
+        if not model_has_effort:
+            argv.extend(["--effort", resolved_effort])
         argv.extend(["--print", prompt, "--dangerously-skip-permissions"])
 
     return shlex.join(argv), repo_root, cli
