@@ -23,6 +23,7 @@ interface ChatPanelProps {
   onClose?: () => void;
   className?: string;
   fullHeight?: boolean;
+  isDocked?: boolean;
   /** Context breadcrumb + session-tab props (all optional, from useSessions via ChatPanelManager). */
   contextLevel?: ContextLevel;
   projectName?: string | null;
@@ -43,6 +44,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onClose,
   className = '',
   fullHeight = false,
+  isDocked = false,
   contextLevel,
   projectName,
   sessions,
@@ -443,8 +445,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         </div>
       </div>
 
-      {/* Session Tabs */}
-      {sessions && onCreateSession && (
+      {/* Session Tabs (Horizontal) - Only visible when floating */}
+      {sessions && onCreateSession && !isDocked && (
         <SessionTabs
           sessions={sessions}
           activeSessionId={activeSessionId ?? null}

@@ -36,7 +36,7 @@ export function parseThinkingContent(content: string): ThinkingParseResult {
     };
   }
 
-  const thinkingContent = thinkMatches.map((m) => m.text).join('\n\n').trim();
+  const thinkingContent = thinkMatches.map((m) => m.text).join('').trim();
   const finalContent = content
     .replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '')
     .trim();

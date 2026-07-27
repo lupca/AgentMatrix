@@ -3,6 +3,7 @@ import { ChatPanel } from './ChatPanel';
 import { Task } from '../../types/task';
 import { MessageSquare, Minimize2, Maximize2, X, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { ContextLevel, useSessions } from '../../hooks/useSessions';
+import { SessionSidebar } from './SessionSidebar';
 
 interface ChatPanelManagerProps {
   threadId: string;
@@ -46,6 +47,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
 
   const [isExpandedFull, setIsExpandedFull] = useState<boolean>(false);
   const [isCreatingSession, setIsCreatingSession] = useState<boolean>(false);
+  const [isSessionSidebarOpen, setIsSessionSidebarOpen] = useState<boolean>(true);
 
   const resolvedProjectId = projectId ?? task?.project ?? null;
   const contextLevel: ContextLevel = taskId ? 'task' : resolvedProjectId ? 'project' : 'global';
@@ -60,6 +62,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
     createSession,
     switchSession,
     closeSession,
+    renameSession,
   } = useSessions({ level: contextLevel, project_id: resolvedProjectId, task_id: taskId });
 
   // ChatPanel resolves this value via GET /sessions/{id}, so use the session's
@@ -157,64 +160,87 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
   // Docked Mode
   return (
     <div
-      className={`flex flex-col min-h-0 overflow-hidden border border-gray-800/80 bg-gray-950/40 ${
+      className={`flex flex-row min-h-0 overflow-hidden border border-gray-800/80 bg-gray-950/40 ${
         fullHeight ? 'h-full' : 'h-full max-h-[calc(100vh-200px)] rounded-2xl'
       } ${
         isExpandedFull ? 'fixed inset-4 z-50 bg-gray-950 shadow-2xl rounded-2xl' : ''
       } ${className}`}
     >
-      <div className="px-4 py-2 bg-gray-950/90 border-b border-gray-800/80 flex items-center justify-between text-xs text-gray-400 shrink-0 select-none">
-        <div className="flex items-center gap-2">
+      <div className="w-[400px] flex flex-col min-h-0 min-w-0 bg-gray-950/40">
+        <div className="px-4 py-2 bg-gray-950/90 border-b border-gray-800/80 flex items-center justify-between text-xs text-gray-400 shrink-0 select-none">
           <span className="font-mono text-indigo-400 font-semibold text-[11px] uppercase tracking-wider">
             Copilot Sidecar
           </span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => setIsExpandedFull(!isExpandedFull)}
-            className="p-1 hover:text-white rounded hover:bg-gray-800 transition-colors"
-            title={isExpandedFull ? 'Exit fullscreen' : 'Fullscreen chat'}
-          >
-            {isExpandedFull ? (
-              <Minimize2 className="w-3.5 h-3.5" />
-            ) : (
-              <Maximize2 className="w-3.5 h-3.5" />
+          <div className="flex items-center gap-1.5">
+            {!isSessionSidebarOpen && (
+              <button
+                onClick={() => setIsSessionSidebarOpen(true)}
+                className="p-1 hover:text-white rounded hover:bg-gray-800 transition-colors"
+                title="Open history"
+              >
+                <PanelRightOpen className="w-3.5 h-3.5" />
+              </button>
             )}
-          </button>
-          <button
-            onClick={() => handleModeChange('floating')}
-            className="p-1 hover:text-white rounded hover:bg-gray-800 transition-colors"
-            title="Pop out into floating window"
-          >
-            <PanelRightClose className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => handleModeChange('collapsed')}
-            className="p-1 hover:text-red-400 rounded hover:bg-gray-800 transition-colors"
-            title="Collapse chat"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
+            <button
+              onClick={() => setIsExpandedFull(!isExpandedFull)}
+              className="p-1 hover:text-white rounded hover:bg-gray-800 transition-colors"
+              title={isExpandedFull ? 'Exit fullscreen' : 'Fullscreen chat'}
+            >
+              {isExpandedFull ? (
+                <Minimize2 className="w-3.5 h-3.5" />
+              ) : (
+                <Maximize2 className="w-3.5 h-3.5" />
+              )}
+            </button>
+            <button
+              onClick={() => handleModeChange('floating')}
+              className="p-1 hover:text-white rounded hover:bg-gray-800 transition-colors"
+              title="Pop out into floating window"
+            >
+              <PanelRightClose className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => handleModeChange('collapsed')}
+              className="p-1 hover:text-red-400 rounded hover:bg-gray-800 transition-colors"
+              title="Collapse chat"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
+
+        {sessionsError && (
+          <div className="px-3 py-1.5 text-[11px] text-red-400 bg-red-500/10 border-b border-gray-800/80 shrink-0">
+            Failed to load sessions: {sessionsError}
+          </div>
+        )}
+
+        <ChatPanel
+          key={activeThreadId}
+          threadId={activeThreadId}
+          taskId={taskId}
+          taskTitle={taskTitle}
+          task={task}
+          onTaskAction={onTaskAction}
+          className="border-0 rounded-t-none flex-1 min-h-0"
+          fullHeight={fullHeight}
+          isDocked={true}
+          {...sessionProps}
+        />
       </div>
 
-      {sessionsError && (
-        <div className="px-3 py-1.5 text-[11px] text-red-400 bg-red-500/10 border-b border-gray-800/80 shrink-0">
-          Failed to load sessions: {sessionsError}
-        </div>
+      {isSessionSidebarOpen && (
+        <SessionSidebar
+          sessions={sessionProps.sessions || []}
+          activeSessionId={sessionProps.activeSessionId ?? null}
+          onSwitch={sessionProps.onSwitchSession ?? (() => {})}
+          onCreate={sessionProps.onCreateSession ?? (() => {})}
+          onClose={sessionProps.onCloseSession}
+          onRename={renameSession}
+          onToggleSidebar={() => setIsSessionSidebarOpen(false)}
+          loading={sessionProps.sessionsLoading}
+        />
       )}
-
-      <ChatPanel
-        key={activeThreadId}
-        threadId={activeThreadId}
-        taskId={taskId}
-        taskTitle={taskTitle}
-        task={task}
-        onTaskAction={onTaskAction}
-        className="border-0 rounded-t-none flex-1 min-h-0"
-        fullHeight={fullHeight}
-        {...sessionProps}
-      />
     </div>
   );
 };

@@ -35,6 +35,7 @@ interface UseSessionsResult {
   createSession: (title?: string) => Promise<ChatSessionSummary>;
   switchSession: (sessionId: string) => void;
   closeSession: (sessionId: string) => Promise<void>;
+  renameSession: (sessionId: string, title: string) => Promise<void>;
 }
 
 /** Fetch/create/switch chat sessions scoped to a context level (global/project/task). */
@@ -132,13 +133,18 @@ export function useSessions(context: SessionContext): UseSessionsResult {
       if (remaining.length > 0) {
         setActiveSessionId(remaining[0].id);
       } else {
-        // Closing the last session would otherwise leave the panel writing to a
-        // closed session via the stale threadId fallback, so replace it.
         await createSession();
       }
     },
     [activeSessionId, createSession],
   );
+
+  const renameSession = useCallback(async (sessionId: string, title: string) => {
+    const updated = await api.patch<ChatSessionSummary>(`/sessions/${sessionId}`, { title });
+    setSessions((prev) =>
+      prev.map((s) => (s.id === sessionId ? { ...s, title: updated.title } : s)),
+    );
+  }, []);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null;
 
@@ -152,6 +158,7 @@ export function useSessions(context: SessionContext): UseSessionsResult {
     createSession,
     switchSession,
     closeSession,
+    renameSession,
   };
 }
 

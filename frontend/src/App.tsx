@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, FolderKanban, Bot, CheckSquare, LayoutGrid, Settings as SettingsIcon, Moon, Sun, Activity } from 'lucide-react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { LayoutDashboard, FolderKanban, Bot, CheckSquare, LayoutGrid, Settings as SettingsIcon, Activity } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import ProjectsPage from './pages/Projects';
 import ProjectDetailPage from './pages/ProjectDetail';
@@ -76,7 +76,7 @@ function AppLayout() {
         </main>
         
         {mode === 'docked' && (
-          <aside className="w-[400px] border-l border-gray-800 bg-gray-900/50 flex-shrink-0 flex flex-col shadow-2xl z-40">
+          <aside className="w-auto border-l border-gray-800 bg-gray-900/50 flex-shrink-0 flex flex-col shadow-2xl z-40">
             <ChatPanelManager 
               threadId="global" 
               mode="docked"
