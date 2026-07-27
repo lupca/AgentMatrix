@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session as DBSession
 
+from app.core.config import settings
 from app.db.models import Agent as AgentModel, LLMUsage, Session as SessionModel, Task as TaskModel
 from app.services.llm_client import (
     ANTHROPIC_MODEL,
@@ -151,7 +152,9 @@ class CoordinatorService:
         max_output_tokens: int = 2048,
         context_windows: Mapping[str, int] | None = None,
         context_safety_tokens: int = 1024,
-        max_tool_iterations: int = 20,
+        max_tool_iterations: int | None = None,
+        max_turn_tokens: int | None = None,
+        max_repeated_tool_calls: int | None = None,
         graph: Any | None = None,
     ):
         if dispatcher is not None and cli_dispatcher is not None:
@@ -175,7 +178,18 @@ class CoordinatorService:
         self.max_output_tokens = max(1, max_output_tokens)
         self.context_windows = dict(context_windows or DEFAULT_CONTEXT_WINDOWS)
         self.context_safety_tokens = max(0, context_safety_tokens)
+
+        if max_tool_iterations is None:
+            max_tool_iterations = settings.COORDINATOR_MAX_TOOL_ITERATIONS
         self.max_tool_iterations = max(1, max_tool_iterations)
+
+        if max_turn_tokens is None:
+            max_turn_tokens = settings.COORDINATOR_MAX_TURN_TOKENS
+        self.max_turn_tokens = max(1, max_turn_tokens)
+
+        if max_repeated_tool_calls is None:
+            max_repeated_tool_calls = settings.COORDINATOR_MAX_REPEATED_TOOL_CALLS
+        self.max_repeated_tool_calls = max(1, max_repeated_tool_calls)
 
     @staticmethod
     def _now() -> str:
@@ -623,6 +637,7 @@ class CoordinatorService:
         turn_id: str,
         response: ProviderResponse,
         latency_ms: int,
+        tool_iterations: int = 0,
     ) -> CoordinatorResult:
         assistant = self.append_message(
             db_session,
@@ -635,11 +650,20 @@ class CoordinatorService:
             model=response.model,
             provider_response_id=response.request_id,
             stop_reason=response.stop_reason,
+            tool_iterations=tool_iterations,
         )
         db_session.selected_provider = response.provider
         db_session.selected_model = response.model
         self.db.commit()
         self._record_usage(db_session, response, latency_ms)
+        logger.info(
+            "Coordinator turn completed for session=%s turn_id=%s model=%s iterations=%d latency_ms=%d",
+            db_session.id,
+            turn_id,
+            response.model,
+            tool_iterations,
+            latency_ms,
+        )
         return CoordinatorResult(
             content=response.text,
             message_id=assistant["id"],
@@ -807,7 +831,17 @@ class CoordinatorService:
             for attempt in range(self.max_retries + 1):
                 try:
                     if adapter is not None:
-                        for _ in range(self.max_tool_iterations):
+                        iteration = 0
+                        accumulated_tokens = 0
+                        executed_tool_calls_history: list[str] = []
+                        last_tool_sig: tuple[str, str] | None = None
+                        consecutive_repeat_count = 0
+                        stop_reason: str | None = None
+                        stop_message: str | None = None
+                        last_response: ProviderResponse | None = None
+
+                        while iteration < self.max_tool_iterations:
+                            iteration += 1
                             response = await adapter.complete(
                                 canonical,
                                 resolved_model,
@@ -816,15 +850,47 @@ class CoordinatorService:
                                 temperature=temperature,
                                 tools=active_tools,
                             )
+                            last_response = response
+                            if response.usage:
+                                accumulated_tokens += (response.usage.input_tokens or 0) + (response.usage.output_tokens or 0)
+
                             if not response.tool_calls:
                                 return self._persist_success(
                                     db_session,
                                     turn_id=turn_id,
                                     response=response,
                                     latency_ms=round((perf_counter() - started) * 1000),
+                                    tool_iterations=iteration,
                                 )
 
                             tool_activity = True
+
+                            for tool_call in response.tool_calls:
+                                name = str(tool_call.get("name", ""))
+                                canonical_name = resolve_tool_name(name)
+                                args = self._tool_arguments(tool_call)
+                                args_str = json.dumps(args, sort_keys=True)
+                                sig = (canonical_name, args_str)
+
+                                if sig == last_tool_sig:
+                                    consecutive_repeat_count += 1
+                                else:
+                                    last_tool_sig = sig
+                                    consecutive_repeat_count = 1
+
+                                executed_tool_calls_history.append(canonical_name)
+
+                                if consecutive_repeat_count >= self.max_repeated_tool_calls:
+                                    stop_reason = "repeated_tool_call"
+                                    tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
+                                    stop_message = (
+                                        f"Turn stopped early: detected repeated call to tool '{canonical_name}' "
+                                        f"with identical arguments ({consecutive_repeat_count} times in a row). "
+                                        f"Completed tool calls: [{tools_summary}]. "
+                                        f"Please check inputs or refine instructions to continue."
+                                    )
+                                    break
+
                             canonical.append(
                                 {
                                     "role": "assistant",
@@ -847,10 +913,45 @@ class CoordinatorService:
                                 response=response,
                                 results=tool_results,
                             )
-                        raise RuntimeError(
-                            "Coordinator tool execution loop exceeded "
-                            f"{self.max_tool_iterations} iterations"
-                        )
+
+                            if stop_reason:
+                                break
+
+                            if accumulated_tokens >= self.max_turn_tokens:
+                                stop_reason = "token_budget_exceeded"
+                                tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
+                                stop_message = (
+                                    f"Turn reached maximum token budget ({accumulated_tokens} >= {self.max_turn_tokens} tokens). "
+                                    f"Completed tool calls: [{tools_summary}]. "
+                                    f"You can reply to continue from where it stopped."
+                                )
+                                break
+
+                        if not stop_reason and iteration >= self.max_tool_iterations:
+                            stop_reason = "max_iterations_exceeded"
+                            tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
+                            stop_message = (
+                                f"Turn reached maximum tool iteration limit ({self.max_tool_iterations} iterations). "
+                                f"Completed tool calls: [{tools_summary}]. "
+                                f"You can reply to continue from where it stopped."
+                            )
+
+                        if stop_reason and stop_message:
+                            soft_response = ProviderResponse(
+                                provider=last_response.provider if last_response else provider_name,
+                                model=last_response.model if last_response else resolved_model,
+                                text=stop_message,
+                                usage=last_response.usage if last_response else None,
+                                request_id=last_response.request_id if last_response else f"soft-stop-{uuid.uuid4()}",
+                                stop_reason=stop_reason,
+                            )
+                            return self._persist_success(
+                                db_session,
+                                turn_id=turn_id,
+                                response=soft_response,
+                                latency_ms=round((perf_counter() - started) * 1000),
+                                tool_iterations=iteration,
+                            )
                     else:
                         response = await self._complete_cli(
                             provider=provider_name,
@@ -923,7 +1024,16 @@ class CoordinatorService:
                 response: ProviderResponse | None = None
                 try:
                     if adapter is not None:
-                        for _ in range(self.max_tool_iterations):
+                        iteration = 0
+                        accumulated_tokens = 0
+                        executed_tool_calls_history: list[str] = []
+                        last_tool_sig: tuple[str, str] | None = None
+                        consecutive_repeat_count = 0
+                        stop_reason: str | None = None
+                        stop_message: str | None = None
+
+                        while iteration < self.max_tool_iterations:
+                            iteration += 1
                             response = await adapter.complete(
                                 canonical,
                                 resolved_model,
@@ -932,6 +1042,9 @@ class CoordinatorService:
                                 temperature=temperature,
                                 tools=active_tools,
                             )
+                            if response.usage:
+                                accumulated_tokens += (response.usage.input_tokens or 0) + (response.usage.output_tokens or 0)
+
                             if response.chunks is None:
                                 if response.text:
                                     partial += response.text
@@ -945,6 +1058,33 @@ class CoordinatorService:
                                 break
 
                             tool_activity = True
+
+                            for tool_call in response.tool_calls:
+                                name = str(tool_call.get("name", ""))
+                                canonical_name = resolve_tool_name(name)
+                                args = self._tool_arguments(tool_call)
+                                args_str = json.dumps(args, sort_keys=True)
+                                sig = (canonical_name, args_str)
+
+                                if sig == last_tool_sig:
+                                    consecutive_repeat_count += 1
+                                else:
+                                    last_tool_sig = sig
+                                    consecutive_repeat_count = 1
+
+                                executed_tool_calls_history.append(canonical_name)
+
+                                if consecutive_repeat_count >= self.max_repeated_tool_calls:
+                                    stop_reason = "repeated_tool_call"
+                                    tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
+                                    stop_message = (
+                                        f"Turn stopped early: detected repeated call to tool '{canonical_name}' "
+                                        f"with identical arguments ({consecutive_repeat_count} times in a row). "
+                                        f"Completed tool calls: [{tools_summary}]. "
+                                        f"Please check inputs or refine instructions to continue."
+                                    )
+                                    break
+
                             canonical.append(
                                 {
                                     "role": "assistant",
@@ -983,10 +1123,39 @@ class CoordinatorService:
                                     "name": result["name"],
                                     "content": result["content"],
                                 }
-                        else:
-                            raise RuntimeError(
-                                "Coordinator tool execution loop exceeded "
-                                f"{self.max_tool_iterations} iterations"
+
+                            if stop_reason:
+                                break
+
+                            if accumulated_tokens >= self.max_turn_tokens:
+                                stop_reason = "token_budget_exceeded"
+                                tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
+                                stop_message = (
+                                    f"Turn reached maximum token budget ({accumulated_tokens} >= {self.max_turn_tokens} tokens). "
+                                    f"Completed tool calls: [{tools_summary}]. "
+                                    f"You can reply to continue from where it stopped."
+                                )
+                                break
+
+                        if not stop_reason and iteration >= self.max_tool_iterations and response and response.tool_calls:
+                            stop_reason = "max_iterations_exceeded"
+                            tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
+                            stop_message = (
+                                f"Turn reached maximum tool iteration limit ({self.max_tool_iterations} iterations). "
+                                f"Completed tool calls: [{tools_summary}]. "
+                                f"You can reply to continue from where it stopped."
+                            )
+
+                        if stop_reason and stop_message:
+                            partial += stop_message
+                            yield stop_message
+                            response = ProviderResponse(
+                                provider=response.provider if response else provider_name,
+                                model=response.model if response else resolved_model,
+                                text=stop_message,
+                                usage=response.usage if response else None,
+                                request_id=response.request_id if response else f"soft-stop-{uuid.uuid4()}",
+                                stop_reason=stop_reason,
                             )
                     else:
                         route = route_model(resolved_model, provider_name)
@@ -1008,6 +1177,7 @@ class CoordinatorService:
                         turn_id=turn_id,
                         response=response,
                         latency_ms=round((perf_counter() - started) * 1000),
+                        tool_iterations=iteration if adapter is not None else 1,
                     )
                     return
                 except Exception as exc:

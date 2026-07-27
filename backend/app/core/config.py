@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     # Context replay: keep complete tool output only for the most recent turns.
     TOOL_RESULT_REPLAY_TURNS: int = 3
 
+    # Coordinator execution budgets
+    COORDINATOR_MAX_TOOL_ITERATIONS: int = 20
+    COORDINATOR_MAX_TURN_TOKENS: int = 100_000
+    COORDINATOR_MAX_REPEATED_TOOL_CALLS: int = 3
+
     # LLM
     ANTHROPIC_API_KEY: str = ""
     GOOGLE_API_KEY: str = ""

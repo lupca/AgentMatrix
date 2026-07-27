@@ -432,3 +432,116 @@ def test_chat_endpoint_routes_requested_models_and_preserves_history(
         .one()
     )
     assert session.selected_provider == "openai"
+
+
+@pytest.mark.asyncio
+async def test_six_consecutive_tool_calls_complete_without_exception(db_session):
+    """AC: Chuỗi 6 tool call liên tiếp hoàn thành, không exception."""
+    script = [
+        {"tool_calls": [{"id": "c1", "name": "load_tools", "input": {"group": "task_lifecycle"}}]},
+        {"tool_calls": [{"id": "c2", "name": "get_status", "input": {}}]},
+        {"tool_calls": [{"id": "c3", "name": "create_task", "input": {"project": "p1", "title": "t1"}}]},
+        {"tool_calls": [{"id": "c4", "name": "get_status", "input": {}}]},
+        {"tool_calls": [{"id": "c5", "name": "load_tools", "input": {"group": "system_admin"}}]},
+        {"tool_calls": [{"id": "c6", "name": "query_db", "input": {"query": "SELECT 1"}}]},
+        {"text": "Successfully ran all 6 tools."},
+    ]
+    provider = _ScriptedToolProvider("openai", script)
+    service = _service(db_session, provider, max_tool_iterations=20)
+    session = Session(id="session-6-tools", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    result = await service.complete_turn(
+        session,
+        "Run sequence of 6 tools",
+        model="gpt-4o",
+        idempotency_key="turn-6-tools",
+    )
+
+    assert result.content == "Successfully ran all 6 tools."
+    assistant_msg = [m for m in session.messages if m["role"] == "assistant" and "tool_iterations" in m][-1]
+    assert assistant_msg["tool_iterations"] == 7
+
+
+@pytest.mark.asyncio
+async def test_repeated_tool_call_stops_early_with_message(db_session):
+    """AC: Gọi trùng tool cùng args 3 lần → dừng sớm với thông báo."""
+    script = [
+        {"tool_calls": [{"id": "c1", "name": "get_status", "input": {"task_id": "T-1"}}]},
+        {"tool_calls": [{"id": "c2", "name": "get_status", "input": {"task_id": "T-1"}}]},
+        {"tool_calls": [{"id": "c3", "name": "get_status", "input": {"task_id": "T-1"}}]},
+        {"text": "Should not reach here."},
+    ]
+    provider = _ScriptedToolProvider("openai", script)
+    service = _service(db_session, provider, max_repeated_tool_calls=3)
+    session = Session(id="session-repeated-tools", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    result = await service.complete_turn(
+        session,
+        "Keep checking status",
+        model="gpt-4o",
+        idempotency_key="turn-repeated-tools",
+    )
+
+    assert "Turn stopped early" in result.content
+    assert "detected repeated call to tool 'get_status'" in result.content
+    assert "3 times in a row" in result.content
+    assistant_msg = [m for m in session.messages if m["role"] == "assistant"][-1]
+    assert assistant_msg["status"] == "complete"
+    assert assistant_msg["stop_reason"] == "repeated_tool_call"
+
+
+@pytest.mark.asyncio
+async def test_soft_stop_on_max_tool_iterations_exceeded(db_session):
+    """AC: Chạm trần iterations → dừng mềm thay vì RuntimeError."""
+    script = [
+        {"tool_calls": [{"id": f"c{i}", "name": "get_status", "input": {"step": i}}]}
+        for i in range(1, 10)
+    ]
+    provider = _ScriptedToolProvider("openai", script)
+    service = _service(db_session, provider, max_tool_iterations=3)
+    session = Session(id="session-max-iter", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    result = await service.complete_turn(
+        session,
+        "Run forever",
+        model="gpt-4o",
+        idempotency_key="turn-max-iter",
+    )
+
+    assert "Turn reached maximum tool iteration limit (3 iterations)" in result.content
+    assistant_msg = [m for m in session.messages if m["role"] == "assistant"][-1]
+    assert assistant_msg["status"] == "complete"
+    assert assistant_msg["stop_reason"] == "max_iterations_exceeded"
+    assert assistant_msg["tool_iterations"] == 3
+
+
+@pytest.mark.asyncio
+async def test_soft_stop_on_token_budget_exceeded(db_session):
+    """AC: Có chặn chi phí theo token đã tiêu trong turn."""
+    script = [
+        {"tool_calls": [{"id": "c1", "name": "get_status", "input": {"step": 1}}]},
+        {"tool_calls": [{"id": "c2", "name": "get_status", "input": {"step": 2}}]},
+    ]
+    provider = _ScriptedToolProvider("openai", script)
+    service = _service(db_session, provider, max_turn_tokens=20)
+    session = Session(id="session-token-budget", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    result = await service.complete_turn(
+        session,
+        "Heavy turn",
+        model="gpt-4o",
+        idempotency_key="turn-token-budget",
+    )
+
+    assert "Turn reached maximum token budget" in result.content
+    assistant_msg = [m for m in session.messages if m["role"] == "assistant"][-1]
+    assert assistant_msg["status"] == "complete"
+    assert assistant_msg["stop_reason"] == "token_budget_exceeded"
