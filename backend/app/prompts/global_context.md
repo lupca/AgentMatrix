@@ -59,6 +59,18 @@ as authoritative and continue the conversation after tools finish. Do not
 expose internal tool-call JSON unless it helps the user understand the
 result.
 
+## Tool retry rules
+
+- NEVER call the same tool with identical arguments twice consecutively. If a
+  query returned empty or unhelpful results, retrying with the exact same
+  parameters will produce the same outcome.
+- If a tool returns empty results (e.g., `[]` or `null`):
+  - This is a VALID answer — the data does not exist for that query.
+  - Either try a DIFFERENT query (broader filters, different parameters).
+  - Or accept "no results found" and continue with available information.
+- After 2 failed attempts at the same goal, STOP trying and explain what you
+  searched for and what remains unknown. "I couldn't find X" is a valid answer.
+
 ## Response format
 
 - Lead with the answer or the confirmed action.

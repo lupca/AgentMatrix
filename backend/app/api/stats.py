@@ -7,6 +7,7 @@ from app.db.base import get_db
 from app.db.models import (
     Agent as AgentModel,
     LLMUsage,
+    ModelPricing,
     Project as ProjectModel,
     Task as TaskModel,
 )
@@ -350,3 +351,56 @@ def get_stats_agents(db: Session = Depends(get_db)):
         )
 
     return result
+
+
+@router.get("/pricing")
+def get_model_pricing(
+    provider: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Get all model pricing information."""
+    query = db.query(ModelPricing)
+    if provider:
+        query = query.filter(ModelPricing.provider == provider)
+
+    rows = query.order_by(ModelPricing.provider, ModelPricing.model).all()
+
+    return [
+        {
+            "id": row.id,
+            "model": row.model,
+            "provider": row.provider,
+            "input_price_per_mtok": float(row.input_price_per_mtok) if row.input_price_per_mtok else None,
+            "output_price_per_mtok": float(row.output_price_per_mtok) if row.output_price_per_mtok else None,
+            "cached_input_price_per_mtok": float(row.cached_input_price_per_mtok) if row.cached_input_price_per_mtok else None,
+            "cache_write_5m_per_mtok": float(row.cache_write_5m_per_mtok) if row.cache_write_5m_per_mtok else None,
+            "cache_write_1h_per_mtok": float(row.cache_write_1h_per_mtok) if row.cache_write_1h_per_mtok else None,
+            "notes": row.notes,
+            "effective_from": row.effective_from.isoformat() if row.effective_from else None,
+        }
+        for row in rows
+    ]
+
+
+@router.put("/pricing/{pricing_id}")
+def update_model_pricing(
+    pricing_id: int,
+    input_price_per_mtok: float | None = None,
+    output_price_per_mtok: float | None = None,
+    cached_input_price_per_mtok: float | None = None,
+    db: Session = Depends(get_db),
+):
+    """Update a model pricing entry."""
+    row = db.query(ModelPricing).filter(ModelPricing.id == pricing_id).first()
+    if not row:
+        return {"error": "Pricing entry not found"}
+
+    if input_price_per_mtok is not None:
+        row.input_price_per_mtok = input_price_per_mtok
+    if output_price_per_mtok is not None:
+        row.output_price_per_mtok = output_price_per_mtok
+    if cached_input_price_per_mtok is not None:
+        row.cached_input_price_per_mtok = cached_input_price_per_mtok
+
+    db.commit()
+    return {"success": True, "id": pricing_id}

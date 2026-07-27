@@ -601,6 +601,8 @@ class CoordinatorService:
         tool_calls: list[dict[str, Any]],
         db_session: SessionModel,
         active_tool_names: set[str],
+        *,
+        duplicate_call_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Execute normalized adapter tool calls and return OpenAI messages.
 
@@ -608,17 +610,33 @@ class CoordinatorService:
         turn (via ``load_tools``) are rejected with a guiding error instead
         of executed, so a model that calls one before loading its group
         gets a recoverable message rather than a crashed loop.
+
+        Pre-emptive duplicate detection: calls whose IDs appear in
+        ``duplicate_call_ids`` return a DUPLICATE_CALL error instead of
+        executing, guiding the model to try a different approach.
         """
 
         router = CommandRouter(self.db)
         results: list[dict[str, Any]] = []
+        duplicate_ids = duplicate_call_ids or set()
         for position, tool_call in enumerate(tool_calls):
             name = str(tool_call.get("name", ""))
             call_id = str(tool_call.get("id") or f"tool-call-{position}")
             canonical_name = resolve_tool_name(name)
             spec = get_spec(canonical_name)
-            if spec is not None and spec.tier == "deferred" and canonical_name not in active_tool_names:
+
+            if call_id in duplicate_ids:
                 result: dict[str, Any] = {
+                    "error": "DUPLICATE_CALL",
+                    "message": (
+                        f"You just called '{name}' with identical arguments. "
+                        "Retrying with the same parameters will produce the same result. "
+                        "Try a different approach: use broader/different filters, "
+                        "try a different tool, or accept that no data matches your query."
+                    ),
+                }
+            elif spec is not None and spec.tier == "deferred" and canonical_name not in active_tool_names:
+                result = {
                     "error": (
                         f"Tool '{name}' is not loaded for this turn. Call "
                         f"load_tools(group=\"{spec.group}\") first, then retry."
@@ -914,8 +932,10 @@ class CoordinatorService:
 
                             tool_activity = True
 
-                            for tool_call in response.tool_calls:
+                            duplicate_call_ids: set[str] = set()
+                            for position, tool_call in enumerate(response.tool_calls):
                                 name = str(tool_call.get("name", ""))
+                                call_id = str(tool_call.get("id") or f"tool-call-{position}")
                                 canonical_name = resolve_tool_name(name)
                                 args = self._tool_arguments(tool_call)
                                 args_str = json.dumps(args, sort_keys=True)
@@ -929,16 +949,18 @@ class CoordinatorService:
 
                                 executed_tool_calls_history.append(canonical_name)
 
-                                if consecutive_repeat_count >= self.max_repeated_tool_calls:
-                                    stop_reason = "repeated_tool_call"
-                                    tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
-                                    stop_message = (
-                                        f"Turn stopped early: detected repeated call to tool '{canonical_name}' "
-                                        f"with identical arguments ({consecutive_repeat_count} times in a row). "
-                                        f"Completed tool calls: [{tools_summary}]. "
-                                        f"Please check inputs or refine instructions to continue."
-                                    )
-                                    break
+                                if consecutive_repeat_count >= 2:
+                                    duplicate_call_ids.add(call_id)
+                                    if consecutive_repeat_count >= self.max_repeated_tool_calls:
+                                        stop_reason = "repeated_tool_call"
+                                        tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
+                                        stop_message = (
+                                            f"Turn stopped early: detected repeated call to tool '{canonical_name}' "
+                                            f"with identical arguments ({consecutive_repeat_count} times in a row). "
+                                            f"Completed tool calls: [{tools_summary}]. "
+                                            f"Please check inputs or refine instructions to continue."
+                                        )
+                                        break
 
                             canonical.append(
                                 {
@@ -954,6 +976,7 @@ class CoordinatorService:
                                 response.tool_calls,
                                 db_session,
                                 active_tool_names,
+                                duplicate_call_ids=duplicate_call_ids,
                             )
                             canonical.extend(tool_results)
                             self._persist_tool_exchange(
@@ -1123,8 +1146,10 @@ class CoordinatorService:
 
                             tool_activity = True
 
-                            for tool_call in response.tool_calls:
+                            duplicate_call_ids: set[str] = set()
+                            for position, tool_call in enumerate(response.tool_calls):
                                 name = str(tool_call.get("name", ""))
+                                call_id = str(tool_call.get("id") or f"tool-call-{position}")
                                 canonical_name = resolve_tool_name(name)
                                 args = self._tool_arguments(tool_call)
                                 args_str = json.dumps(args, sort_keys=True)
@@ -1138,16 +1163,18 @@ class CoordinatorService:
 
                                 executed_tool_calls_history.append(canonical_name)
 
-                                if consecutive_repeat_count >= self.max_repeated_tool_calls:
-                                    stop_reason = "repeated_tool_call"
-                                    tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
-                                    stop_message = (
-                                        f"Turn stopped early: detected repeated call to tool '{canonical_name}' "
-                                        f"with identical arguments ({consecutive_repeat_count} times in a row). "
-                                        f"Completed tool calls: [{tools_summary}]. "
-                                        f"Please check inputs or refine instructions to continue."
-                                    )
-                                    break
+                                if consecutive_repeat_count >= 2:
+                                    duplicate_call_ids.add(call_id)
+                                    if consecutive_repeat_count >= self.max_repeated_tool_calls:
+                                        stop_reason = "repeated_tool_call"
+                                        tools_summary = ", ".join(f"'{t}'" for t in executed_tool_calls_history)
+                                        stop_message = (
+                                            f"Turn stopped early: detected repeated call to tool '{canonical_name}' "
+                                            f"with identical arguments ({consecutive_repeat_count} times in a row). "
+                                            f"Completed tool calls: [{tools_summary}]. "
+                                            f"Please check inputs or refine instructions to continue."
+                                        )
+                                        break
 
                             canonical.append(
                                 {
@@ -1172,6 +1199,7 @@ class CoordinatorService:
                                 response.tool_calls,
                                 db_session,
                                 active_tool_names,
+                                duplicate_call_ids=duplicate_call_ids,
                             )
                             canonical.extend(tool_results)
                             self._persist_tool_exchange(

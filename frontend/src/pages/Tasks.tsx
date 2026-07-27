@@ -22,7 +22,7 @@ export const TasksPage: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.get<Task[]>('/tasks?limit=100');
+      const data = await api.get<Task[]>('/tasks?limit=1000');
       setTasks(data);
     } catch (err: any) {
       console.error('Failed to fetch tasks:', err);

@@ -70,7 +70,7 @@ def generate_task_id(db: Session, project: str) -> str:
 def get_tasks(
     status: str | None = None,
     project: str | None = None,
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(20, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db)
 ):
@@ -80,7 +80,7 @@ def get_tasks(
     if project:
         query = query.filter(TaskModel.project == project)
     
-    return query.offset(offset).limit(limit).all()
+    return query.order_by(TaskModel.created_at.desc()).offset(offset).limit(limit).all()
 
 
 @router.post("", response_model=Task, status_code=status.HTTP_201_CREATED)

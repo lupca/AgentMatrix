@@ -568,3 +568,45 @@ async def test_soft_stop_on_token_budget_exceeded(db_session):
     assistant_msg = [m for m in session.messages if m["role"] == "assistant"][-1]
     assert assistant_msg["status"] == "complete"
     assert assistant_msg["stop_reason"] == "token_budget_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tool_call_returns_error_without_executing(db_session):
+    """AC: Gọi tool lần 2 với cùng args → trả DUPLICATE_CALL error, không execute."""
+    script = [
+        {"tool_calls": [{"id": "c1", "name": "get_status", "input": {"task_id": "T-1"}}]},
+        {"tool_calls": [{"id": "c2", "name": "get_status", "input": {"task_id": "T-1"}}]},
+        {"tool_calls": [{"id": "c3", "name": "get_status", "input": {"task_id": "T-2"}}]},
+        {"text": "Done checking."},
+    ]
+    provider = _ScriptedToolProvider("openai", script)
+    service = _service(db_session, provider, max_repeated_tool_calls=3)
+    session = Session(id="session-duplicate-detection", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    result = await service.complete_turn(
+        session,
+        "Check status",
+        model="gpt-4o",
+        idempotency_key="turn-duplicate-detection",
+    )
+
+    assert result.content == "Done checking."
+
+    tool_results = [
+        m for m in session.messages
+        if m["role"] == "tool"
+    ]
+    assert len(tool_results) == 3
+
+    import json
+    first_result = json.loads(tool_results[0]["content"])
+    assert "DUPLICATE_CALL" not in str(first_result)
+
+    second_result = json.loads(tool_results[1]["content"])
+    assert second_result.get("error") == "DUPLICATE_CALL"
+    assert "identical arguments" in second_result.get("message", "")
+
+    third_result = json.loads(tool_results[2]["content"])
+    assert "DUPLICATE_CALL" not in str(third_result)

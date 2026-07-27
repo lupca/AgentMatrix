@@ -523,6 +523,29 @@ class LLMUsage(Base):
     )
 
 
+class ModelPricing(Base):
+    """LLM model pricing table for cost calculations."""
+
+    __tablename__ = "model_pricing"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    model = Column(String(100), nullable=False)
+    provider = Column(String(50), nullable=False)
+    input_price_per_mtok = Column(Numeric(10, 4), nullable=True)
+    output_price_per_mtok = Column(Numeric(10, 4), nullable=True)
+    cached_input_price_per_mtok = Column(Numeric(10, 4), nullable=True)
+    cache_write_5m_per_mtok = Column(Numeric(10, 4), nullable=True)
+    cache_write_1h_per_mtok = Column(Numeric(10, 4), nullable=True)
+    notes = Column(Text, nullable=True)
+    effective_from = Column(Date, server_default=func.current_date())
+    effective_until = Column(Date, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("model", "provider", "effective_from", name="uq_model_pricing_unique"),
+    )
+
+
 class Setting(Base):
     """Whitelisted system-configuration KV store (ADR-001 §D2 Phase 2d).
 

@@ -3,15 +3,30 @@ import { api } from '../lib/api';
 import { TokenStatsApiResponse, TokenComparisonApiResponse } from '../types/token';
 import { TokenOverviewCards } from '../components/dashboard/TokenOverviewCards';
 import { TokenUsageBars } from '../components/dashboard/TokenUsageBars';
-import { Activity, RefreshCw, AlertCircle } from 'lucide-react';
+import { ModelPricingTable } from '../components/dashboard/ModelPricingTable';
+import { Activity, RefreshCw, AlertCircle, DollarSign } from 'lucide-react';
+
+interface PricingRow {
+  id: number;
+  model: string;
+  provider: string;
+  input_price_per_mtok: number | null;
+  output_price_per_mtok: number | null;
+  cached_input_price_per_mtok: number | null;
+  cache_write_5m_per_mtok?: number | null;
+  cache_write_1h_per_mtok?: number | null;
+  notes?: string | null;
+}
 
 export const TokensPage: React.FC = () => {
   const [tokenStats, setTokenStats] = useState<TokenStatsApiResponse | null>(null);
   const [tokenComparison, setTokenComparison] = useState<TokenComparisonApiResponse | null>(null);
+  const [pricing, setPricing] = useState<PricingRow[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [showPricing, setShowPricing] = useState<boolean>(false);
 
   const fetchTokenData = useCallback(async (isManualRefresh = false) => {
     if (isManualRefresh) {
@@ -22,13 +37,15 @@ export const TokensPage: React.FC = () => {
     setError(null);
 
     try {
-      const [usage, comparison] = await Promise.all([
+      const [usage, comparison, pricingData] = await Promise.all([
         api.get<TokenStatsApiResponse>('/stats/tokens'),
-        api.get<TokenComparisonApiResponse>('/stats/tokens/comparison')
+        api.get<TokenComparisonApiResponse>('/stats/tokens/comparison'),
+        api.get<PricingRow[]>('/stats/pricing')
       ]);
 
       setTokenStats(usage);
       setTokenComparison(comparison);
+      setPricing(pricingData);
       setLastRefreshed(new Date());
     } catch (err: any) {
       console.warn('Failed to fetch token telemetry data:', err);
@@ -130,7 +147,7 @@ export const TokensPage: React.FC = () => {
             />
           </div>
           <div className="rounded-xl border border-gray-800/80 bg-gray-900/40 p-6 shadow-lg backdrop-blur-sm xl:col-span-2">
-            <TokenUsageBars 
+            <TokenUsageBars
               title="Usage by Operation"
               subtitle="Token distribution by internal system operation"
               items={tokenStats.by_operation || []}
@@ -138,6 +155,35 @@ export const TokensPage: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Model Pricing Section */}
+      <div className="rounded-xl border border-gray-800/80 bg-gray-900/40 p-6 shadow-lg backdrop-blur-sm">
+        <button
+          onClick={() => setShowPricing(!showPricing)}
+          className="w-full flex items-center justify-between text-left"
+        >
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+              <DollarSign className="w-4 h-4 text-emerald-400" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-gray-100">Model Pricing</h2>
+              <p className="text-xs text-gray-500">
+                {pricing.length} models configured
+              </p>
+            </div>
+          </div>
+          <span className="text-gray-500 text-sm">
+            {showPricing ? 'Hide' : 'Show'} pricing table
+          </span>
+        </button>
+
+        {showPricing && (
+          <div className="mt-6 pt-4 border-t border-gray-800/50">
+            <ModelPricingTable pricing={pricing} loading={loading} />
+          </div>
+        )}
+      </div>
     </div>
   );
 };
