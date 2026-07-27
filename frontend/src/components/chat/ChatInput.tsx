@@ -3,6 +3,11 @@ import { Send, Loader2, Sparkles } from 'lucide-react';
 import { Task } from '../../types/task';
 import { QuickActions } from './QuickActions';
 import { CoordinatorProvider, ModelSelector } from './ModelSelector';
+import { ToolPalette, filterTools } from './ToolPalette';
+import { useTools } from '../../hooks/useTools';
+
+/** Matches while the user is still composing a single `/command` token, before any argument text. */
+const SLASH_COMMAND_PATTERN = /^\/(\S*)$/;
 
 interface ChatInputProps {
   onSendMessage: (message: string) => Promise<void> | void;
@@ -30,7 +35,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   isModelLoading = false,
 }) => {
   const [input, setInput] = useState('');
+  const [paletteDismissed, setPaletteDismissed] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const { tools } = useTools();
 
   const quickPrompts = [
     'Analyze execution plan',
@@ -38,12 +46,31 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     'Suggest fix for errors',
   ];
 
+  const slashMatch = SLASH_COMMAND_PATTERN.exec(input);
+  const paletteQuery = slashMatch?.[1] ?? '';
+  const paletteMatches = slashMatch ? filterTools(tools, paletteQuery) : [];
+  const showPalette = !paletteDismissed && !disabled && paletteMatches.length > 0;
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [paletteQuery]);
+
   useEffect(() => {
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 120)}px`;
     }
   }, [input]);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setInput(e.target.value);
+    setPaletteDismissed(false);
+  };
+
+  const selectPaletteTool = (tool: { slash_alias: string | null; name: string }) => {
+    setInput(`${tool.slash_alias ?? `/${tool.name}`} `);
+    setPaletteDismissed(false);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,6 +83,28 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showPalette) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveIndex((i) => (i + 1) % paletteMatches.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveIndex((i) => (i - 1 + paletteMatches.length) % paletteMatches.length);
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        selectPaletteTool(paletteMatches[activeIndex]);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setPaletteDismissed(true);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSubmit(e);
@@ -105,12 +154,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({
       </div>
 
       <form onSubmit={handleSubmit} className="relative flex items-end gap-2">
+        {showPalette && (
+          <ToolPalette
+            tools={tools}
+            query={paletteQuery}
+            activeIndex={activeIndex}
+            onSelect={selectPaletteTool}
+            onHover={setActiveIndex}
+          />
+        )}
         <div className="relative flex-1 bg-gray-900 border border-gray-800 focus-within:border-indigo-500 rounded-xl transition-all shadow-inner">
           <textarea
             ref={textareaRef}
             rows={1}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={handleInputChange}
             onKeyDown={handleKeyDown}
             disabled={disabled || isStreaming}
             placeholder={placeholder}

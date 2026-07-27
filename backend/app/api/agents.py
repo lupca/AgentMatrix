@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.db.models import Agent as AgentModel
+from app.graph.context import invalidate_context_snapshot
 from app.schemas.agent import Agent, AgentCreate, AgentUpdate
 from app.services.crypto import encrypt_api_key
 
@@ -102,6 +103,7 @@ def create_agent(agent_in: AgentCreate, db: Session = Depends(get_db)):
     db.add(db_agent)
     db.commit()
     db.refresh(db_agent)
+    invalidate_context_snapshot(db)
     return db_agent
 
 
@@ -165,6 +167,7 @@ def update_agent(id: str, agent_in: AgentUpdate, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(db_agent)
+    invalidate_context_snapshot(db)
     return db_agent
 
 
@@ -186,6 +189,7 @@ def set_default_agent(id: str, db: Session = Depends(get_db)):
     db_agent.is_default = True
     db.commit()
     db.refresh(db_agent)
+    invalidate_context_snapshot(db)
     return db_agent
 
 
@@ -200,4 +204,5 @@ def delete_agent(id: str, db: Session = Depends(get_db)):
 
     db.delete(db_agent)
     db.commit()
+    invalidate_context_snapshot(db)
     return None

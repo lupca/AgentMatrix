@@ -3,7 +3,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from unittest.mock import patch
 from app.db.base import Base
-from app.services.command_router import CommandRouter, COMMANDS
+from app.services.command_router import COMMANDS, HELP_COMMAND, CommandRouter
+from app.services.tool_registry import dump_registry
 
 @pytest.fixture
 def db_session():
@@ -42,7 +43,8 @@ async def test_command_router_execute():
     router = CommandRouter(None)
     res = await router.execute("show_help", "", "session-1")
     assert "commands" in res
-    assert res["commands"] == list(COMMANDS.keys())
+    assert res["commands"] == dump_registry() + [HELP_COMMAND]
+    assert {c["slash_alias"] for c in res["commands"]} == set(COMMANDS.keys())
 
     res_unknown = await router.execute("non_existent_command", "", "session-1")
     assert "error" in res_unknown
@@ -116,3 +118,95 @@ async def test_command_router_persists_run_before_enqueueing(db_session):
     assert result["action"] == "dispatched"
     assert queued_run_ids == [result["run_id"]]
     assert db_session.get(AgentRun, result["run_id"]).agent_id == "@agent-1"
+
+
+@pytest.mark.asyncio
+async def test_query_db_agents_never_includes_api_key(db_session):
+    from app.db.models import Agent
+
+    db_session.add(
+        Agent(
+            id="@agent-secret",
+            name="Secret Agent",
+            role="executor",
+            agent_type="api",
+            provider="openai",
+            api_key="sk-super-secret",
+        )
+    )
+    db_session.commit()
+
+    result = await CommandRouter(db_session).execute("query_db", "agents", "session-1")
+
+    assert result["status"] == "success"
+    assert result["entity"] == "agents"
+    assert len(result["rows"]) == 1
+    row = result["rows"][0]
+    assert row["id"] == "@agent-secret"
+    assert "api_key" not in row
+    assert "sk-super-secret" not in str(row)
+
+
+@pytest.mark.asyncio
+async def test_query_db_unknown_entity_returns_clear_error(db_session):
+    result = await CommandRouter(db_session).execute("query_db", "not_an_entity", "session-1")
+    assert "error" in result
+    assert "not_an_entity" in result["error"]
+    assert "tasks" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_query_db_unknown_filter_returns_clear_error(db_session):
+    result = await CommandRouter(db_session).execute(
+        "query_db", "tasks bogus_field=1", "session-1"
+    )
+    assert "error" in result
+    assert "bogus_field" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_query_db_filters_rows_and_caps_limit(db_session):
+    from app.db.models import Project, Task
+
+    db_session.add(Project(id="proj-1", name="Test Project"))
+    for i in range(3):
+        db_session.add(
+            Task(
+                id=f"TASK-2{i}0",
+                project="proj-1",
+                title=f"Task {i}",
+                status="dispatched" if i < 2 else "todo",
+            )
+        )
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    result = await router.execute("query_db", "tasks status=dispatched limit=1", "session-1")
+
+    assert result["status"] == "success"
+    assert result["limit"] == 1
+    assert result["count"] == 1
+    assert result["rows"][0]["status"] == "dispatched"
+
+    bad_limit = await router.execute("query_db", "tasks limit=999", "session-1")
+    assert "error" in bad_limit
+
+
+@pytest.mark.asyncio
+async def test_query_db_via_tool_call_matches_slash_command(db_session):
+    from app.db.models import Project, Task
+
+    db_session.add(Project(id="proj-1", name="Test Project"))
+    db_session.add(Task(id="TASK-300", project="proj-1", title="Tool call task", status="todo"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    tool_result = await router.execute_tool(
+        "query_db",
+        {"entity": "tasks", "filters": {"status": "todo"}, "limit": 5},
+        "session-1",
+    )
+
+    assert tool_result["status"] == "success"
+    assert tool_result["entity"] == "tasks"
+    assert any(row["id"] == "TASK-300" for row in tool_result["rows"])

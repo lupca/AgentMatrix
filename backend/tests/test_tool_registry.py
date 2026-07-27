@@ -24,11 +24,12 @@ def db_session():
     session.close()
 
 
-def test_registry_has_seven_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 7
+def test_registry_has_eight_tools_with_unique_names():
+    assert len(TOOL_REGISTRY) == 8
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
+        'query_db',
         'dispatch_task',
         'record_verdict',
         'approve_gate',
@@ -82,6 +83,7 @@ def test_get_tool_definitions_is_registry_projection():
 
     assert 'create_task' in names_eager
     assert 'get_status' in names_eager
+    assert 'query_db' in names_eager
     assert 'pm_create_task' not in names_eager
 
     assert names_deferred == {

@@ -34,8 +34,6 @@ from app.services.crypto import decrypt_api_key
 from app.services.command_router import CommandRouter
 from app.graph.context import invalidate_context_snapshot
 from app.services.providers import CoordinatorProvider, ProviderResponse
-from app.services.providers.anthropic_adapter import AnthropicAdapter
-from app.services.providers.google_adapter import GoogleAdapter
 from app.services.providers.openai_adapter import OpenAIAdapter
 
 
@@ -44,6 +42,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONTEXT_WINDOWS = {
     "claude": 200_000,
     "gemini": 1_000_000,
+    "gpt": 128_000,
 }
 
 
@@ -60,20 +59,17 @@ class CoordinatorResult:
 
 
 class ProviderRouter:
-    """Resolve coordinator adapters from explicit provider or model name."""
+    """Resolve the OpenAI-compatible coordinator adapter from an Agent DB record.
+
+    Anthropic and Google models have no SDK-direct adapter; they always
+    dispatch through the CLI (see ``route_model``).
+    """
 
     def __init__(
         self,
         providers: Mapping[str, CoordinatorProvider] | None = None,
     ):
-        self.providers: dict[str, CoordinatorProvider] = dict(
-            providers
-            if providers is not None
-            else {
-                "anthropic": AnthropicAdapter(),
-                "google": GoogleAdapter(),
-            }
-        )
+        self.providers: dict[str, CoordinatorProvider] = dict(providers or {})
 
     @staticmethod
     def provider_name(model: str) -> str:
@@ -116,10 +112,10 @@ class ProviderRouter:
                 raise ValueError(
                     "No OpenAI coordinator agent is configured for this model"
                 ) from exc
-            supported = ", ".join(sorted(self.providers))
             raise ValueError(
                 f"Unsupported coordinator provider '{provider_name}'. "
-                f"Supported providers: {supported}"
+                "Only 'openai' resolves to a coordinator adapter; anthropic/google "
+                "models dispatch through the CLI."
             ) from exc
 
     # Friendly alias for call sites and tests.
@@ -132,9 +128,11 @@ DEFAULT_PROVIDER_ROUTER = ProviderRouter()
 class CoordinatorService:
     """Own coordinator sessions, CLI dispatch, retries, and telemetry.
 
-    The optional provider arguments remain a small compatibility seam for
-    existing callers/tests.  Normal application construction uses the CLI
-    dispatcher and therefore never instantiates an SDK request.
+    Coordinator turns run on exactly two paths: the OpenAI-compatible API
+    (via ``ProviderRouter``/``OpenAIAdapter``) or an account-backed CLI
+    (``route_model`` + ``CLIDispatcher``). The ``router``/``providers``
+    constructor arguments let tests inject a fake OpenAI adapter without
+    a real Agent DB record.
     """
 
     _session_locks: dict[str, asyncio.Lock] = {}
@@ -165,7 +163,6 @@ class CoordinatorService:
         # When provided, ContextHierarchy enriches Task-tier context with live
         # gate state read from the graph's checkpointer.
         self.graph = graph
-        self._explicit_provider_compatibility = router is not None or providers is not None
         if router is not None:
             self.router = router
         elif providers is not None:
@@ -289,7 +286,9 @@ class CoordinatorService:
         if provider == "codex":
             provider = "openai"
 
-        agent: AgentModel | None = None
+        # Only the OpenAI-compatible API path resolves an adapter; anthropic
+        # and google models always dispatch through a CLI account login.
+        adapter: CoordinatorProvider | None = None
         if provider == "openai":
             agent = (
                 self.db.query(AgentModel)
@@ -301,32 +300,8 @@ class CoordinatorService:
                 .order_by(AgentModel.is_default.desc(), AgentModel.id)
                 .first()
             )
-
-        # SDK adapters are supported only for the legacy injected-provider
-        # path.  The normal path returns None and always dispatches through a
-        # CLI account login.
-        legacy_adapter: CoordinatorProvider | None = None
-        if self._explicit_provider_compatibility:
-            legacy_adapter = self.router.get(
-                requested_model,
-                provider,
-                agent=agent,
-            )
-        else:
-            if provider == "openai":
-                legacy_adapter = self.router.get(
-                    requested_model,
-                    provider,
-                    agent=agent,
-                )
-            else:
-                configured = self.router.providers.get(provider)
-                if configured is not None and not isinstance(
-                    configured,
-                    (AnthropicAdapter, GoogleAdapter),
-                ):
-                    legacy_adapter = configured
-        return provider, requested_model, legacy_adapter
+            adapter = self.router.get(requested_model, provider, agent=agent)
+        return provider, requested_model, adapter
 
     def validate_selection(
         self,

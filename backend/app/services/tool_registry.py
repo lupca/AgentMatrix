@@ -75,6 +75,55 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="query",
         ),
         ToolSpec(
+            name="query_db",
+            description=(
+                "Read-only lookup across Control Tower entities not already "
+                "covered by the context snapshot. Returns compact rows "
+                "(id/title/status/...), never full rows or secrets."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "entity": {
+                        "type": "string",
+                        "enum": [
+                            "tasks",
+                            "projects",
+                            "agents",
+                            "sessions",
+                            "knowledge",
+                            "usage",
+                        ],
+                        "description": "Entity to query.",
+                    },
+                    "filters": {
+                        "type": "object",
+                        "description": (
+                            "Equality filters; allowed field names vary per "
+                            "entity (e.g. tasks: status/project/executor)."
+                        ),
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows to return (<=50).",
+                        "default": 20,
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Row offset for pagination.",
+                        "default": 0,
+                    },
+                },
+                "required": ["entity"],
+            },
+            handler="query_db",
+            tier="eager",
+            permission="read",
+            entity="query",
+            slash_alias="/query",
+            group="query",
+        ),
+        ToolSpec(
             name="dispatch_task",
             description="Assign an executor to a task and move it to dispatched status.",
             parameters={

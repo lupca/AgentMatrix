@@ -8,13 +8,21 @@ from app.graph.context import (
 )
 
 
-def test_snapshot_lists_active_projects_with_aggregate_task_counts(db_session):
+def test_snapshot_lists_active_projects_and_open_task_breakdown(db_session):
     db_session.add_all(
         [
             Project(id="alpha", name="Alpha", status="active"),
             Project(id="archived", name="Archived", status="archived"),
             Task(id="ALPHA-001", project="alpha", title="First", status="todo"),
             Task(id="ALPHA-002", project="alpha", title="Second", status="dispatched"),
+            Task(id="ALPHA-003", project="alpha", title="Third", status="in-review"),
+            Task(
+                id="ALPHA-004",
+                project="alpha",
+                title="Fourth",
+                status="dispatched",
+                awaiting_approval=True,
+            ),
         ]
     )
     db_session.commit()
@@ -24,9 +32,10 @@ def test_snapshot_lists_active_projects_with_aggregate_task_counts(db_session):
 
     snapshot = build_context_snapshot(session, db_session)
 
-    assert "Projects (1):" in snapshot
-    assert "- alpha: Alpha (active, 2 tasks)" in snapshot
+    assert "## System State" in snapshot
+    assert "- Projects: 1 active (Alpha)" in snapshot
     assert "archived" not in snapshot
+    assert "- Tasks: 4 open (2 dispatched, 1 in-review, 1 awaiting approval)" in snapshot
 
 
 def test_snapshot_includes_only_five_recent_tasks_for_project_scope(db_session):
@@ -64,7 +73,14 @@ def test_empty_snapshot_is_stable_and_human_readable(db_session):
     db_session.add(session)
     db_session.commit()
 
-    assert build_context_snapshot(session) == "## Current Context\nProjects (0):"
+    # The session row itself is active, so it counts toward "Sessions".
+    assert build_context_snapshot(session) == (
+        "## System State\n"
+        "- Projects: 0 active\n"
+        "- Agents: 0 configured (0 api / 0 cli; default: none)\n"
+        "- Sessions: 1 active\n"
+        "- Tasks: 0 open (0 dispatched, 0 in-review, 0 awaiting approval)"
+    )
 
 
 def test_mutation_invalidation_refreshes_cached_snapshot(db_session):

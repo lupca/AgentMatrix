@@ -55,20 +55,37 @@ class _FakeProvider:
         return response
 
 
-def _service(db_session, anthropic, google, **kwargs):
+@dataclass
+class _FakeCLIDispatcher:
+    """Minimal CLI dispatcher double for exercising the CLI-routed path."""
+
+    replies: dict[str, str]
+    calls: list[tuple[str, str, str]] = field(default_factory=list)
+
+    async def spawn(self, cli, model, prompt):
+        self.calls.append((cli, model, prompt))
+        yield self.replies[model]
+
+
+def _service(db_session, openai, **kwargs):
     return CoordinatorService(
         db_session,
-        providers={"anthropic": anthropic, "google": google},
+        providers={"openai": openai},
         retry_base_seconds=0,
         **kwargs,
     )
 
 
 @pytest.mark.asyncio
-async def test_model_switch_rehydrates_canonical_history_and_records_usage(db_session):
-    anthropic = _FakeProvider("anthropic", ["My name is Ada."])
-    google = _FakeProvider("google", ["Your name is Ada."])
-    service = _service(db_session, anthropic, google)
+async def test_openai_and_cli_paths_share_rehydrated_history_in_one_session(db_session):
+    openai = _FakeProvider("openai", ["My name is Ada."])
+    dispatcher = _FakeCLIDispatcher({"claude-sonnet-4": "Your name is Ada."})
+    service = CoordinatorService(
+        db_session,
+        providers={"openai": openai},
+        dispatcher=dispatcher,
+        retry_base_seconds=0,
+    )
     session = Session(id="session-switch", thread_id="session-switch", messages=[])
     db_session.add(session)
     db_session.commit()
@@ -76,36 +93,33 @@ async def test_model_switch_rehydrates_canonical_history_and_records_usage(db_se
     first = await service.complete_turn(
         session,
         "Remember that my name is Ada.",
-        model="claude-sonnet-4",
+        model="gpt-4o",
         idempotency_key="turn-1",
     )
     second = await service.complete_turn(
         session,
         "What is my name?",
-        model="gemini-2.5-flash",
+        model="claude-sonnet-4",
         idempotency_key="turn-2",
     )
 
-    assert first.provider == "anthropic"
-    assert second.provider == "google"
-    google_history = google.calls[0][1]
-    assert google_history[0]["role"] == "system"
-    conversation = [m for m in google_history if m["role"] in {"user", "assistant"}]
-    assert [message["content"] for message in conversation] == [
-        "Remember that my name is Ada.",
-        "My name is Ada.",
-        "What is my name?",
-    ]
-    assert session.selected_provider == "google"
-    assert session.selected_model == "gemini-2.5-flash"
+    assert first.provider == "openai"
+    assert second.provider == "anthropic"
+    cli, model, prompt = dispatcher.calls[0]
+    assert cli == "claude"
+    assert model == "claude-sonnet-4"
+    assert "USER:\nRemember that my name is Ada." in prompt
+    assert "ASSISTANT:\nMy name is Ada." in prompt
+    assert "USER:\nWhat is my name?" in prompt
+    assert session.selected_provider == "anthropic"
+    assert session.selected_model == "claude-sonnet-4"
     assert db_session.query(LLMUsage).count() == 2
 
 
 @pytest.mark.asyncio
 async def test_idempotency_returns_persisted_turn_without_second_provider_call(db_session):
-    anthropic = _FakeProvider("anthropic", ["Only once"])
-    google = _FakeProvider("google", [])
-    service = _service(db_session, anthropic, google)
+    openai = _FakeProvider("openai", ["Only once"])
+    service = _service(db_session, openai)
     session = Session(id="session-idempotent", messages=[])
     db_session.add(session)
     db_session.commit()
@@ -113,35 +127,34 @@ async def test_idempotency_returns_persisted_turn_without_second_provider_call(d
     first = await service.complete_turn(
         session,
         "Hello",
-        model="claude-sonnet-4",
+        model="gpt-4o",
         idempotency_key="stable-turn",
     )
     second = await service.complete_turn(
         session,
         "Hello",
-        model="claude-sonnet-4",
+        model="gpt-4o",
         idempotency_key="stable-turn",
     )
 
     assert first.content == second.content == "Only once"
     assert second.cached is True
-    assert len(anthropic.calls) == 1
+    assert len(openai.calls) == 1
     assert len(session.messages) == 2
     assert db_session.query(LLMUsage).count() == 1
     with pytest.raises(ValueError, match="different message"):
         await service.complete_turn(
             session,
             "Different content",
-            model="claude-sonnet-4",
+            model="gpt-4o",
             idempotency_key="stable-turn",
         )
 
 
 @pytest.mark.asyncio
 async def test_streaming_is_normalized_and_persisted_as_one_message(db_session):
-    anthropic = _FakeProvider("anthropic", ["streamed reply"])
-    google = _FakeProvider("google", [])
-    service = _service(db_session, anthropic, google)
+    openai = _FakeProvider("openai", ["streamed reply"])
+    service = _service(db_session, openai)
     session = Session(id="session-stream", messages=[])
     db_session.add(session)
     db_session.commit()
@@ -151,7 +164,7 @@ async def test_streaming_is_normalized_and_persisted_as_one_message(db_session):
         async for chunk in service.stream_turn(
             session,
             "Stream this",
-            model="claude-sonnet-4",
+            model="gpt-4o",
             idempotency_key="stream-turn",
         )
     ]
@@ -165,13 +178,12 @@ async def test_streaming_is_normalized_and_persisted_as_one_message(db_session):
 
 @pytest.mark.asyncio
 async def test_transient_failure_retries_without_duplicate_user_message(db_session):
-    anthropic = _FakeProvider(
-        "anthropic",
+    openai = _FakeProvider(
+        "openai",
         ["recovered"],
         failures=[TimeoutError("temporary")],
     )
-    google = _FakeProvider("google", [])
-    service = _service(db_session, anthropic, google, max_retries=1)
+    service = _service(db_session, openai, max_retries=1)
     session = Session(id="session-retry", messages=[])
     db_session.add(session)
     db_session.commit()
@@ -179,22 +191,18 @@ async def test_transient_failure_retries_without_duplicate_user_message(db_sessi
     result = await service.complete_turn(
         session,
         "Retry me",
-        model="claude-sonnet-4",
+        model="gpt-4o",
         idempotency_key="retry-turn",
     )
 
     assert result.content == "recovered"
-    assert len(anthropic.calls) == 2
+    assert len(openai.calls) == 2
     assert [m["role"] for m in session.messages] == ["user", "assistant"]
 
 
 def test_context_budget_keeps_newest_turns_and_system_prefix(db_session):
     service = CoordinatorService(
         db_session,
-        providers={
-            "anthropic": _FakeProvider("anthropic", []),
-            "google": _FakeProvider("google", []),
-        },
         max_output_tokens=10,
         context_safety_tokens=0,
         context_windows={"claude": 35},
@@ -213,15 +221,15 @@ def test_context_budget_keeps_newest_turns_and_system_prefix(db_session):
     assert all(message["content"] != "old " * 30 for message in budgeted)
 
 
-def test_provider_router_selects_adapter_by_model_name():
-    anthropic = _FakeProvider("anthropic", [])
-    google = _FakeProvider("google", [])
-    router = ProviderRouter({"anthropic": anthropic, "google": google})
+def test_provider_router_resolves_only_openai_adapter():
+    openai = _FakeProvider("openai", [])
+    router = ProviderRouter({"openai": openai})
 
-    assert router.get("claude-sonnet-4") is anthropic
-    assert router.get("gemini-2.5-flash") is google
+    assert router.get("gpt-4o", "openai") is openai
     with pytest.raises(ValueError, match="Cannot infer provider"):
         router.get("unknown-model")
+    with pytest.raises(ValueError, match="Unsupported coordinator provider"):
+        router.get("claude-sonnet-4", "anthropic")
 
 
 def test_chat_endpoint_routes_requested_models_and_preserves_history(
@@ -229,17 +237,11 @@ def test_chat_endpoint_routes_requested_models_and_preserves_history(
     db_session,
     monkeypatch,
 ):
-    anthropic = _FakeProvider("anthropic", ["first answer"])
-    google = _FakeProvider("google", ["second answer"])
+    openai = _FakeProvider("openai", ["first answer", "second answer"])
     monkeypatch.setitem(
         DEFAULT_PROVIDER_ROUTER.providers,
-        "anthropic",
-        anthropic,
-    )
-    monkeypatch.setitem(
-        DEFAULT_PROVIDER_ROUTER.providers,
-        "google",
-        google,
+        "openai",
+        openai,
     )
 
     first = client.post(
@@ -247,7 +249,7 @@ def test_chat_endpoint_routes_requested_models_and_preserves_history(
         json={
             "thread_id": "api-switch-session",
             "message": "First question",
-            "model": "claude-sonnet-4",
+            "model": "gpt-4o",
             "idempotency_key": "api-turn-1",
         },
     )
@@ -256,7 +258,7 @@ def test_chat_endpoint_routes_requested_models_and_preserves_history(
         json={
             "thread_id": "api-switch-session",
             "message": "Second question",
-            "model": "gemini-2.5-flash",
+            "model": "gpt-4o-mini",
             "idempotency_key": "api-turn-2",
         },
     )
@@ -264,9 +266,9 @@ def test_chat_endpoint_routes_requested_models_and_preserves_history(
     assert first.status_code == second.status_code == 200
     assert '"type": "done"' in first.text
     assert '"type": "done"' in second.text
-    assert google.calls[0][1][0]["role"] == "system"
+    assert openai.calls[0][1][0]["role"] == "system"
     conversation = [
-        m for m in google.calls[0][1] if m["role"] in {"user", "assistant"}
+        m for m in openai.calls[1][1] if m["role"] in {"user", "assistant"}
     ]
     assert [message["content"] for message in conversation] == [
         "First question",
@@ -278,4 +280,4 @@ def test_chat_endpoint_routes_requested_models_and_preserves_history(
         .filter(Session.thread_id == "api-switch-session")
         .one()
     )
-    assert session.selected_provider == "google"
+    assert session.selected_provider == "openai"

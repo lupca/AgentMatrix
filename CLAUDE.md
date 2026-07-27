@@ -10,7 +10,7 @@ This is a complete redesign of the Control Tower task coordination system using 
 - **Database**: PostgreSQL (source of truth)
 - **Chat UI**: Chainlit
 - **Dashboard**: Streamlit
-- **LLM**: Claude API (direct, not through LangChain)
+- **LLM**: OpenAI-compatible API (coordinator) + account-backed CLIs (`claude`/`agy`/`codex`), direct not through LangChain
 
 ## Project Structure
 

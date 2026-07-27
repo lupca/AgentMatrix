@@ -1,12 +1,12 @@
 import pytest
 import os
-from app.db.models import Project, Session as SessionModel, Task, LLMUsage
+from app.db.models import Agent, Project, Session as SessionModel, Task, LLMUsage
 from app.services.context_hierarchy import ContextHierarchy, PROJECT_CONTEXT_MAX_CHARS
 from app.services.coordinator import CoordinatorService
 from app.services.command_router import CommandRouter
 from app.services.providers import ProviderResponse
 from app.services.llm_client import UsageCounts
-from app.graph.context import invalidate_context_snapshot
+from app.graph.context import build_context_snapshot, invalidate_context_snapshot
 
 
 def test_global_context_loaded_and_cached(db_session):
@@ -104,7 +104,7 @@ def test_build_messages_tiered_ordering_and_pinned_flag(db_session):
 
     # 3. Context snapshot (own dynamic message, not pinned)
     assert messages[2]["role"] == "system"
-    assert "## Current Context" in messages[2]["content"]
+    assert "## System State" in messages[2]["content"]
     assert "pinned" not in messages[2]
     assert "cache_control" not in messages[2]
 
@@ -166,6 +166,35 @@ def test_build_messages_prefix_stable_across_task_mutation(db_session):
     assert before[2] != after[2]  # Snapshot message changed
     assert "TASK-STABLE-2" in after[2]["content"]
     assert "TASK-STABLE-2" not in before[2]["content"]
+
+
+def test_system_state_snapshot_stays_within_cap_at_scale(db_session):
+    """20 projects + 50 agents must not blow the ~30 line / ~600 token cap:
+    enumeration is top-N, the rest is counted only (ADR-001 §D2)."""
+    for i in range(20):
+        db_session.add(Project(id=f"proj-{i:02d}", name=f"Project {i:02d}", status="active"))
+    for i in range(50):
+        db_session.add(
+            Agent(
+                id=f"@agent-{i:02d}",
+                name=f"Agent {i:02d}",
+                role="executor",
+                agent_type="api" if i % 2 == 0 else "cli",
+                cli="codex",
+            )
+        )
+    session = SessionModel(id="sess-scale", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    snapshot = build_context_snapshot(session, db_session)
+    lines = snapshot.splitlines()
+
+    assert len(lines) <= 30
+    assert len(snapshot) <= 2_400  # ~600 tokens at ~4 chars/token
+    assert "- Projects: 20 active" in snapshot
+    assert "+12 more" in snapshot  # top 8 enumerated, remainder counted
+    assert "- Agents: 50 configured (25 api / 25 cli; default: none)" in snapshot
 
 
 def test_context_compaction(db_session):

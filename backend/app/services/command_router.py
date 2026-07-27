@@ -3,12 +3,133 @@ import hashlib
 import json
 from collections.abc import Mapping
 from typing import Any, Tuple, Optional
-from app.db.models import AgentRun, Task, Session as SessionModel
+from app.db.models import (
+    Agent,
+    AgentRun,
+    KnowledgeItem,
+    LLMUsage,
+    Project,
+    Task,
+    Session as SessionModel,
+)
 from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
 )
-from app.services.tool_registry import TOOL_REGISTRY, resolve_tool_name
+from app.services.tool_registry import TOOL_REGISTRY, dump_registry, resolve_tool_name
+
+# query_db (ADR-001 §D2): entity + filter-field whitelist, and a compact
+# serializer per entity so responses stay small and never leak secrets
+# (notably Agent.api_key, which is deliberately absent below).
+_QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
+    "tasks": {
+        "model": Task,
+        "filters": {
+            "status": "str",
+            "project": "str",
+            "executor": "str",
+            "reviewer": "str",
+            "priority": "str",
+            "risk": "str",
+            "mode": "str",
+        },
+        "order_by": Task.updated_at.desc(),
+        "serialize": lambda t: {
+            "id": t.id,
+            "title": t.title,
+            "status": t.status,
+            "project": t.project,
+            "executor": t.executor,
+            "reviewer": t.reviewer,
+            "current_gate": t.current_gate,
+        },
+    },
+    "projects": {
+        "model": Project,
+        "filters": {"status": "str"},
+        "order_by": Project.id.asc(),
+        "serialize": lambda p: {
+            "id": p.id,
+            "name": p.name,
+            "status": p.status,
+        },
+    },
+    "agents": {
+        "model": Agent,
+        "filters": {
+            "role": "str",
+            "status": "str",
+            "agent_type": "str",
+            "cli": "str",
+            "is_default": "bool",
+        },
+        "order_by": Agent.id.asc(),
+        "serialize": lambda a: {
+            "id": a.id,
+            "name": a.name,
+            "role": a.role,
+            "status": a.status,
+            "agent_type": a.agent_type,
+            "model": a.model,
+            "is_default": a.is_default,
+        },
+    },
+    "sessions": {
+        "model": SessionModel,
+        "filters": {
+            "status": "str",
+            "context_level": "str",
+            "project_id": "str",
+            "task_id": "str",
+            "pinned": "bool",
+        },
+        "order_by": SessionModel.last_activity_at.desc(),
+        "serialize": lambda s: {
+            "id": s.id,
+            "title": s.title,
+            "status": s.status,
+            "context_level": s.context_level,
+            "project_id": s.project_id,
+            "task_id": s.task_id,
+        },
+    },
+    "knowledge": {
+        "model": KnowledgeItem,
+        "filters": {"category": "str", "project": "str", "author": "str"},
+        "order_by": KnowledgeItem.updated_at.desc(),
+        "serialize": lambda k: {
+            "id": k.id,
+            "title": k.title,
+            "category": k.category,
+            "project": k.project,
+        },
+    },
+    "usage": {
+        "model": LLMUsage,
+        "filters": {
+            "session_id": "str",
+            "task_id": "str",
+            "operation": "str",
+            "model": "str",
+            "provider": "str",
+        },
+        "order_by": LLMUsage.created_at.desc(),
+        "serialize": lambda u: {
+            "id": u.id,
+            "model": u.model,
+            "operation": u.operation,
+            "input_tokens": u.input_tokens,
+            "output_tokens": u.output_tokens,
+            "cost_usd": float(u.cost_usd) if u.cost_usd is not None else 0.0,
+        },
+    },
+}
+
+
+def _coerce_filter_value(raw: str, kind: str) -> Any:
+    if kind == "bool":
+        return raw.strip().lower() in ("1", "true", "yes")
+    return raw
 
 # Derived from the tool registry (single source of truth, ADR-001 §D1) by
 # slash_alias, plus '/help' which is a router-only command, not a tool.
@@ -18,6 +139,16 @@ COMMANDS = {
     if spec.slash_alias
 }
 COMMANDS['/help'] = 'show_help'
+
+# '/help' is router-only (not a TOOL_REGISTRY entry) so it's projected here in
+# the same shape as dump_registry() entries for a single UI/help data source.
+HELP_COMMAND = {
+    'name': 'help',
+    'description': 'List available commands and tools.',
+    'slash_alias': '/help',
+    'tier': 'eager',
+    'group': 'meta',
+}
 
 class CommandRouter:
     def __init__(self, db_session):
@@ -70,6 +201,20 @@ class CommandRouter:
             command_args = title + (f' --project {project}' if project else '')
         elif canonical_name == 'get_status':
             command_args = str(args.get('task_id', '') or '')
+        elif canonical_name == 'query_db':
+            entity = str(args.get('entity', '')).strip()
+            if not entity:
+                return {'error': 'entity is required'}
+            filters = args.get('filters') or {}
+            if not isinstance(filters, Mapping):
+                return {'error': 'filters must be a JSON object'}
+            limit = args.get('limit', 20)
+            offset = args.get('offset', 0)
+            tokens = [entity]
+            tokens.extend(f'{key}={value}' for key, value in filters.items())
+            tokens.append(f'limit={limit}')
+            tokens.append(f'offset={offset}')
+            command_args = ' '.join(str(token) for token in tokens)
         elif canonical_name == 'dispatch_task':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
@@ -101,7 +246,69 @@ class CommandRouter:
         return await self.execute(spec.handler, command_args, session_id)
     
     async def _handle_show_help(self, args: str, session_id: str) -> dict:
-        return {'commands': list(COMMANDS.keys())}
+        return {'commands': dump_registry() + [HELP_COMMAND]}
+
+    async def _handle_query_db(self, args: str, session_id: str) -> dict:
+        parts = args.strip().split()
+        if not parts:
+            return {'error': 'Usage: /query <entity> [field=value ...] [limit=N] [offset=N]'}
+
+        entity = parts[0].lower()
+        entity_spec = _QUERY_DB_ENTITIES.get(entity)
+        if entity_spec is None:
+            return {
+                'error': (
+                    f"Unknown entity '{entity}'. Valid entities: "
+                    f"{', '.join(sorted(_QUERY_DB_ENTITIES))}"
+                )
+            }
+
+        filters: dict[str, Any] = {}
+        limit = 20
+        offset = 0
+        for token in parts[1:]:
+            if '=' not in token:
+                return {'error': f"Invalid filter token '{token}', expected field=value"}
+            key, _, value = token.partition('=')
+            if key == 'limit':
+                try:
+                    limit = int(value)
+                except ValueError:
+                    return {'error': 'limit must be an integer'}
+            elif key == 'offset':
+                try:
+                    offset = int(value)
+                except ValueError:
+                    return {'error': 'offset must be an integer'}
+            elif key in entity_spec['filters']:
+                filters[key] = _coerce_filter_value(value, entity_spec['filters'][key])
+            else:
+                return {
+                    'error': (
+                        f"Unknown filter '{key}' for entity '{entity}'. "
+                        f"Allowed filters: {', '.join(sorted(entity_spec['filters']))}"
+                    )
+                }
+
+        if not 1 <= limit <= 50:
+            return {'error': 'limit must be between 1 and 50'}
+        if offset < 0:
+            return {'error': 'offset must be >= 0'}
+
+        model = entity_spec['model']
+        query = self.db.query(model)
+        for key, value in filters.items():
+            query = query.filter(getattr(model, key) == value)
+        rows = query.order_by(entity_spec['order_by']).offset(offset).limit(limit).all()
+
+        return {
+            'status': 'success',
+            'entity': entity,
+            'count': len(rows),
+            'limit': limit,
+            'offset': offset,
+            'rows': [entity_spec['serialize'](row) for row in rows],
+        }
 
     async def _handle_create_task(self, args: str, session_id: str) -> dict:
         import uuid

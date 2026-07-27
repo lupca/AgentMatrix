@@ -99,7 +99,7 @@ class _Stream:
 def test_render_messages_and_tools_converts_canonical_shapes():
     messages = OpenAIAdapter.render_messages(
         [
-            {"role": "system", "content": "Rules", "cache_control": {"type": "ephemeral"}},
+            {"role": "system", "content": "Rules", "cache_control": {"type": "ephemeral"}, "pinned": True},
             {"role": "user", "content": "Hello", "status": "complete"},
             {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1", "name": "status", "input": {}}]},
             {"role": "tool", "content": "42", "tool_call_id": "call-1", "name": "status"},

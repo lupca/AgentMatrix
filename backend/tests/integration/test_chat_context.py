@@ -13,7 +13,7 @@ class _ContextProvider:
     async def complete(self, messages, model, stream=False, **kwargs):
         self.messages.append(messages)
         return ProviderResponse(
-            provider="anthropic",
+            provider="openai",
             model=model,
             text="context-aware",
             usage=UsageCounts(input_tokens=10, output_tokens=2),
@@ -39,7 +39,7 @@ def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
     db_session.commit()
 
     provider = _ContextProvider()
-    monkeypatch.setitem(DEFAULT_PROVIDER_ROUTER.providers, "anthropic", provider)
+    monkeypatch.setitem(DEFAULT_PROVIDER_ROUTER.providers, "openai", provider)
     session = client.post(
         "/api/sessions",
         json={
@@ -55,17 +55,17 @@ def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
         json={
             "thread_id": "context-chat",
             "message": "What projects do I have?",
-            "model": "claude-sonnet-4",
+            "model": "gpt-4o",
             "idempotency_key": "context-turn-1",
         },
     )
     assert first.status_code == 200
     first_global = provider.messages[0][0]["content"]
     first_snapshot = provider.messages[0][1]["content"]
-    assert "- alpha: Alpha (active, 1 tasks)" in first_snapshot
+    assert "- Projects: 1 active (Alpha)" in first_snapshot
     assert "ALPHA-001: Dispatch the release (dispatched)" in first_snapshot
     # The snapshot is its own message so mutations never touch the Global tier.
-    assert "- alpha: Alpha (active, 1 tasks)" not in first_global
+    assert "- Projects: 1 active (Alpha)" not in first_global
 
     updated = client.patch(
         "/api/projects/alpha",
@@ -78,13 +78,13 @@ def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
         json={
             "thread_id": "context-chat",
             "message": "Which project is this?",
-            "model": "claude-sonnet-4",
+            "model": "gpt-4o",
             "idempotency_key": "context-turn-2",
         },
     )
     assert second.status_code == 200
     second_global = provider.messages[1][0]["content"]
     second_snapshot = provider.messages[1][1]["content"]
-    assert "- alpha: Renamed Alpha (active, 1 tasks)" in second_snapshot
+    assert "- Projects: 1 active (Renamed Alpha)" in second_snapshot
     # Global tier bytes are unaffected by the project mutation (stable prefix).
     assert second_global == first_global

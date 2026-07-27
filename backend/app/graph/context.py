@@ -10,10 +10,22 @@ from __future__ import annotations
 from sqlalchemy import func
 from sqlalchemy.orm import Session as DBSession, object_session
 
-from app.db.models import Project, Session as SessionModel, Task
+from app.db.models import (
+    Agent,
+    AgentType,
+    Project,
+    Session as SessionModel,
+    SessionStatus,
+    Task,
+)
 
 
 _CACHE_INFO_KEY = "control_tower_context_snapshot_cache"
+
+# Enumeration cap for the "## System State" block: the rest of a large list
+# is only counted, never listed, to keep the snapshot within the ~30 line /
+# ~600 token hard cap regardless of how many projects/agents exist.
+_TOP_N_PROJECT_NAMES = 8
 
 
 def _database_for(
@@ -52,39 +64,78 @@ def build_context_snapshot(
     session: SessionModel,
     db: DBSession | None = None,
 ) -> str:
-    """Generate a compact, human-readable summary of current project state.
+    """Generate a compact "## System State" summary of the whole database.
 
-    Active projects are listed with task counts.  When the session has a
-    project scope, the five most recently updated tasks in that project are
-    included as well.  ``db`` is optional for attached ORM instances, which
-    keeps this function convenient in unit tests while allowing callers to
-    pass an explicit database session.
+    Every count below is one aggregate query; only projects get a bounded
+    name enumeration (top ``_TOP_N_PROJECT_NAMES``, remainder just counted)
+    so the block stays within the ~30 line / ~600 token hard cap regardless
+    of how many projects/agents/sessions/tasks exist. Long-tail reads go
+    through the ``query_db`` tool instead of growing this snapshot.
+
+    When the session has a project scope, the five most recently updated
+    tasks in that project are appended as well.  ``db`` is optional for
+    attached ORM instances, which keeps this function convenient in unit
+    tests while allowing callers to pass an explicit database session.
     """
 
     db = _database_for(session, db)
+
     projects = (
         db.query(Project)
         .filter(Project.status == "active")
         .order_by(Project.id.asc())
         .all()
     )
+    project_names = [
+        _clean_title(project.name, 24) for project in projects[:_TOP_N_PROJECT_NAMES]
+    ]
+    if len(projects) > _TOP_N_PROJECT_NAMES:
+        project_names.append(f"+{len(projects) - _TOP_N_PROJECT_NAMES} more")
+    projects_line = f"- Projects: {len(projects)} active"
+    if project_names:
+        projects_line += f" ({', '.join(project_names)})"
 
-    task_counts: dict[str, int] = {}
-    if projects:
-        counts = (
-            db.query(Task.project, func.count(Task.id))
-            .filter(Task.project.in_([project.id for project in projects]))
-            .group_by(Task.project)
-            .all()
-        )
-        task_counts = {project_id: int(count) for project_id, count in counts}
+    agent_type_counts = dict(
+        db.query(Agent.agent_type, func.count(Agent.id)).group_by(Agent.agent_type).all()
+    )
+    api_count = agent_type_counts.get(AgentType.API.value, 0)
+    cli_count = agent_type_counts.get(AgentType.CLI.value, 0)
+    default_agent = (
+        db.query(Agent.model).filter(Agent.is_default.is_(True)).first()
+    )
+    default_model = (default_agent[0] if default_agent else None) or "none"
+    agents_line = (
+        f"- Agents: {api_count + cli_count} configured "
+        f"({api_count} api / {cli_count} cli; default: {default_model})"
+    )
 
-    lines = ["## Current Context", f"Projects ({len(projects)}):"]
-    for project in projects:
-        lines.append(
-            f"- {project.id}: {project.name} ({project.status}, "
-            f"{task_counts.get(project.id, 0)} tasks)"
-        )
+    active_sessions = (
+        db.query(func.count(SessionModel.id))
+        .filter(SessionModel.status == SessionStatus.ACTIVE.value)
+        .scalar()
+        or 0
+    )
+    sessions_line = f"- Sessions: {active_sessions} active"
+
+    open_status_counts = dict(
+        db.query(Task.status, func.count(Task.id))
+        .filter(Task.status.notin_(["done", "cancelled"]))
+        .group_by(Task.status)
+        .all()
+    )
+    open_tasks = sum(open_status_counts.values())
+    dispatched = open_status_counts.get("dispatched", 0)
+    in_review = open_status_counts.get("in-review", 0)
+    awaiting_approval = (
+        db.query(func.count(Task.id)).filter(Task.awaiting_approval.is_(True)).scalar()
+        or 0
+    )
+    tasks_line = (
+        f"- Tasks: {open_tasks} open ({dispatched} dispatched, {in_review} in-review, "
+        f"{awaiting_approval} awaiting approval)"
+    )
+
+    lines = ["## System State", projects_line, agents_line, sessions_line, tasks_line]
 
     project_id = _scope_project_id(session, db)
     if project_id:

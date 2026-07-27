@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.db.models import ContextLevel, Session as SessionModel, SessionStatus, Task as TaskModel
+from app.graph.context import invalidate_context_snapshot
 from app.schemas.session import Session as SessionSchema, SessionCreate, SessionUpdate
 from app.services.coordinator import ProviderRouter
 
@@ -151,6 +152,7 @@ def create_session(session_in: SessionCreate, db: Session = Depends(get_db)):
     db.add(db_session)
     db.commit()
     db.refresh(db_session)
+    invalidate_context_snapshot(db, project_id=db_session.project_id)
     return db_session
 
 
@@ -193,4 +195,6 @@ def update_session(id: str, session_in: SessionUpdate, db: Session = Depends(get
 
     db.commit()
     db.refresh(db_session)
+    if "status" in update_data:
+        invalidate_context_snapshot(db, project_id=db_session.project_id)
     return db_session
