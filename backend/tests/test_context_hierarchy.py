@@ -167,6 +167,31 @@ def test_old_tool_results_are_pruned_but_decision_fields_survive(db_session):
     assert tools[-1]["content"].startswith('{"task_id"')
 
 
+def test_zero_replay_turns_prunes_every_tool_message(db_session):
+    """TOOL_RESULT_REPLAY_TURNS = 0 means keep the 0 most recent turns full,
+    i.e. prune all of them — not tool_turns[-0:], which is the whole list
+    and would keep everything instead."""
+    project = Project(id="proj-prune-zero", name="Prune Zero Project")
+    session = SessionModel(
+        id="sess-prune-zero", project_id="proj-prune-zero", context_level="project",
+        messages=[
+            {"role": "tool", "name": "update_task", "tool_call_id": f"call-{i}",
+             "turn_id": f"turn-{i}",
+             "content": '{"task_id": "CTV2-095", "verdict": "pass"}',
+             "status": "complete"}
+            for i in range(20)
+        ],
+    )
+    db_session.add_all([project, session])
+    db_session.commit()
+    hierarchy = ContextHierarchy(db_session)
+    hierarchy.tool_result_replay_turns = 0
+
+    tools = [m for m in hierarchy.get_task_context(session) if m["role"] == "tool"]
+    assert len(tools) == 20
+    assert all(t["content"].startswith("[Pruned tool result]") for t in tools)
+
+
 def test_pruned_multi_tool_call_turn_keeps_one_summary_per_tool_message(db_session):
     """A turn with two tool calls must survive pruning as two summaries, each
     carrying its own tool_call_id/name — not collapsed into one per turn_id

@@ -238,7 +238,14 @@ class ContextHierarchy:
                 turn_id = str(message["turn_id"])
                 if turn_id not in tool_turns:
                     tool_turns.append(turn_id)
-        full_turns = set(tool_turns[-self.tool_result_replay_turns:])
+        # tool_turns[-0:] is the whole list, not "nothing" — with N=0 (keep
+        # the 0 most recent turns full) a naive negative slice would keep
+        # every turn instead of pruning all of them.
+        full_turns = (
+            set(tool_turns[-self.tool_result_replay_turns:])
+            if self.tool_result_replay_turns > 0
+            else set()
+        )
 
         replay: list[dict[str, Any]] = []
         for message in raw:

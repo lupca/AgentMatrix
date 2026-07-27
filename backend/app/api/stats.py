@@ -53,24 +53,43 @@ def _usage_totals(rows: list[LLMUsage]) -> dict[str, Any]:
     }
 
 
-def _turn_breakdown(rows: list[LLMUsage]) -> list[dict]:
+def _turn_breakdown(
+    rows: list[LLMUsage], index_rows: list[LLMUsage] | None = None
+) -> list[dict]:
     """Cached vs uncached tokens for each individual call (turn), not summed.
 
     The aggregate totals in ``_usage_totals`` hide whether prompt-caching
     savings are per-turn or a fluke of one huge call; this exposes each row
     in insertion order (per session) so before/after pruning changes can be
     compared turn by turn.
+
+    ``turn_index`` numbers a row by its position among ``index_rows``
+    (defaults to ``rows``), which must be unfiltered by ``operation`` so an
+    operation filter doesn't skip positions and misnumber the turn a row
+    belongs to. Rows with no ``session_id`` are never grouped into one
+    pseudo-session — each gets its own singleton index.
     """
+    index_source = index_rows if index_rows is not None else rows
+
+    def group_key(row: LLMUsage) -> str:
+        return row.session_id if row.session_id else f"__no_session_{row.id}"
+
+    ordered_index = sorted(index_source, key=lambda row: (row.session_id or "", row.id))
+    counters: dict[str, int] = {}
+    turn_index_by_id: dict[int, int] = {}
+    for row in ordered_index:
+        key = group_key(row)
+        counters[key] = counters.get(key, 0) + 1
+        turn_index_by_id[row.id] = counters[key]
+
     ordered = sorted(rows, key=lambda row: (row.session_id or "", row.id))
-    turn_index: dict[str | None, int] = {}
     breakdown = []
     for row in ordered:
-        turn_index[row.session_id] = turn_index.get(row.session_id, 0) + 1
         input_tokens = row.input_tokens or 0
         cached_tokens = row.cached_tokens or 0
         breakdown.append(
             {
-                "turn_index": turn_index[row.session_id],
+                "turn_index": turn_index_by_id.get(row.id, 1),
                 "session_id": row.session_id,
                 "task_id": row.task_id,
                 "operation": row.operation,
@@ -185,6 +204,20 @@ def get_token_stats(
 
     rows = _usage_query(db, session_id, task_id, operation).all()
     totals = _usage_totals(rows)
+
+    # by_turn is per-row (unbounded by the grouping every other breakdown
+    # applies), so it is only computed when scoped to a single session/task —
+    # otherwise an unfiltered dashboard load would serialize the entire
+    # ledger, one entry per LLM call ever made.
+    by_turn: list[dict] = []
+    if session_id or task_id:
+        index_rows = (
+            _usage_query(db, session_id, task_id, operation=None).all()
+            if operation
+            else rows
+        )
+        by_turn = _turn_breakdown(rows, index_rows)
+
     return {
         "total_calls": totals["calls"],
         "total_input_tokens": totals["input_tokens"],
@@ -200,7 +233,7 @@ def get_token_stats(
         "by_operation": _usage_breakdown(rows, "operation", "operation"),
         "by_model": _usage_breakdown(rows, "model", "model"),
         "by_provider": _usage_breakdown(rows, "provider", "provider"),
-        "by_turn": _turn_breakdown(rows),
+        "by_turn": by_turn,
     }
 
 
