@@ -536,7 +536,12 @@ class CommandRouter:
         )
         task.mode = TaskOrchestrationService(self.db).mode_for_task(task)
         self.db.add(task)
-        self.db.commit()
+        project_row.next_task_seq = seq + 1
+        try:
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
 
         if depends_on:
             service = TaskOrchestrationService(self.db)
