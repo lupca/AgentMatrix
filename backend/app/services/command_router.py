@@ -16,7 +16,13 @@ from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
 )
-from app.services.tool_registry import TOOL_REGISTRY, dump_registry, resolve_tool_name
+from app.services.tool_registry import (
+    DEFERRED_GROUPS,
+    TOOL_REGISTRY,
+    dump_registry,
+    get_group_tool_definitions,
+    resolve_tool_name,
+)
 
 # query_db (ADR-001 §D2): entity + filter-field whitelist, and a compact
 # serializer per entity so responses stay small and never leak secrets
@@ -240,6 +246,11 @@ class CommandRouter:
             command_args = task_id
         elif canonical_name == 'compact_context':
             command_args = ''
+        elif canonical_name == 'load_tools':
+            group = str(args.get('group', '')).strip()
+            if not group:
+                return {'error': 'group is required'}
+            command_args = group
         else:
             return {'error': f'Unknown tool: {tool_name}'}
 
@@ -247,6 +258,22 @@ class CommandRouter:
     
     async def _handle_show_help(self, args: str, session_id: str) -> dict:
         return {'commands': dump_registry() + [HELP_COMMAND]}
+
+    async def _handle_load_tools(self, args: str, session_id: str) -> dict:
+        group = args.strip()
+        definitions = get_group_tool_definitions(group)
+        if definitions is None:
+            return {
+                'error': (
+                    f"Unknown tool group '{group}'. Valid groups: "
+                    f"{', '.join(DEFERRED_GROUPS)}"
+                )
+            }
+        return {
+            'status': 'success',
+            'group': group,
+            'loaded': [tool['name'] for tool in definitions],
+        }
 
     async def _handle_query_db(self, args: str, session_id: str) -> dict:
         parts = args.strip().split()

@@ -32,6 +32,7 @@ from app.services.cli_dispatcher import (
 from app.services.context_hierarchy import ContextHierarchy
 from app.services.crypto import decrypt_api_key
 from app.services.command_router import CommandRouter
+from app.services.tool_registry import get_group_tool_definitions, get_spec, resolve_tool_name
 from app.graph.context import invalidate_context_snapshot
 from app.services.providers import CoordinatorProvider, ProviderResponse
 from app.services.providers.openai_adapter import OpenAIAdapter
@@ -480,19 +481,36 @@ class CoordinatorService:
         self,
         tool_calls: list[dict[str, Any]],
         db_session: SessionModel,
+        active_tool_names: set[str],
     ) -> list[dict[str, Any]]:
-        """Execute normalized adapter tool calls and return OpenAI messages."""
+        """Execute normalized adapter tool calls and return OpenAI messages.
+
+        Deferred tools not yet loaded into ``active_tool_names`` for this
+        turn (via ``load_tools``) are rejected with a guiding error instead
+        of executed, so a model that calls one before loading its group
+        gets a recoverable message rather than a crashed loop.
+        """
 
         router = CommandRouter(self.db)
         results: list[dict[str, Any]] = []
         for position, tool_call in enumerate(tool_calls):
             name = str(tool_call.get("name", ""))
             call_id = str(tool_call.get("id") or f"tool-call-{position}")
-            result = await router.execute_tool(
-                name,
-                self._tool_arguments(tool_call),
-                db_session.id,
-            )
+            canonical_name = resolve_tool_name(name)
+            spec = get_spec(canonical_name)
+            if spec is not None and spec.tier == "deferred" and canonical_name not in active_tool_names:
+                result: dict[str, Any] = {
+                    "error": (
+                        f"Tool '{name}' is not loaded for this turn. Call "
+                        f"load_tools(group=\"{spec.group}\") first, then retry."
+                    )
+                }
+            else:
+                result = await router.execute_tool(
+                    name,
+                    self._tool_arguments(tool_call),
+                    db_session.id,
+                )
             results.append(
                 {
                     "role": "tool",
@@ -502,6 +520,29 @@ class CoordinatorService:
                 }
             )
         return results
+
+    def _merge_loaded_tools(
+        self,
+        active_tools: list[dict[str, Any]],
+        active_tool_names: set[str],
+        tool_calls: list[dict[str, Any]],
+    ) -> None:
+        """Fold groups requested via ``load_tools`` into this turn's active set.
+
+        Mutates ``active_tools``/``active_tool_names`` in place so a
+        ``load_tools`` call and a call to one of its group's tools can land
+        in the same tool_calls batch, and so the next loop iteration's
+        request carries the expanded set.
+        """
+
+        for tool_call in tool_calls:
+            if resolve_tool_name(str(tool_call.get("name", ""))) != "load_tools":
+                continue
+            group = str(self._tool_arguments(tool_call).get("group", "")).strip()
+            for schema in get_group_tool_definitions(group) or []:
+                if schema["name"] not in active_tool_names:
+                    active_tools.append(schema)
+                    active_tool_names.add(schema["name"])
 
     def _persist_tool_exchange(
         self,
@@ -741,6 +782,8 @@ class CoordinatorService:
             prompt = self.format_prompt(canonical)
             started = perf_counter()
             tool_activity = False
+            active_tools = ctx.get_tool_definitions()
+            active_tool_names = {tool["name"] for tool in active_tools}
             for attempt in range(self.max_retries + 1):
                 try:
                     if adapter is not None:
@@ -751,7 +794,7 @@ class CoordinatorService:
                                 False,
                                 max_tokens=self.max_output_tokens,
                                 temperature=temperature,
-                                tools=ctx.get_tool_definitions(),
+                                tools=active_tools,
                             )
                             if not response.tool_calls:
                                 return self._persist_success(
@@ -769,9 +812,13 @@ class CoordinatorService:
                                     "tool_calls": response.tool_calls,
                                 }
                             )
+                            self._merge_loaded_tools(
+                                active_tools, active_tool_names, response.tool_calls
+                            )
                             tool_results = await self._execute_tools(
                                 response.tool_calls,
                                 db_session,
+                                active_tool_names,
                             )
                             canonical.extend(tool_results)
                             self._persist_tool_exchange(
@@ -850,6 +897,8 @@ class CoordinatorService:
             started = perf_counter()
             partial = ""
             tool_activity = False
+            active_tools = ctx.get_tool_definitions()
+            active_tool_names = {tool["name"] for tool in active_tools}
             for attempt in range(self.max_retries + 1):
                 response: ProviderResponse | None = None
                 try:
@@ -861,7 +910,7 @@ class CoordinatorService:
                                 True,
                                 max_tokens=self.max_output_tokens,
                                 temperature=temperature,
-                                tools=ctx.get_tool_definitions(),
+                                tools=active_tools,
                             )
                             if response.chunks is None:
                                 if response.text:
@@ -883,6 +932,9 @@ class CoordinatorService:
                                     "tool_calls": response.tool_calls,
                                 }
                             )
+                            self._merge_loaded_tools(
+                                active_tools, active_tool_names, response.tool_calls
+                            )
                             for position, tool_call in enumerate(response.tool_calls):
                                 yield {
                                     "type": "tool_call",
@@ -895,6 +947,7 @@ class CoordinatorService:
                             tool_results = await self._execute_tools(
                                 response.tool_calls,
                                 db_session,
+                                active_tool_names,
                             )
                             canonical.extend(tool_results)
                             self._persist_tool_exchange(

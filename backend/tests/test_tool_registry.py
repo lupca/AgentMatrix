@@ -4,11 +4,12 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
 from app.services.command_router import COMMANDS, CommandRouter
-from app.services.tool_definitions import TOOL_SEARCH_TOOL, get_tool_definitions
+from app.services.tool_definitions import get_tool_definitions
 from app.services.tool_registry import (
     TOOL_REGISTRY,
     dump_registry,
     get_by_slash_alias,
+    get_group_tool_definitions,
     resolve_tool_name,
     to_openai_tools,
 )
@@ -24,8 +25,8 @@ def db_session():
     session.close()
 
 
-def test_registry_has_eight_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 8
+def test_registry_has_nine_tools_with_unique_names():
+    assert len(TOOL_REGISTRY) == 9
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
@@ -35,6 +36,7 @@ def test_registry_has_eight_tools_with_unique_names():
         'approve_gate',
         'cancel_task',
         'compact_context',
+        'load_tools',
     ]
     for name, spec in TOOL_REGISTRY.items():
         assert spec.name == name
@@ -76,31 +78,36 @@ def test_to_openai_tools_projection_shape():
         }
 
 
-def test_get_tool_definitions_is_registry_projection():
+def test_get_tool_definitions_is_baseline_eager_set_only():
     tools = get_tool_definitions()
-    names_eager = {t['name'] for t in tools if not t.get('defer_loading')}
-    names_deferred = {t['name'] for t in tools if t.get('defer_loading')}
+    names = {t['name'] for t in tools}
 
-    assert 'create_task' in names_eager
-    assert 'get_status' in names_eager
-    assert 'query_db' in names_eager
-    assert 'pm_create_task' not in names_eager
+    assert names == {'create_task', 'get_status', 'query_db', 'load_tools'}
+    assert 'pm_create_task' not in names
+    assert 'dispatch_task' not in names
+    assert not any('defer_loading' in t for t in tools)
 
-    assert names_deferred == {
+
+def test_get_group_tool_definitions_returns_deferred_tools_by_group():
+    task_lifecycle = get_group_tool_definitions('task_lifecycle')
+    assert {t['name'] for t in task_lifecycle} == {
         'dispatch_task',
         'record_verdict',
         'approve_gate',
         'cancel_task',
-        'compact_context',
     }
 
-    search_tools = [t for t in tools if t['name'] == TOOL_SEARCH_TOOL['name']]
-    assert len(search_tools) == 1
-    assert not search_tools[0].get('defer_loading')
+    session = get_group_tool_definitions('session')
+    assert {t['name'] for t in session} == {'compact_context'}
+
+    assert get_group_tool_definitions('admin') == []
+    assert get_group_tool_definitions('nonexistent') is None
 
 
 def test_command_router_commands_derived_from_registry():
     for spec in TOOL_REGISTRY.values():
+        if spec.slash_alias is None:
+            continue
         assert COMMANDS[spec.slash_alias] == spec.handler
     assert COMMANDS['/help'] == 'show_help'
 

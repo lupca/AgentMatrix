@@ -34,6 +34,12 @@ class ToolSpec:
     group: str
 
 
+# Deferred-tool groups loadable via the ``load_tools`` meta-tool (ADR-001
+# §D3). "admin" has no members yet (Phase 2c) but is listed so the schema
+# enum and system-prompt hint stay accurate ahead of that work.
+DEFERRED_GROUPS: tuple[str, ...] = ("task_lifecycle", "admin", "session")
+
+
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     spec.name: spec
     for spec in [
@@ -201,6 +207,33 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             slash_alias="/compact",
             group="session",
         ),
+        ToolSpec(
+            name="load_tools",
+            description=(
+                "Load additional tool schemas for the rest of this turn. Call "
+                "this before using a tool that isn't in the baseline set. "
+                "Groups: task_lifecycle (dispatch_task, record_verdict, "
+                "approve_gate, cancel_task), admin (project/agent/knowledge "
+                "management), session (compact_context)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "group": {
+                        "type": "string",
+                        "enum": list(DEFERRED_GROUPS),
+                        "description": "Tool group to load.",
+                    },
+                },
+                "required": ["group"],
+            },
+            handler="load_tools",
+            tier="eager",
+            permission="read",
+            entity="meta",
+            slash_alias=None,
+            group="meta",
+        ),
     ]
 }
 
@@ -241,6 +274,23 @@ def to_openai_tools(specs: list[ToolSpec]) -> list[dict[str, Any]]:
         }
         for spec in specs
     ]
+
+
+def get_group_tool_definitions(group: str) -> list[dict[str, Any]] | None:
+    """OpenAI schemas for the deferred tools in ``group`` (ADR-001 §D3).
+
+    Returns ``None`` for a group name outside :data:`DEFERRED_GROUPS`. An
+    empty list is a valid result for a group with no tools yet.
+    """
+
+    if group not in DEFERRED_GROUPS:
+        return None
+    deferred = [
+        spec
+        for spec in TOOL_REGISTRY.values()
+        if spec.tier == "deferred" and spec.group == group
+    ]
+    return to_openai_tools(deferred)
 
 
 def dump_registry() -> list[dict[str, Any]]:

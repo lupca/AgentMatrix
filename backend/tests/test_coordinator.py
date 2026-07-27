@@ -56,6 +56,42 @@ class _FakeProvider:
 
 
 @dataclass
+class _ScriptedToolProvider:
+    """Fake provider that plays back one scripted response per ``complete``
+    call and records the ``tools`` kwarg it was invoked with, so tests can
+    assert on the active tool set at each tool-loop iteration."""
+
+    name: str
+    script: list[dict]
+    calls: list[dict] = field(default_factory=list)
+
+    async def complete(
+        self,
+        messages,
+        model,
+        stream=False,
+        *,
+        max_tokens=2048,
+        temperature=0.7,
+        tools=None,
+    ):
+        # `tools` is the coordinator's mutable active-set list; snapshot it
+        # so later merges (append-in-place) don't retroactively change what
+        # earlier recorded calls appear to have seen.
+        self.calls.append({"tools": list(tools) if tools is not None else None, "messages": messages})
+        step = self.script.pop(0)
+        return ProviderResponse(
+            provider=self.name,
+            model=model,
+            text=step.get("text", ""),
+            usage=UsageCounts(input_tokens=10, output_tokens=5, cached_tokens=0),
+            request_id=f"{self.name}-{len(self.calls)}",
+            stop_reason="tool_calls" if step.get("tool_calls") else "stop",
+            tool_calls=step.get("tool_calls"),
+        )
+
+
+@dataclass
 class _FakeCLIDispatcher:
     """Minimal CLI dispatcher double for exercising the CLI-routed path."""
 
@@ -198,6 +234,121 @@ async def test_transient_failure_retries_without_duplicate_user_message(db_sessi
     assert result.content == "recovered"
     assert len(openai.calls) == 2
     assert [m["role"] for m in session.messages] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_load_tools_expands_active_set_for_turn_then_resets(db_session):
+    script_turn1 = [
+        {"tool_calls": [{"id": "c1", "name": "load_tools", "input": {"group": "task_lifecycle"}}]},
+        {"tool_calls": [{"id": "c2", "name": "dispatch_task", "input": {"task_id": "NOPE-1"}}]},
+        {"text": "Done."},
+    ]
+    script_turn2 = [{"text": "Second turn, baseline only."}]
+    provider = _ScriptedToolProvider("openai", script_turn1 + script_turn2)
+    service = _service(db_session, provider)
+    session = Session(id="session-load-tools", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    result = await service.complete_turn(
+        session,
+        "please dispatch NOPE-1",
+        model="gpt-4o",
+        idempotency_key="turn-1",
+    )
+    assert result.content == "Done."
+
+    baseline_names = {t["name"] for t in provider.calls[0]["tools"]}
+    assert baseline_names == {"create_task", "get_status", "query_db", "load_tools"}
+
+    expanded_names = {t["name"] for t in provider.calls[1]["tools"]}
+    assert "dispatch_task" in expanded_names
+    assert expanded_names >= baseline_names
+
+    # dispatch_task reached the handler (not blocked by the not-loaded gate);
+    # it errors because the task doesn't exist, not because it wasn't loaded.
+    tool_messages = [m for m in session.messages if m.get("name") == "dispatch_task"]
+    assert len(tool_messages) == 1
+    assert "not loaded" not in tool_messages[0]["content"]
+    assert "not found" in tool_messages[0]["content"]
+
+    await service.complete_turn(
+        session,
+        "second turn",
+        model="gpt-4o",
+        idempotency_key="turn-2",
+    )
+    turn2_names = {t["name"] for t in provider.calls[-1]["tools"]}
+    assert turn2_names == baseline_names
+
+
+@pytest.mark.asyncio
+async def test_deferred_tool_without_load_tools_returns_guidance_not_crash(db_session):
+    script = [
+        {"tool_calls": [{"id": "c1", "name": "dispatch_task", "input": {"task_id": "X-1"}}]},
+        {"text": "Understood, let me load the right tools first."},
+    ]
+    provider = _ScriptedToolProvider("openai", script)
+    service = _service(db_session, provider)
+    session = Session(id="session-blocked", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    result = await service.complete_turn(
+        session,
+        "dispatch X-1",
+        model="gpt-4o",
+        idempotency_key="turn-1",
+    )
+
+    assert result.content == "Understood, let me load the right tools first."
+    tool_messages = [m for m in session.messages if m.get("name") == "dispatch_task"]
+    assert len(tool_messages) == 1
+    assert "load_tools" in tool_messages[0]["content"]
+    assert "not loaded" in tool_messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_load_tools_expands_active_set_then_resets(db_session):
+    script_turn1 = [
+        {"tool_calls": [{"id": "c1", "name": "load_tools", "input": {"group": "task_lifecycle"}}]},
+        {"tool_calls": [{"id": "c2", "name": "dispatch_task", "input": {"task_id": "NOPE-1"}}]},
+        {"text": "Done."},
+    ]
+    script_turn2 = [{"text": "Second turn, baseline only."}]
+    provider = _ScriptedToolProvider("openai", script_turn1 + script_turn2)
+    service = _service(db_session, provider)
+    session = Session(id="session-stream-load-tools", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    events = [
+        event
+        async for event in service.stream_turn(
+            session,
+            "please dispatch NOPE-1",
+            model="gpt-4o",
+            idempotency_key="turn-1",
+        )
+    ]
+    assert "".join(e for e in events if isinstance(e, str)) == "Done."
+
+    baseline_names = {t["name"] for t in provider.calls[0]["tools"]}
+    assert baseline_names == {"create_task", "get_status", "query_db", "load_tools"}
+
+    expanded_names = {t["name"] for t in provider.calls[1]["tools"]}
+    assert "dispatch_task" in expanded_names
+    assert expanded_names >= baseline_names
+
+    async for _ in service.stream_turn(
+        session,
+        "second turn",
+        model="gpt-4o",
+        idempotency_key="turn-2",
+    ):
+        pass
+    turn2_names = {t["name"] for t in provider.calls[-1]["tools"]}
+    assert turn2_names == baseline_names
 
 
 def test_context_budget_keeps_newest_turns_and_system_prefix(db_session):

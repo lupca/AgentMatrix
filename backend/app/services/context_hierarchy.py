@@ -67,11 +67,11 @@ class ContextHierarchy:
         return [dict(m) for m in self._global_context]
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
-        """Tool schemas that belong to the global context, alongside the system prompt.
+        """Baseline (eager) tool schemas sent alongside the system prompt.
 
-        Rarely-used tools are marked ``defer_loading`` (see
-        ``app.services.tool_definitions``) so their schemas are appended on
-        demand instead of always occupying context.
+        Rarely-used tools are loaded on demand via the ``load_tools``
+        meta-tool inside the coordinator's tool loop instead of always
+        occupying context (see ``app.services.tool_definitions``, ADR-001 §D3).
         """
         return _tool_definitions.get_tool_definitions()
 

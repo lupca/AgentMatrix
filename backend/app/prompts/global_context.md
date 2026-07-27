@@ -52,10 +52,12 @@ Tool schemas are supplied separately. Use the declared tool names exactly:
 - `compact_context`: reduce an overlong session when context compaction is
   needed.
 
-The deferred tools may be discovered through the supplied tool-search
-mechanism. Treat tool results as authoritative and continue the conversation
-after tools finish. Do not expose internal tool-call JSON unless it helps the
-user understand the result.
+More tools via load_tools(group): task_lifecycle, admin, session. Call
+`load_tools` with the relevant group before using a tool not listed above;
+its schemas are then available for the rest of this turn. Treat tool results
+as authoritative and continue the conversation after tools finish. Do not
+expose internal tool-call JSON unless it helps the user understand the
+result.
 
 ## Response format
 

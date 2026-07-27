@@ -44,7 +44,8 @@ async def test_command_router_execute():
     res = await router.execute("show_help", "", "session-1")
     assert "commands" in res
     assert res["commands"] == dump_registry() + [HELP_COMMAND]
-    assert {c["slash_alias"] for c in res["commands"]} == set(COMMANDS.keys())
+    aliases = {c["slash_alias"] for c in res["commands"]} - {None}
+    assert aliases == set(COMMANDS.keys())
 
     res_unknown = await router.execute("non_existent_command", "", "session-1")
     assert "error" in res_unknown

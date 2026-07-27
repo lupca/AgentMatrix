@@ -218,23 +218,14 @@ def test_context_compaction(db_session):
     assert "Context Compaction" in session.messages[0]["content"]
 
 
-def test_get_tool_definitions_marks_rare_tools_deferred(db_session):
+def test_get_tool_definitions_returns_only_baseline_eager_tools(db_session):
     hierarchy = ContextHierarchy(db_session)
     tools = hierarchy.get_tool_definitions()
+    names = {t["name"] for t in tools}
 
-    names_eager = {t["name"] for t in tools if not t.get("defer_loading")}
-    names_deferred = {t["name"] for t in tools if t.get("defer_loading")}
-
-    assert "create_task" in names_eager
-    assert "get_status" in names_eager
-    assert "dispatch_task" in names_deferred
-    assert "compact_context" in names_deferred
-
-    # The tool-search tool itself must never be deferred, and must be present
-    # whenever any tool is deferred.
-    search_tools = [t for t in tools if t["name"] == "tool_search_tool_regex"]
-    assert len(search_tools) == 1
-    assert not search_tools[0].get("defer_loading")
+    assert names == {"create_task", "get_status", "query_db", "load_tools"}
+    assert "dispatch_task" not in names
+    assert "compact_context" not in names
 
 
 def test_project_context_auto_memory_from_recent_tasks(db_session):
