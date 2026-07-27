@@ -68,6 +68,71 @@ def test_snapshot_includes_only_five_recent_tasks_for_project_scope(db_session):
     assert snapshot.count("- ALPHA-") == 5
 
 
+def test_snapshot_lists_recent_tasks_across_all_projects_for_global_scope(db_session):
+    """CTV2-092 AC: a global session (context_level='global', no project_id)
+    used to resolve to project_id=None and skip the recent-tasks block
+    entirely, leaving the most-used chat context with no task visibility."""
+    db_session.add_all(
+        [
+            Project(id="alpha", name="Alpha", status="active"),
+            Project(id="beta", name="Beta", status="active"),
+            Task(
+                id="ALPHA-001",
+                project="alpha",
+                title="Alpha task",
+                status="todo",
+                updated_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+            ),
+            Task(
+                id="BETA-001",
+                project="beta",
+                title="Beta task",
+                status="dispatched",
+                updated_at=datetime(2026, 7, 2, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+    db_session.commit()
+    session = Session(id="global-recent", context_level="global", messages=[])
+    db_session.add(session)
+    db_session.commit()
+
+    snapshot = build_context_snapshot(session, db_session)
+
+    assert "Recent tasks (all projects):" in snapshot
+    assert "BETA-001: Beta task (dispatched) [beta]" in snapshot
+    assert "ALPHA-001: Alpha task (todo) [alpha]" in snapshot
+
+
+def test_snapshot_project_scope_still_excludes_other_projects(db_session):
+    """Regression guard: adding cross-project listing for global sessions
+    must not leak into project-scoped sessions."""
+    db_session.add_all(
+        [
+            Project(id="alpha", name="Alpha", status="active"),
+            Project(id="beta", name="Beta", status="active"),
+            Task(id="ALPHA-001", project="alpha", title="Alpha task", status="todo"),
+            Task(id="BETA-001", project="beta", title="Beta task", status="todo"),
+        ]
+    )
+    db_session.commit()
+    session = Session(
+        id="project-scope-regression",
+        project_id="alpha",
+        context_level="project",
+        messages=[],
+    )
+    db_session.add(session)
+    db_session.commit()
+
+    snapshot = build_context_snapshot(session, db_session)
+
+    assert "Recent tasks in alpha:" in snapshot
+    assert "ALPHA-001" in snapshot
+    assert "BETA-001" not in snapshot
+    assert "all projects" not in snapshot
+
+
 def test_empty_snapshot_is_stable_and_human_readable(db_session):
     session = Session(id="empty-snapshot", messages=[])
     db_session.add(session)

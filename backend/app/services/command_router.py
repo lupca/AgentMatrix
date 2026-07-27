@@ -382,22 +382,57 @@ class CommandRouter:
         }
 
     async def _handle_create_task(self, args: str, session_id: str) -> dict:
-        import uuid
         from datetime import datetime
-        
+        from sqlalchemy import update as sa_update
+
         # Parse args: 'task title --project name'
-        project = 'default'
+        project = None
         title = args
         if '--project' in args:
             parts = args.split('--project')
             title = parts[0].strip()
-            project = parts[1].strip().split()[0] if parts[1].strip() else 'default'
-        
-        # Generate task ID
-        prefix = project.upper().replace('-', '')[:4]
-        count = self.db.query(Task).filter(Task.project == project).count() + 1
-        task_id = f'{prefix}-{count:03d}'
-        
+            explicit_project = parts[1].strip().split()[0] if parts[1].strip() else ''
+            project = explicit_project or None
+
+        if not project:
+            session = (
+                self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
+            )
+            if session and session.project_id:
+                project = session.project_id
+
+        if not project:
+            return {
+                'action': 'error',
+                'error': 'project_required',
+                'message': (
+                    'Cannot determine project for this task. Pass --project <id> '
+                    'or use a project-scoped session.'
+                ),
+            }
+
+        # Atomic per-project counter: UPDATE ... SET seq = seq + 1 is race-safe
+        # under concurrent callers on both SQLite and Postgres, unlike a
+        # read-then-write COUNT(*) (which both races and reuses IDs after a
+        # task is deleted).
+        update_result = self.db.execute(
+            sa_update(Project)
+            .where(Project.id == project)
+            .values(next_task_seq=Project.next_task_seq + 1)
+        )
+        if update_result.rowcount == 0:
+            self.db.rollback()
+            return {
+                'action': 'error',
+                'error': 'unknown_project',
+                'message': f"Project '{project}' does not exist.",
+            }
+
+        project_row = self.db.query(Project).filter(Project.id == project).first()
+        seq = project_row.next_task_seq
+        prefix = (project_row.task_prefix or project).upper().replace('-', '')[:4]
+        task_id = f'{prefix}-{seq:03d}'
+
         task = Task(
             id=task_id,
             title=title,
@@ -409,7 +444,7 @@ class CommandRouter:
         )
         self.db.add(task)
         self.db.commit()
-        
+
         return {'action': 'created', 'task_id': task.id, 'title': title, 'project': project}
 
     async def _handle_dispatch_task(self, args: str, session_id: str) -> dict:

@@ -72,10 +72,12 @@ def build_context_snapshot(
     of how many projects/agents/sessions/tasks exist. Long-tail reads go
     through the ``query_db`` tool instead of growing this snapshot.
 
-    When the session has a project scope, the five most recently updated
-    tasks in that project are appended as well.  ``db`` is optional for
-    attached ORM instances, which keeps this function convenient in unit
-    tests while allowing callers to pass an explicit database session.
+    The five most recently updated tasks are appended as well: scoped to
+    the session's project when it has one, or across all projects for a
+    global session (so the busiest chat context isn't left with an empty
+    task list).  ``db`` is optional for attached ORM instances, which keeps
+    this function convenient in unit tests while allowing callers to pass
+    an explicit database session.
     """
 
     db = _database_for(session, db)
@@ -138,18 +140,21 @@ def build_context_snapshot(
     lines = ["## System State", projects_line, agents_line, sessions_line, tasks_line]
 
     project_id = _scope_project_id(session, db)
+    tasks_query = db.query(Task)
     if project_id:
-        recent_tasks = (
-            db.query(Task)
-            .filter(Task.project == project_id)
-            .order_by(Task.updated_at.desc(), Task.id.desc())
-            .limit(5)
-            .all()
+        tasks_query = tasks_query.filter(Task.project == project_id)
+    recent_tasks = (
+        tasks_query.order_by(Task.updated_at.desc(), Task.id.desc()).limit(5).all()
+    )
+    if recent_tasks:
+        header = (
+            f"Recent tasks in {project_id}:" if project_id else "Recent tasks (all projects):"
         )
-        lines.append(f"\nRecent tasks in {project_id}:")
+        lines.append(f"\n{header}")
         for task in recent_tasks:
+            suffix = "" if project_id else f" [{task.project}]"
             lines.append(
-                f"- {task.id}: {_clean_title(task.title)} ({task.status})"
+                f"- {task.id}: {_clean_title(task.title)} ({task.status}){suffix}"
             )
 
     return "\n".join(lines)

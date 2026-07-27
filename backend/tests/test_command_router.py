@@ -96,6 +96,145 @@ async def test_command_router_get_status(db_session):
 
 
 @pytest.mark.asyncio
+async def test_create_task_uses_explicit_project_and_prefix(db_session):
+    """CTV2-092 AC: no more hardcoded project='default'; explicit --project
+    is used, and the ID is derived from Project.task_prefix + a counter."""
+    from app.db.models import Project
+
+    db_session.add(Project(id="alpha", name="Alpha", task_prefix="ALPH"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    res = await router.execute("create_task", "Do the thing --project alpha", "session-1")
+
+    assert res["action"] == "created"
+    assert res["project"] == "alpha"
+    assert res["task_id"] == "ALPH-001"
+
+
+@pytest.mark.asyncio
+async def test_create_task_falls_back_to_session_project_scope(db_session):
+    """create_task with no --project must resolve from the session's
+    project scope instead of writing into a non-existent 'default' project."""
+    from app.db.models import Project, Session as SessionModel
+
+    db_session.add(Project(id="alpha", name="Alpha"))
+    db_session.add(
+        SessionModel(id="scoped-session", project_id="alpha", context_level="project")
+    )
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    res = await router.execute("create_task", "Do the thing", "scoped-session")
+
+    assert res["action"] == "created"
+    assert res["project"] == "alpha"
+
+
+@pytest.mark.asyncio
+async def test_create_task_without_resolvable_project_asks_user_instead_of_default(
+    db_session,
+):
+    """A global session with no --project must not silently write into a
+    'default' project (which doesn't exist and used to raise IntegrityError)."""
+    router = CommandRouter(db_session)
+    res = await router.execute("create_task", "Do the thing", "global-session-no-project")
+
+    assert res["action"] == "error"
+    assert res["error"] == "project_required"
+
+    from app.db.models import Task
+
+    assert db_session.query(Task).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_create_task_unknown_project_returns_clear_error(db_session):
+    router = CommandRouter(db_session)
+    res = await router.execute(
+        "create_task", "Do the thing --project ghost", "session-1"
+    )
+
+    assert res["action"] == "error"
+    assert res["error"] == "unknown_project"
+
+
+def test_create_task_concurrent_ids_are_unique_and_never_reused(tmp_path):
+    """AC: 20 concurrent create_task calls against the same project must
+    yield 20 unique IDs, and a COUNT(*)-based scheme's ID-reuse-after-delete
+    bug must not resurface now that generation uses a persistent counter."""
+    import asyncio
+    import threading
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.base import Base
+    from app.db.models import Project, Task
+
+    db_path = tmp_path / "task_ids.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}", connect_args={"timeout": 30, "check_same_thread": False}
+    )
+    Base.metadata.create_all(engine)
+    SessionFactory = sessionmaker(bind=engine)
+
+    setup = SessionFactory()
+    setup.add(Project(id="race", name="Race Project", task_prefix="RACE"))
+    setup.commit()
+    setup.close()
+
+    # Create then delete a task first: the counter must not reuse "RACE-001"
+    # for anything created afterwards, unlike the old COUNT(*) scheme.
+    seed_session = SessionFactory()
+    seed_result = asyncio.run(
+        CommandRouter(seed_session).execute(
+            "create_task", "seed --project race", "seed-session"
+        )
+    )
+    assert seed_result["task_id"] == "RACE-001"
+    seed_session.query(Task).filter(Task.id == "RACE-001").delete()
+    seed_session.commit()
+    seed_session.close()
+
+    barrier = threading.Barrier(20)
+    results = []
+    results_lock = threading.Lock()
+
+    def attempt(index):
+        session = SessionFactory()
+        router = CommandRouter(session)
+        try:
+            barrier.wait(timeout=5)
+            result = asyncio.run(
+                router.execute(
+                    "create_task", f"Task {index} --project race", f"session-{index}"
+                )
+            )
+            with results_lock:
+                results.append(result)
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=attempt, args=(i,)) for i in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    task_ids = [r["task_id"] for r in results if r.get("action") == "created"]
+    assert len(task_ids) == 20
+    assert len(set(task_ids)) == 20
+    assert "RACE-001" not in task_ids
+
+    verify = SessionFactory()
+    try:
+        assert verify.query(Task).filter(Task.project == "race").count() == 20
+    finally:
+        verify.close()
+
+
+@pytest.mark.asyncio
 async def test_command_router_persists_run_before_enqueueing(db_session):
     from app.db.models import Agent, AgentRun, Project, Task
 

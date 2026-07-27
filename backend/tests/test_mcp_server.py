@@ -14,7 +14,7 @@ import pytest
 import app.mcp_server as mcp_server_module
 from app.core.config import settings
 from app.db.base import get_db
-from app.db.models import Task
+from app.db.models import Project, Task
 from app.main import app
 from app.services.command_router import CommandRouter
 from app.services.tool_registry import TOOL_REGISTRY, get_mcp_tool_specs
@@ -144,6 +144,9 @@ def asgi_mcp_server(db_session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_mcp_create_task_matches_api_mode_execute_tool(db_session, asgi_mcp_server):
+    db_session.add(Project(id="parity", name="Parity"))
+    db_session.commit()
+
     api_result = await CommandRouter(db_session).execute_tool(
         "create_task",
         {"title": "Via API mode", "project": "parity"},
@@ -170,6 +173,9 @@ async def test_mcp_create_task_matches_api_mode_execute_tool(db_session, asgi_mc
 
 @pytest.mark.asyncio
 async def test_mcp_get_status_matches_api_mode_for_same_task(db_session, asgi_mcp_server):
+    db_session.add(Project(id="parity", name="Parity"))
+    db_session.commit()
+
     created = await CommandRouter(db_session).execute_tool(
         "create_task", {"title": "Lookup me", "project": "parity"}, "api-session"
     )
@@ -186,6 +192,9 @@ async def test_mcp_get_status_matches_api_mode_for_same_task(db_session, asgi_mc
 @pytest.mark.asyncio
 async def test_mcp_tool_call_cannot_bypass_four_eyes_gate(db_session, asgi_mcp_server):
     """Server-side gate enforcement holds regardless of the entry point."""
+
+    db_session.add(Project(id="parity", name="Parity"))
+    db_session.commit()
 
     created = await CommandRouter(db_session).execute_tool(
         "create_task", {"title": "Gate check", "project": "parity"}, "api-session"
