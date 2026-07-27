@@ -370,14 +370,18 @@ class CoordinatorService:
                 f"No API agent is configured for model '{requested_model}'."
             )
 
+        # CLI agents may have provider=None in legacy data; match by model and
+        # inferred provider (prefer explicit match, fallback to None).
+        from sqlalchemy import or_
+
         agent = (
             self.db.query(AgentModel)
             .filter(
                 AgentModel.model == requested_model,
-                AgentModel.provider == provider,
+                or_(AgentModel.provider == provider, AgentModel.provider.is_(None)),
                 AgentModel.agent_type == "cli",
             )
-            .order_by(AgentModel.is_default.desc(), AgentModel.id)
+            .order_by(AgentModel.provider.desc(), AgentModel.is_default.desc(), AgentModel.id)
             .first()
         )
         if agent is not None:
@@ -938,6 +942,13 @@ class CoordinatorService:
                                     tool_iterations=iteration,
                                 )
 
+                            # Track tool call responses separately (final response tracked in _persist_success)
+                            self._record_usage(
+                                db_session,
+                                response,
+                                latency_ms=round((perf_counter() - started) * 1000),
+                            )
+
                             tool_activity = True
 
                             duplicate_call_ids: set[str] = set()
@@ -1151,6 +1162,13 @@ class CoordinatorService:
 
                             if not response.tool_calls:
                                 break
+
+                            # Track tool call responses (final response tracked after loop)
+                            self._record_usage(
+                                db_session,
+                                response,
+                                latency_ms=round((perf_counter() - started) * 1000),
+                            )
 
                             tool_activity = True
 
