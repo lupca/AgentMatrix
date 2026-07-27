@@ -167,7 +167,7 @@ def _publish(run_id: str, payload: dict) -> None:
     max_retries=3,
     min_backoff=30_000,
     max_backoff=300_000,
-    time_limit=14_400_000,
+    time_limit=900_000,
     notify_shutdown=True,
 )
 def run_agent(
@@ -175,7 +175,7 @@ def run_agent(
     task_id: str,
     command: str,
     repo_root: str,
-    timeout_seconds: int = 14_400,
+    timeout_seconds: int = 900,
 ) -> int | None:
     """Execute an agent and persist/stream its full lifecycle."""
     db: Session = SessionLocal()
@@ -189,6 +189,26 @@ def run_agent(
         run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
         if run is None:
             logger.error("AgentRun %s does not exist; discarding message", run_id)
+            return None
+
+        # The service normally performs this check before enqueueing.  Repeat
+        # it immediately before creating a process because queued messages can
+        # outlive a setting change or race another worker.  A concurrency trip
+        # is intentionally retryable: the run remains queued and no process
+        # is spawned.
+        brake = TaskOrchestrationService(db).check_brakes(
+            run.task, for_spawn=True, audit=True, run_id=run.id
+        )
+        if not brake.allowed:
+            if brake.queue:
+                run.status = "queued"
+                run.error_message = brake.reason
+                db.commit()
+                raise AgentExecutionError(brake.reason)
+            run.status = "cancelled"
+            run.completed_at = datetime.now(timezone.utc)
+            run.error_message = brake.reason
+            db.commit()
             return None
 
         # Duplicate delivery after a completed attempt is safe and does no work.

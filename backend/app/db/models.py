@@ -373,7 +373,7 @@ class AgentRun(Base):
     queued_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
-    timeout_seconds = Column(Integer, nullable=False, default=14_400)
+    timeout_seconds = Column(Integer, nullable=False, default=900)
 
     exit_code = Column(Integer, nullable=True)
     result_ref = Column(String(255), nullable=True)

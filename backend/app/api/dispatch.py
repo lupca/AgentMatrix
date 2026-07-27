@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api", tags=["dispatch"])
 class DispatchRequest(BaseModel):
     task_id: str
     agent_id: str
-    timeout_seconds: int = Field(default=14_400, ge=1, le=14_400)
+    timeout_seconds: int | None = Field(default=None, ge=1, le=14_400)
     actor: str = "api"
     idempotency_key: str = Field(default_factory=lambda: str(uuid.uuid4()))
 

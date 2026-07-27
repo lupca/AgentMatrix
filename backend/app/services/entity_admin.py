@@ -301,6 +301,10 @@ SETTINGS_WHITELIST: dict[str, str] = {
     "default_coordinator_model": "Default model used for new coordinator sessions.",
     "default_mode": "Default gate mode (supervised/plan-only/bypass) for new tasks.",
     "context_snapshot_top_n": "Number of recent tasks listed in the context snapshot.",
+    "autonomy_enabled": "Global kill switch for autonomous task progression.",
+    "max_cost_usd_per_task": "Maximum accumulated LLM cost allowed for one task.",
+    "max_concurrent_runs": "Maximum number of queued or running agent runs.",
+    "run_timeout_seconds": "Maximum wall-clock time for one agent run.",
 }
 
 

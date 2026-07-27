@@ -7,11 +7,14 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from app.db.models import Agent, AgentRun, AuditLog, GateRecord, Project, Task
+from app.core.config import settings
+from app.db.models import Agent, AgentRun, AuditLog, GateRecord, LLMUsage, Project, Setting, Task
 from app.services.command_builder import build_dispatch_command
 
 GateDecision = Literal["approved", "rejected"]
@@ -48,6 +51,19 @@ class StaleIdempotencyRecordError(OrchestrationError):
     caller a dispatch is in flight when in fact nothing is running. Callers
     must retry with a new idempotency key rather than reusing the stale one.
     """
+
+
+class BrakeViolationError(OrchestrationError):
+    """An autonomy or budget brake stopped forward progress."""
+
+
+@dataclass(frozen=True)
+class BrakeDecision:
+    allowed: bool
+    reason: str | None = None
+    code: str | None = None
+    queue: bool = False
+    cost_usd: Decimal = Decimal("0")
 
 
 def _split_result_range(result_ref: str) -> tuple[str | None, str | None]:
@@ -111,7 +127,7 @@ class TaskOrchestrationService:
         agent_id: str,
         actor: str,
         idempotency_key: str,
-        timeout_seconds: int = 14_400,
+        timeout_seconds: int | None = None,
         kind: str = "execute",
         expected_status: str | None = None,
     ) -> TransitionResult:
@@ -149,7 +165,7 @@ class TaskOrchestrationService:
                 "command": command,
                 "repo_root": repo_root,
                 "cli": cli,
-                "timeout_seconds": timeout_seconds,
+                "timeout_seconds": timeout_seconds or self.run_timeout_seconds,
                 "kind": kind,
                 "agent_role": "reviewer" if kind == "review" else "executor",
             },
@@ -540,6 +556,15 @@ class TaskOrchestrationService:
         payload: dict[str, Any],
     ) -> TransitionResult:
         self._validate_common(task, actor, idempotency_key)
+        if gate_type == "dispatch":
+            decision = self.check_brakes(task, for_spawn=True, audit=True)
+            if not decision.allowed:
+                if decision.queue:
+                    # A queued AgentRun is the durable queue representation;
+                    # the worker repeats this check before process creation.
+                    pass
+                else:
+                    raise BrakeViolationError(decision.reason or "Autonomy brake engaged")
         request_payload = {
             **payload,
             "expected_status": expected_status,
@@ -713,6 +738,123 @@ class TaskOrchestrationService:
                 task.completed_at = None
             return None, verdict
         raise OrchestrationError(f"Unsupported gate type: {gate_type}")
+
+    @property
+    def autonomy_enabled(self) -> bool:
+        return self._setting("autonomy_enabled", settings.AUTONOMY_ENABLED, bool)
+
+    @property
+    def max_cost_usd_per_task(self) -> Decimal:
+        value = self._setting(
+            "max_cost_usd_per_task", settings.MAX_COST_USD_PER_TASK, Decimal
+        )
+        return max(Decimal("0"), value)
+
+    @property
+    def max_concurrent_runs(self) -> int:
+        return max(1, self._setting("max_concurrent_runs", settings.MAX_CONCURRENT_RUNS, int))
+
+    @property
+    def run_timeout_seconds(self) -> int:
+        return max(1, self._setting("run_timeout_seconds", settings.RUN_TIMEOUT_SECONDS, int))
+
+    def check_brakes(
+        self,
+        task: Task,
+        *,
+        for_spawn: bool = False,
+        audit: bool = False,
+        run_id: str | None = None,
+    ) -> BrakeDecision:
+        """Return the current safety decision using runtime DB settings.
+
+        ``for_spawn`` checks the global active-run limit.  It is deliberately
+        separate from the kill switch and budget checks: concurrency queues a
+        run, while the other two brakes stop and escalate the task.
+        """
+        if not self.autonomy_enabled:
+            decision = BrakeDecision(False, "Autonomy is disabled", "autonomy_disabled")
+        else:
+            cost = self._task_cost(task)
+            if cost >= self.max_cost_usd_per_task:
+                reason = (
+                    f"Task cost limit reached: ${cost:.8f} >= "
+                    f"${self.max_cost_usd_per_task:.8f}"
+                )
+                decision = BrakeDecision(False, reason, "cost_limit", cost_usd=cost)
+            elif for_spawn:
+                active = (
+                    self.db.query(func.count(AgentRun.id))
+                    .filter(
+                        AgentRun.status.in_(["queued", "running"]),
+                        AgentRun.id != run_id if run_id else True,
+                    )
+                    .with_for_update()
+                    .scalar()
+                    or 0
+                )
+                if active >= self.max_concurrent_runs:
+                    decision = BrakeDecision(
+                        False,
+                        f"Concurrent run limit reached: {active} >= {self.max_concurrent_runs}",
+                        "concurrency_limit",
+                        queue=True,
+                        cost_usd=cost,
+                    )
+                else:
+                    decision = BrakeDecision(True, cost_usd=cost)
+            else:
+                decision = BrakeDecision(True, cost_usd=cost)
+
+        if audit and not decision.allowed:
+            self._record_brake(task, decision)
+        return decision
+
+    def _record_brake(self, task: Task, decision: BrakeDecision) -> None:
+        if decision.code in {"autonomy_disabled", "cost_limit"}:
+            task.status = "failed"
+            task.error = decision.reason
+            task.awaiting_approval = True
+            task.approval_prompt = f"Escalated by safety brake: {decision.reason}"
+        self.db.add(
+            AuditLog(
+                task_id=task.id,
+                action=f"brake:{decision.code}",
+                actor="system:safety-brake",
+                details={
+                    "code": decision.code,
+                    "reason": decision.reason,
+                    "cost_usd": str(decision.cost_usd),
+                    "max_cost_usd_per_task": str(self.max_cost_usd_per_task),
+                    "max_concurrent_runs": self.max_concurrent_runs,
+                },
+            )
+        )
+        self.db.commit()
+
+    def _task_cost(self, task: Task) -> Decimal:
+        value = (
+            self.db.query(func.coalesce(func.sum(LLMUsage.cost_usd), 0))
+            .outerjoin(AgentRun, LLMUsage.agent_run_id == AgentRun.id)
+            .filter(or_(LLMUsage.task_id == task.id, AgentRun.task_id == task.id))
+            .scalar()
+        )
+        try:
+            return Decimal(str(value or 0))
+        except (InvalidOperation, ValueError):
+            return Decimal("0")
+
+    def _setting(self, key: str, default: Any, converter: Any) -> Any:
+        row = self.db.get(Setting, key)
+        value = default if row is None else row.value
+        if converter is bool:
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on"}
+            return bool(value)
+        try:
+            return converter(value)
+        except (TypeError, ValueError, InvalidOperation):
+            return default
 
     def _validate_verdict_prerequisites(
         self,

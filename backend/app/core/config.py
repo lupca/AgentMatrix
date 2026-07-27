@@ -20,6 +20,13 @@ class Settings(BaseSettings):
     COORDINATOR_MAX_TURN_TOKENS: int = 100_000
     COORDINATOR_MAX_REPEATED_TOOL_CALLS: int = 3
 
+    # Autonomous execution brakes.  The Setting table may override these at
+    # runtime; these values are the safe process-start defaults.
+    AUTONOMY_ENABLED: bool = True
+    MAX_COST_USD_PER_TASK: float = 10.0
+    MAX_CONCURRENT_RUNS: int = 2
+    RUN_TIMEOUT_SECONDS: int = 900
+
     # LLM
     ANTHROPIC_API_KEY: str = ""
     GOOGLE_API_KEY: str = ""
