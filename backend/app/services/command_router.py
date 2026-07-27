@@ -8,6 +8,7 @@ from app.db.models import (
     Agent,
     AgentRun,
     AuditLog,
+    GateRecord,
     KnowledgeItem,
     LLMUsage,
     Project,
@@ -865,7 +866,18 @@ class CommandRouter:
         try:
             gate_record_id = int(raw_id)
         except ValueError:
-            return {'error': 'gate_record_id must be an integer'}
+            pending = (
+                self.db.query(GateRecord)
+                .filter(
+                    GateRecord.task_id == raw_id,
+                    GateRecord.status == "pending",
+                )
+                .order_by(GateRecord.id.desc())
+                .first()
+            )
+            if pending is None:
+                return {'error': f'No pending gate found for task {raw_id}'}
+            gate_record_id = pending.id
         service = TaskOrchestrationService(self.db)
         try:
             result = service.decide_gate(

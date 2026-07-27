@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Set
@@ -32,6 +33,21 @@ class ConnectionManager:
 
 
 ws_manager = ConnectionManager()
+
+
+def publish_event(message: dict) -> None:
+    """Fan out an application event to WebSocket clients when available.
+
+    Gate transitions are performed by both the async API process and the
+    synchronous worker.  The latter has no event loop to await, so delivery
+    is deliberately best-effort here; the durable session message remains
+    the source of truth for reconnecting clients.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(ws_manager.broadcast(message))
 
 
 @router.websocket("")

@@ -26,6 +26,7 @@ from app.db.models import (
     Task,
     TaskDependency,
 )
+from app.db.models import Session as SessionModel
 from app.services.command_builder import build_dispatch_command, build_review_command
 
 logger = logging.getLogger(__name__)
@@ -427,6 +428,7 @@ class TaskOrchestrationService:
         self.db.commit()
         self.db.refresh(task)
         self.db.refresh(record)
+        self._resolve_gate_notification(task.id, pending.gate_type, pending.id, effective_decision)
         if run is not None:
             self.db.refresh(run)
         if pending.gate_type == "verdict" and task.status == "done":
@@ -1058,6 +1060,7 @@ class TaskOrchestrationService:
             self.db.commit()
             self.db.refresh(task)
             self.db.refresh(record)
+            self._notify_gate_pending(task, record)
             return TransitionResult(task, record, False)
 
         run, output_ref = self._apply_gate(task, gate_type, request_payload)
@@ -1087,6 +1090,104 @@ class TaskOrchestrationService:
             agent_run=run,
             context=request_payload if run is not None else None,
         )
+
+    def _notify_gate_pending(self, task: Task, record: GateRecord) -> None:
+        """Write one compact approval notice and fan it out to live clients."""
+        # CoordinatorService owns the global inbox mechanics (CTV2-097).  The
+        # import is local to keep the orchestration service independent from
+        # the coordinator's command-routing imports.
+        from app.services.coordinator import CoordinatorService
+
+        coordinator = CoordinatorService(self.db)
+        global_session = coordinator.get_or_create_global_session()
+        messages = list(global_session.messages or [])
+        existing = next(
+            (
+                item for item in messages
+                if item.get("kind") == "gate_notification"
+                and item.get("task_id") == task.id
+                and item.get("gate") == record.gate_type
+            ),
+            None,
+        )
+        if existing is not None and existing.get("notification_state") == "pending":
+            return
+
+        content = f"Task {task.id} requires approval: {task.approval_prompt or ''}".strip()
+        if existing is None:
+            message = coordinator.append_message(
+                global_session,
+                role="system",
+                content=content,
+                message_id=f"gate-pending-{record.id}",
+                kind="gate_notification",
+                task_id=task.id,
+                gate=record.gate_type,
+                gate_record_id=record.id,
+                notification_state="pending",
+                status="complete",
+            )
+        else:
+            existing.update(
+                content=content,
+                gate_record_id=record.id,
+                notification_state="pending",
+                timestamp=coordinator._now(),
+            )
+            global_session.messages = messages
+            global_session.message_count = len(messages)
+            global_session.last_activity_at = datetime.now(timezone.utc)
+            self.db.commit()
+            message = existing
+        from app.api.ws import publish_event
+
+        publish_event(
+            {
+                "type": "gate_pending",
+                "session_id": global_session.id,
+                "task_id": task.id,
+                "gate": record.gate_type,
+                "gate_record_id": record.id,
+                "message": message,
+            }
+        )
+
+    def _resolve_gate_notification(
+        self,
+        task_id: str,
+        gate_type: str,
+        gate_record_id: int,
+        state: str,
+    ) -> None:
+        """Close a pending inbox notice so a later pending state can notify."""
+        global_session = (
+            self.db.query(SessionModel)
+            .filter(
+                SessionModel.context_level == "global",
+                SessionModel.status == "active",
+            )
+            .order_by(SessionModel.last_activity_at.desc())
+            .first()
+        )
+        if global_session is None:
+            return
+        messages = list(global_session.messages or [])
+        changed = False
+        for message in messages:
+            if (
+                message.get("kind") == "gate_notification"
+                and message.get("task_id") == task_id
+                and message.get("gate") == gate_type
+                and message.get("gate_record_id") == gate_record_id
+                and message.get("notification_state") == "pending"
+            ):
+                message["notification_state"] = state
+                changed = True
+        if changed:
+            global_session.messages = messages
+            global_session.message_count = len(messages)
+            global_session.last_activity_at = datetime.now(timezone.utc)
+            self.db.commit()
 
     def _apply_gate(
         self,
