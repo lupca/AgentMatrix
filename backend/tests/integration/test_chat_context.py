@@ -60,9 +60,12 @@ def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
         },
     )
     assert first.status_code == 200
-    first_system = provider.messages[0][0]["content"]
-    assert "- alpha: Alpha (active, 1 tasks)" in first_system
-    assert "ALPHA-001: Dispatch the release (dispatched)" in first_system
+    first_global = provider.messages[0][0]["content"]
+    first_snapshot = provider.messages[0][1]["content"]
+    assert "- alpha: Alpha (active, 1 tasks)" in first_snapshot
+    assert "ALPHA-001: Dispatch the release (dispatched)" in first_snapshot
+    # The snapshot is its own message so mutations never touch the Global tier.
+    assert "- alpha: Alpha (active, 1 tasks)" not in first_global
 
     updated = client.patch(
         "/api/projects/alpha",
@@ -80,5 +83,8 @@ def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
         },
     )
     assert second.status_code == 200
-    second_system = provider.messages[1][0]["content"]
-    assert "- alpha: Renamed Alpha (active, 1 tasks)" in second_system
+    second_global = provider.messages[1][0]["content"]
+    second_snapshot = provider.messages[1][1]["content"]
+    assert "- alpha: Renamed Alpha (active, 1 tasks)" in second_snapshot
+    # Global tier bytes are unaffected by the project mutation (stable prefix).
+    assert second_global == first_global

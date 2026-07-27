@@ -202,7 +202,14 @@ class ContextHierarchy:
         session: SessionModel,
         project_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Compose 3 tiers (Global -> Project -> Task) with cache_control markers."""
+        """Compose tiers in increasing order of volatility:
+
+        Global (static) -> Project (semi-stable) -> Snapshot (dynamic) ->
+        Task/session (dynamic). Global and Project messages are marked
+        ``pinned: True`` so ``budget_messages`` keeps them as a stable
+        prefix; the snapshot is its own message so a project/task mutation
+        no longer rewrites the Global tier's bytes.
+        """
         if not project_id and session.task_id:
             task = self.db.query(Task).filter(Task.id == session.task_id).first()
             if task and task.project:
@@ -210,26 +217,24 @@ class ContextHierarchy:
 
         messages: list[dict[str, Any]] = []
 
-        # Tier 1: Global (with cache_control)
+        # Tier 1: Global (static, pinned)
         global_ctx = self.get_global_context()
         if global_ctx:
-            # Keep the structured snapshot in the stable system prefix.  It
-            # appears before the separately supplied tool schemas and is
-            # rebuilt after project/task mutations.
-            global_ctx[-1]["content"] = (
-                f"{global_ctx[-1].get('content', '')}\n\n"
-                f"{get_context_snapshot(session, self.db)}"
-            )
             messages.extend(global_ctx)
-            messages[-1]["cache_control"] = {"type": "ephemeral"}
+            messages[-1]["pinned"] = True
 
-        # Tier 2: Project (with cache_control)
+        # Tier 2: Project (semi-stable, pinned)
         project_ctx = self.get_project_context(project_id)
         if project_ctx:
             messages.extend(project_ctx)
-            messages[-1]["cache_control"] = {"type": "ephemeral"}
+            messages[-1]["pinned"] = True
 
-        # Tier 3: Task (dynamic - no cache_control)
+        # Tier 2.5: Context snapshot (dynamic, own message - not pinned)
+        messages.append(
+            {"role": "system", "content": get_context_snapshot(session, self.db)}
+        )
+
+        # Tier 3: Task (dynamic - not pinned)
         messages.extend(self.get_task_context(session))
 
         return messages

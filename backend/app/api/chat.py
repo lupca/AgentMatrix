@@ -10,6 +10,7 @@ from app.db.models import Session as SessionModel
 from app.graph.context import invalidate_context_snapshot
 from app.services.command_router import CommandRouter
 from app.services.coordinator import CoordinatorService
+from app.services.tool_registry import dump_registry
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,14 @@ def get_or_create_session(thread_id: str, db: DBSession) -> SessionModel:
     """Backward-compatible helper used by older API tests and callers."""
 
     return CoordinatorService(db).get_or_create_session(thread_id)
+
+
+@router.get("/tools")
+async def list_tools():
+    """Registry dump (name, description, slash_alias, tier, group) for the
+    chat UI tool palette and ``/help``."""
+
+    return {"tools": dump_registry()}
 
 
 @router.post("/chat")

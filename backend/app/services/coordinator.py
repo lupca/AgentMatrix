@@ -395,7 +395,7 @@ class CoordinatorService:
         prefix = [
             message
             for message in messages
-            if message.get("role") == "system" or "cache_control" in message
+            if message.get("role") == "system" or message.get("pinned")
         ]
         conversation = [
             message

@@ -6,6 +6,7 @@ from app.services.coordinator import CoordinatorService
 from app.services.command_router import CommandRouter
 from app.services.providers import ProviderResponse
 from app.services.llm_client import UsageCounts
+from app.graph.context import invalidate_context_snapshot
 
 
 def test_global_context_loaded_and_cached(db_session):
@@ -62,7 +63,7 @@ def test_project_context_from_file_fallback(db_session, tmp_path, monkeypatch):
     assert "File based context info" in proj_ctx[0]["content"]
 
 
-def test_build_messages_tiered_ordering_and_cache_control(db_session):
+def test_build_messages_tiered_ordering_and_pinned_flag(db_session):
     project = Project(
         id="proj-tiered",
         name="Tiered Project",
@@ -90,24 +91,81 @@ def test_build_messages_tiered_ordering_and_cache_control(db_session):
     hierarchy = ContextHierarchy(db_session)
     messages = hierarchy.build_messages(session)
 
-    # 1. Global Context (System)
+    # 1. Global Context (System, pinned)
     assert messages[0]["role"] == "system"
-    assert messages[0].get("cache_control") == {"type": "ephemeral"}
+    assert messages[0].get("pinned") is True
+    assert "cache_control" not in messages[0]
 
-    # 2. Project Context (User with Project info)
+    # 2. Project Context (User with Project info, pinned)
     assert messages[1]["role"] == "user"
     assert "[Project Context: Tiered Project]" in messages[1]["content"]
-    assert messages[1].get("cache_control") == {"type": "ephemeral"}
+    assert messages[1].get("pinned") is True
+    assert "cache_control" not in messages[1]
 
-    # 3. Task Context (Task System Header + Session messages)
+    # 3. Context snapshot (own dynamic message, not pinned)
     assert messages[2]["role"] == "system"
-    assert "Task [TASK-001]" in messages[2]["content"]
+    assert "## Current Context" in messages[2]["content"]
+    assert "pinned" not in messages[2]
     assert "cache_control" not in messages[2]
 
-    assert messages[3]["role"] == "user"
-    assert messages[3]["content"] == "Hello"
-    assert messages[4]["role"] == "assistant"
-    assert messages[4]["content"] == "Hi"
+    # 4. Task Context (Task System Header + Session messages)
+    assert messages[3]["role"] == "system"
+    assert "Task [TASK-001]" in messages[3]["content"]
+    assert "pinned" not in messages[3]
+    assert "cache_control" not in messages[3]
+
+    assert messages[4]["role"] == "user"
+    assert messages[4]["content"] == "Hello"
+    assert messages[5]["role"] == "assistant"
+    assert messages[5]["content"] == "Hi"
+
+
+def test_build_messages_prefix_stable_across_task_mutation(db_session):
+    """Global + Project message bytes stay identical across a task mutation;
+    only the snapshot message (Tier 2.5) changes."""
+    project = Project(
+        id="proj-stable",
+        name="Stable Project",
+        description="Stable description",
+    )
+    task = Task(
+        id="TASK-STABLE-1",
+        project="proj-stable",
+        title="Stable Task",
+        status="todo",
+    )
+    session = SessionModel(
+        id="sess-stable",
+        task_id="TASK-STABLE-1",
+        project_id="proj-stable",
+        context_level="task",
+        messages=[],
+    )
+    db_session.add_all([project, task, session])
+    db_session.commit()
+
+    hierarchy = ContextHierarchy(db_session)
+    before = hierarchy.build_messages(session)
+
+    # Mutate: add a new task in the same project, which changes the snapshot's
+    # task-count/recent-tasks content.
+    new_task = Task(
+        id="TASK-STABLE-2",
+        project="proj-stable",
+        title="Second Stable Task",
+        status="todo",
+    )
+    db_session.add(new_task)
+    db_session.commit()
+    invalidate_context_snapshot(db_session, project_id="proj-stable")
+
+    after = hierarchy.build_messages(session)
+
+    assert before[0] == after[0]  # Global tier bytes unchanged
+    assert before[1] == after[1]  # Project tier bytes unchanged
+    assert before[2] != after[2]  # Snapshot message changed
+    assert "TASK-STABLE-2" in after[2]["content"]
+    assert "TASK-STABLE-2" not in before[2]["content"]
 
 
 def test_context_compaction(db_session):
@@ -138,7 +196,7 @@ def test_get_tool_definitions_marks_rare_tools_deferred(db_session):
     names_eager = {t["name"] for t in tools if not t.get("defer_loading")}
     names_deferred = {t["name"] for t in tools if t.get("defer_loading")}
 
-    assert "pm_create_task" in names_eager
+    assert "create_task" in names_eager
     assert "get_status" in names_eager
     assert "dispatch_task" in names_deferred
     assert "compact_context" in names_deferred

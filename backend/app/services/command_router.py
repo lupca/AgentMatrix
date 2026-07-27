@@ -8,17 +8,16 @@ from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
 )
+from app.services.tool_registry import TOOL_REGISTRY, resolve_tool_name
 
+# Derived from the tool registry (single source of truth, ADR-001 §D1) by
+# slash_alias, plus '/help' which is a router-only command, not a tool.
 COMMANDS = {
-    '/pm': 'create_task',
-    '/dispatch': 'dispatch_task',
-    '/verdict': 'verdict',
-    '/approve': 'approve_gate',
-    '/status': 'get_status',
-    '/cancel': 'cancel_task',
-    '/compact': 'compact_context',
-    '/help': 'show_help',
+    spec.slash_alias: spec.handler
+    for spec in TOOL_REGISTRY.values()
+    if spec.slash_alias
 }
+COMMANDS['/help'] = 'show_help'
 
 class CommandRouter:
     def __init__(self, db_session):
@@ -57,56 +56,49 @@ class CommandRouter:
         if not isinstance(arguments, Mapping):
             return {'error': 'Tool arguments must be a JSON object'}
 
+        canonical_name = resolve_tool_name(tool_name)
+        spec = TOOL_REGISTRY.get(canonical_name)
+        if spec is None:
+            return {'error': f'Unknown tool: {tool_name}'}
+
         args = dict(arguments)
-        if tool_name == 'pm_create_task':
+        if canonical_name == 'create_task':
             title = str(args.get('title', '')).strip()
             if not title:
                 return {'error': 'title is required'}
             project = str(args.get('project', '')).strip()
             command_args = title + (f' --project {project}' if project else '')
-        elif tool_name == 'get_status':
+        elif canonical_name == 'get_status':
             command_args = str(args.get('task_id', '') or '')
-        elif tool_name == 'dispatch_task':
+        elif canonical_name == 'dispatch_task':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
                 return {'error': 'task_id is required'}
             executor = str(args.get('executor', '') or '').strip()
             command_args = ' '.join(part for part in (task_id, executor) if part)
-        elif tool_name == 'record_verdict':
+        elif canonical_name == 'record_verdict':
             task_id = str(args.get('task_id', '')).strip()
             verdict = str(args.get('verdict', '')).strip().lower()
             if not task_id or not verdict:
                 return {'error': 'task_id and verdict are required'}
             findings = args.get('findings', [])
             command_args = f'{task_id} {verdict} {json.dumps(findings, ensure_ascii=False)}'
-        elif tool_name == 'approve_gate':
+        elif canonical_name == 'approve_gate':
             gate_id = args.get('gate_record_id', args.get('task_id'))
             if gate_id is None:
                 return {'error': 'gate_record_id is required'}
             command_args = str(gate_id)
-        elif tool_name == 'cancel_task':
+        elif canonical_name == 'cancel_task':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
                 return {'error': 'task_id is required'}
             command_args = task_id
-        elif tool_name == 'compact_context':
+        elif canonical_name == 'compact_context':
             command_args = ''
         else:
             return {'error': f'Unknown tool: {tool_name}'}
 
-        return await self.execute(
-            {
-                'pm_create_task': 'create_task',
-                'get_status': 'get_status',
-                'dispatch_task': 'dispatch_task',
-                'record_verdict': 'verdict',
-                'approve_gate': 'approve_gate',
-                'cancel_task': 'cancel_task',
-                'compact_context': 'compact_context',
-            }[tool_name],
-            command_args,
-            session_id,
-        )
+        return await self.execute(spec.handler, command_args, session_id)
     
     async def _handle_show_help(self, args: str, session_id: str) -> dict:
         return {'commands': list(COMMANDS.keys())}

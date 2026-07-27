@@ -90,7 +90,8 @@ async def test_model_switch_rehydrates_canonical_history_and_records_usage(db_se
     assert second.provider == "google"
     google_history = google.calls[0][1]
     assert google_history[0]["role"] == "system"
-    assert [message["content"] for message in google_history[1:]] == [
+    conversation = [m for m in google_history if m["role"] in {"user", "assistant"}]
+    assert [message["content"] for message in conversation] == [
         "Remember that my name is Ada.",
         "My name is Ada.",
         "What is my name?",
@@ -264,7 +265,10 @@ def test_chat_endpoint_routes_requested_models_and_preserves_history(
     assert '"type": "done"' in first.text
     assert '"type": "done"' in second.text
     assert google.calls[0][1][0]["role"] == "system"
-    assert [message["content"] for message in google.calls[0][1][1:]] == [
+    conversation = [
+        m for m in google.calls[0][1] if m["role"] in {"user", "assistant"}
+    ]
+    assert [message["content"] for message in conversation] == [
         "First question",
         "first answer",
         "Second question",
