@@ -1,6 +1,35 @@
 from datetime import date, datetime
-from typing import Any
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Any, Literal
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+
+
+REVIEW_RESULT_SCHEMA_VERSION = "1.0"
+
+
+class ReviewACResult(BaseModel):
+    """The reviewer's verdict and evidence for one acceptance criterion."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    ac_index: StrictInt
+    ac_text: StrictStr
+    verdict: Literal["pass", "fail"]
+    evidence: list[StrictStr]
+
+
+class ReviewResult(BaseModel):
+    """Versioned, machine-readable output produced by a code-review run."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[REVIEW_RESULT_SCHEMA_VERSION]
+    task_id: StrictStr
+    base: StrictStr
+    head: StrictStr
+    ac_results: list[ReviewACResult]
+    findings: list[dict[str, Any]]
+    tests_run: list[StrictStr]
+    tests_passed: list[StrictStr]
 
 
 class GateRecordCreate(BaseModel):

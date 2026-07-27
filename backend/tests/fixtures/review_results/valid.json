@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "task_id": "CTV2-102",
+  "base": "abc123",
+  "head": "def456",
+  "ac_results": [
+    {
+      "ac_index": 0,
+      "ac_text": "Schema is versioned",
+      "verdict": "pass",
+      "evidence": ["ReviewResult declares schema_version"]
+    },
+    {
+      "ac_index": 1,
+      "ac_text": "Loader validates strictly",
+      "verdict": "pass",
+      "evidence": ["Pydantic validation rejects missing fields"]
+    }
+  ],
+  "findings": [],
+  "tests_run": ["pytest backend/tests/unit/test_agent_runner.py"],
+  "tests_passed": ["pytest backend/tests/unit/test_agent_runner.py"]
+}

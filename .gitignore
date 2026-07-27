@@ -10,3 +10,4 @@ node_modules
 venv
 .backend.pid
 backend.log
+.ct/review-*.json

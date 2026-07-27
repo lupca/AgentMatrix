@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import subprocess
 from unittest.mock import MagicMock
 
@@ -11,6 +12,8 @@ import app.workers.agent_runner as runner
 from app.db.base import Base
 from app.db.models import AgentOutputChunk, AgentRun, Project, Task
 from app.services.process_manager import ProcessResult, ProcessStatus
+
+FIXTURES = Path(__file__).parents[1] / "fixtures" / "review_results"
 
 
 @pytest.fixture
@@ -250,6 +253,37 @@ def test_parse_result_ref_handles_spawn_error(monkeypatch):
     )
 
     assert runner._parse_result_ref("/tmp") is None
+
+
+@pytest.mark.parametrize(
+    ("fixture", "code"),
+    [("missing_field.json", "missing_required_field"),
+     ("wrong_type.json", "invalid_type"),
+     ("empty.json", "empty_file")],
+)
+def test_load_review_result_rejects_invalid_fixtures(tmp_path, fixture, code):
+    result_path = runner.review_result_path(str(tmp_path), "CTV2-102")
+    Path(result_path).parent.mkdir()
+    Path(result_path).write_bytes((FIXTURES / fixture).read_bytes())
+
+    with pytest.raises(runner.ReviewResultLoadError) as error:
+        runner.load_review_result(str(tmp_path), "CTV2-102", [])
+
+    assert error.value.code == code
+    assert error.value.as_dict()["code"] == code
+    assert error.value.code != "pass"
+
+
+def test_load_review_result_accepts_valid_fixture(tmp_path):
+    result_path = runner.review_result_path(str(tmp_path), "CTV2-102")
+    Path(result_path).parent.mkdir()
+    Path(result_path).write_bytes((FIXTURES / "valid.json").read_bytes())
+
+    result = runner.load_review_result(str(tmp_path), "CTV2-102", ["one", "two"])
+
+    assert result.schema_version == "1.0"
+    assert result.task_id == "CTV2-102"
+    assert [item.verdict for item in result.ac_results] == ["pass", "pass"]
 
 
 def test_update_missing_task_is_not_silent(worker_db):

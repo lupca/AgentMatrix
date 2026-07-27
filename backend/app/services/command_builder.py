@@ -11,6 +11,12 @@ from app.db.models import Agent, Project, Task
 SUPPORTED_CLIS = {"agy", "codex", "claude"}
 
 
+def review_result_path(repo_root: str, task_id: str) -> str:
+    """Return the stable, ignored path used by a review run's JSON result."""
+    safe_task_id = task_id.replace("/", "_").replace("\\", "_")
+    return os.path.join(repo_root, ".ct", f"review-{safe_task_id}.json")
+
+
 def build_dispatch_command(
     task: Task,
     agent: Agent,
@@ -30,7 +36,7 @@ def build_dispatch_command(
     if not os.path.isdir(repo_root):
         raise ValueError(f"Project repository does not exist: {repo_root}")
 
-    prompt = _task_prompt(task)
+    prompt = _task_prompt(task, review_result_path(repo_root, task.id))
     if cli == "codex":
         argv = ["codex", "exec"]
         if agent.model:
@@ -66,7 +72,7 @@ def _infer_cli(model: str | None, agent_id: str) -> str:
     return "agy"
 
 
-def _task_prompt(task: Task) -> str:
+def _task_prompt(task: Task, result_path: str | None = None) -> str:
     details = task.raw_input or task.title
     sections = [f"Execute task {task.id}: {task.title}", details]
     if task.acceptance_criteria:
@@ -80,7 +86,25 @@ def _task_prompt(task: Task) -> str:
         sections.append("Required tests:\n" + "\n".join(f"- {test}" for test in task.tests))
     if task.plan:
         sections.append(f"Plan:\n{task.plan}")
+    if _is_review_task(task):
+        if result_path is None:
+            raise ValueError("result_path is required for a review task")
+        sections.append(
+            "Code review result contract:\n"
+            f"Write the final review result as JSON to {result_path}. "
+            "Do not use stdout as the result. The JSON must contain exactly these "
+            "fields: schema_version (\"1.0\"), task_id, base, head, ac_results, "
+            "findings, tests_run, tests_passed. Each ac_results item must contain "
+            "ac_index, ac_text, verdict (only \"pass\" or \"fail\"), and "
+            "evidence (an array of strings). Ensure ac_results has one item per "
+            "acceptance criterion."
+        )
     sections.append(
         "Complete every acceptance criterion, run the relevant tests, and commit the changes."
     )
     return "\n\n".join(sections)
+
+
+def _is_review_task(task: Task) -> bool:
+    text = " ".join((task.title or "", task.raw_input or "")).lower()
+    return "/code-review" in text or "code review" in text
