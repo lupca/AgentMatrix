@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.db.base import SessionLocal
 from app.db.models import AgentOutputChunk, AgentRun, AuditLog, Task, TaskDependency
+from app.services.coordinator import CoordinatorService
 from app.services.agent_matcher import AgentMatcher
 from app.services.command_builder import _is_review_task, review_result_path
 from app.schemas.task import ReviewResult
@@ -194,6 +195,18 @@ def _nudge_driver(task_id: str, trigger: str) -> None:
         )
 
 
+def _record_task_rollup(task_id: str, *, status: str | None = None) -> None:
+    """Keep the global inbox to one compact line while retaining task trace."""
+    db = SessionLocal()
+    try:
+        CoordinatorService(db).record_task_rollup(task_id, status=status)
+    except Exception:
+        db.rollback()
+        logger.warning("Could not record task rollup for %s", task_id, exc_info=True)
+    finally:
+        db.close()
+
+
 def _publish(run_id: str, payload: dict) -> None:
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     for attempt in range(3):
@@ -271,6 +284,9 @@ def run_agent(
 
         _cleanup_stale_process(run)
         task = run.task
+        # Driver/executor work is rooted in the task session. The global
+        # session is only an inbox for the compact rollup below.
+        CoordinatorService(db).get_or_create_task_session(task_id)
         # `run.kind == "review"` (CTV2-086) is the authoritative signal for a
         # review run against the task it targets. The title/raw_input text
         # heuristic is kept only for the older "review is its own Task" flow.
@@ -503,6 +519,11 @@ def run_agent(
                 run_id=run.id,
             )
         db.commit()
+        task_after_run = db.get(Task, task_id)
+        _record_task_rollup(
+            task_id,
+            status=task_after_run.status if task_after_run is not None else effective_status,
+        )
         _nudge_driver(task_id, "run_agent_completed")
 
         effective_error = run.error_message or result.error
