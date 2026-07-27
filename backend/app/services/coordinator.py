@@ -151,7 +151,7 @@ class CoordinatorService:
         max_output_tokens: int = 2048,
         context_windows: Mapping[str, int] | None = None,
         context_safety_tokens: int = 1024,
-        max_tool_iterations: int = 5,
+        max_tool_iterations: int = 20,
         graph: Any | None = None,
     ):
         if dispatcher is not None and cli_dispatcher is not None:
