@@ -387,7 +387,66 @@ class ContextHierarchy:
                 "in conversation history]"
             )
 
-        kept = raw_msgs[-10:] if len(raw_msgs) > 10 else raw_msgs
+        # Do not cut through an assistant tool call/result pair.  A plain
+        # suffix slice can retain a tool result while dropping the assistant
+        # message that declared its tool_call_id (or vice versa), producing
+        # an invalid OpenAI-compatible request on the next replay.
+        start = max(0, len(raw_msgs) - 10)
+        while True:
+            assistant_by_call_id: dict[str, int] = {}
+            tool_by_call_id: dict[str, int] = {}
+            for index, message in enumerate(raw_msgs):
+                if message.get("role") == "assistant":
+                    for call in message.get("tool_calls") or []:
+                        if isinstance(call, dict) and call.get("id") is not None:
+                            assistant_by_call_id[str(call["id"])] = index
+                elif message.get("role") == "tool" and message.get("tool_call_id") is not None:
+                    tool_by_call_id[str(message["tool_call_id"])] = index
+
+            expanded_start = start
+            for call_id, assistant_index in assistant_by_call_id.items():
+                tool_index = tool_by_call_id.get(call_id)
+                if tool_index is None:
+                    continue
+                if assistant_index >= start or tool_index >= start:
+                    expanded_start = min(expanded_start, assistant_index, tool_index)
+            if expanded_start == start:
+                break
+            start = expanded_start
+
+        kept = [dict(message) for message in raw_msgs[start:]]
+        retained_call_ids = {
+            str(call["id"])
+            for message in kept
+            if message.get("role") == "assistant"
+            for call in (message.get("tool_calls") or [])
+            if isinstance(call, dict) and call.get("id") is not None
+        }
+        retained_tool_ids = {
+            str(message["tool_call_id"])
+            for message in kept
+            if message.get("role") == "tool" and message.get("tool_call_id") is not None
+        }
+        paired_call_ids = retained_call_ids & retained_tool_ids
+
+        sanitized: list[dict[str, Any]] = []
+        for message in kept:
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                tool_calls = [
+                    call for call in message["tool_calls"]
+                    if isinstance(call, dict)
+                    and call.get("id") is not None
+                    and str(call["id"]) in paired_call_ids
+                ]
+                message.pop("tool_calls", None)
+                if tool_calls:
+                    message["tool_calls"] = tool_calls
+            elif message.get("role") == "tool":
+                call_id = message.get("tool_call_id")
+                if call_id is None or str(call_id) not in paired_call_ids:
+                    continue
+            sanitized.append(message)
+        kept = sanitized
         summary_msg = {
             "id": f"msg-compact-{session.id}",
             "role": "system",

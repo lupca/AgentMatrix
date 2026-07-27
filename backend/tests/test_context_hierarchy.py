@@ -402,6 +402,56 @@ def test_context_compaction(db_session):
     assert "Context Compaction" in session.messages[0]["content"]
 
 
+def test_context_compaction_keeps_tool_call_pairs_through_adapter(db_session):
+    """Compaction must not leave provider-invalid assistant/tool history."""
+    first_call = "call-before-cutoff"
+    second_call = "call-after-cutoff"
+    messages = [
+        {"role": "user", "content": "requests", "status": "complete"},
+        {
+            "role": "assistant", "content": "", "status": "complete",
+            "tool_calls": [
+                {"id": first_call, "name": "get_status", "input": {}},
+                {"id": second_call, "name": "get_status", "input": {}},
+            ],
+        },
+        {
+            "role": "tool", "tool_call_id": first_call, "name": "get_status",
+            "content": '{"task_id": "CTV2-095", "verdict": "pass"}',
+            "status": "complete",
+        },
+        {
+            "role": "tool", "tool_call_id": second_call, "name": "get_status",
+            "content": '{"task_id": "CTV2-104", "verdict": "pass"}',
+            "status": "complete",
+        },
+    ] + [
+        {"role": "user", "content": f"filler-{i}", "status": "complete"}
+        for i in range(8)
+    ]
+    session = SessionModel(id="sess-tool-compact", messages=messages)
+    db_session.add(session)
+    db_session.commit()
+
+    hierarchy = ContextHierarchy(db_session)
+    assert hierarchy.compact_context(session, threshold=0) is True
+
+    rendered = OpenAIAdapter.render_messages(session.messages)
+    assistant_ids = {
+        call["id"]
+        for message in rendered
+        if message["role"] == "assistant"
+        for call in message.get("tool_calls", [])
+    }
+    tool_ids = {
+        message["tool_call_id"]
+        for message in rendered
+        if message["role"] == "tool"
+    }
+    assert assistant_ids == tool_ids == {first_call, second_call}
+    assert "CTV2-095" in next(m["content"] for m in rendered if m.get("tool_call_id") == first_call)
+
+
 def test_get_tool_definitions_returns_only_baseline_eager_tools(db_session):
     hierarchy = ContextHierarchy(db_session)
     tools = hierarchy.get_tool_definitions()
