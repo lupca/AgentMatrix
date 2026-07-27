@@ -368,17 +368,34 @@ class CoordinatorService:
             - output_budget
             - self.context_safety_tokens,
         )
-        prefix = [
-            message
-            for message in messages
-            if message.get("role") == "system" or message.get("pinned")
-        ]
-        conversation = [
-            message
-            for message in messages
-            if message not in prefix
-            and message.get("status", "complete") == "complete"
-        ]
+        # ContextHierarchy places the snapshot after append-only history. Keep
+        # that ordering intact: collecting every system message separately
+        # would move the history behind the snapshot and defeat prefix reuse.
+        snapshot_index = next(
+            (
+                index
+                for index, message in enumerate(messages)
+                if message.get("role") == "system"
+                and str(message.get("content", "")).startswith("## System State")
+            ),
+            None,
+        )
+        if snapshot_index is None:
+            prefix = [
+                message for message in messages
+                if message.get("role") == "system" or message.get("pinned")
+            ]
+            conversation = [
+                message for message in messages
+                if message not in prefix
+                and message.get("status", "complete") == "complete"
+            ]
+        else:
+            prefix = messages[: snapshot_index + 1]
+            conversation = [
+                message for message in messages[snapshot_index + 1 :]
+                if message.get("status", "complete") == "complete"
+            ]
 
         selected_prefix: list[dict[str, Any]] = []
         used = 0
@@ -414,8 +431,11 @@ class CoordinatorService:
         self,
         db_session: SessionModel,
         project_id: str | None = None,
+        current_turn_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        return self._context_hierarchy().build_messages(db_session, project_id=project_id)
+        return self._context_hierarchy().build_messages(
+            db_session, project_id=project_id, current_turn_id=current_turn_id
+        )
 
     @staticmethod
     def completed_turn(
@@ -776,7 +796,7 @@ class CoordinatorService:
             ctx = self._context_hierarchy()
             ctx.compact_context(db_session)
             canonical = self.budget_messages(
-                ctx.build_messages(db_session),
+                ctx.build_messages(db_session, current_turn_id=turn_id),
                 resolved_model,
             )
             prompt = self.format_prompt(canonical)
@@ -890,7 +910,7 @@ class CoordinatorService:
             ctx = self._context_hierarchy()
             ctx.compact_context(db_session)
             canonical = self.budget_messages(
-                ctx.build_messages(db_session),
+                ctx.build_messages(db_session, current_turn_id=turn_id),
                 resolved_model,
             )
             prompt = self.format_prompt(canonical)

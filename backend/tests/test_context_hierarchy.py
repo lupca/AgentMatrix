@@ -102,22 +102,43 @@ def test_build_messages_tiered_ordering_and_pinned_flag(db_session):
     assert messages[1].get("pinned") is True
     assert "cache_control" not in messages[1]
 
-    # 3. Context snapshot (own dynamic message, not pinned)
-    assert messages[2]["role"] == "system"
-    assert "## System State" in messages[2]["content"]
-    assert "pinned" not in messages[2]
-    assert "cache_control" not in messages[2]
+    # Append-only history stays before the dynamic snapshot.
+    assert messages[2]["role"] == "user"
+    assert messages[2]["content"] == "Hello"
+    assert messages[3]["role"] == "assistant"
+    assert messages[3]["content"] == "Hi"
 
-    # 4. Task Context (Task System Header + Session messages)
-    assert messages[3]["role"] == "system"
-    assert "Task [TASK-001]" in messages[3]["content"]
-    assert "pinned" not in messages[3]
-    assert "cache_control" not in messages[3]
+    # Snapshot is followed by the live task suffix.
+    assert messages[4]["role"] == "system"
+    assert "## System State" in messages[4]["content"]
+    assert "pinned" not in messages[4]
+    assert messages[5]["role"] == "system"
+    assert "Task [TASK-001]" in messages[5]["content"]
 
-    assert messages[4]["role"] == "user"
-    assert messages[4]["content"] == "Hello"
-    assert messages[5]["role"] == "assistant"
-    assert messages[5]["content"] == "Hi"
+
+def test_old_tool_results_are_pruned_but_decision_fields_survive(db_session):
+    project = Project(id="proj-prune", name="Prune Project")
+    session = SessionModel(
+        id="sess-prune", project_id="proj-prune", context_level="project",
+        messages=[
+            {"role": "tool", "name": "update_task", "tool_call_id": f"call-{i}",
+             "turn_id": f"turn-{i}",
+             "content": '{"task_id": "CTV2-095", "verdict": "pass", "constraints": ["four-eyes"]}',
+             "status": "complete"}
+            for i in range(4)
+        ],
+    )
+    db_session.add_all([project, session])
+    db_session.commit()
+    hierarchy = ContextHierarchy(db_session)
+    hierarchy.tool_result_replay_turns = 2
+
+    tools = [m for m in hierarchy.get_task_context(session) if m["role"] == "tool"]
+    assert len(tools) == 4
+    assert "[Pruned tool result]" in tools[0]["content"]
+    assert "CTV2-095" in tools[0]["content"]
+    assert '"verdict": "pass"' in tools[0]["content"]
+    assert tools[-1]["content"].startswith('{"task_id"')
 
 
 def test_build_messages_prefix_stable_across_task_mutation(db_session):
@@ -163,9 +184,10 @@ def test_build_messages_prefix_stable_across_task_mutation(db_session):
 
     assert before[0] == after[0]  # Global tier bytes unchanged
     assert before[1] == after[1]  # Project tier bytes unchanged
-    assert before[2] != after[2]  # Snapshot message changed
-    assert "TASK-STABLE-2" in after[2]["content"]
-    assert "TASK-STABLE-2" not in before[2]["content"]
+    snapshot_index = next(i for i, m in enumerate(before) if "## System State" in m["content"])
+    assert before[snapshot_index] != after[snapshot_index]  # Snapshot message changed
+    assert "TASK-STABLE-2" in after[snapshot_index]["content"]
+    assert "TASK-STABLE-2" not in before[snapshot_index]["content"]
 
 
 def test_system_state_snapshot_stays_within_cap_at_scale(db_session):

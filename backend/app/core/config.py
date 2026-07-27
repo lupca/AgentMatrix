@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     HEADROOM_COMPRESSION_ENABLED: bool = False
     HEADROOM_MIN_CHARS: int = 1000
 
+    # Context replay: keep complete tool output only for the most recent turns.
+    TOOL_RESULT_REPLAY_TURNS: int = 3
+
     # LLM
     ANTHROPIC_API_KEY: str = ""
     GOOGLE_API_KEY: str = ""

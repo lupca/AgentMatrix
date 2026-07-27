@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ from typing import Any
 from sqlalchemy.orm import Session as DBSession
 
 from app.db.models import Project, Session as SessionModel, Task
+from app.core.config import settings
 from app.graph.context import get_context_snapshot
 from app.services import tool_definitions as _tool_definitions
 
@@ -37,6 +39,7 @@ class ContextHierarchy:
         self.db = db
         self._global_context: list[dict[str, Any]] | None = None
         self.graph = graph
+        self.tool_result_replay_turns = max(0, settings.TOOL_RESULT_REPLAY_TURNS)
 
     def _load_global(self) -> list[dict[str, Any]]:
         """Load global system prompt + gate rules."""
@@ -163,28 +166,111 @@ class ContextHierarchy:
             return None
         return "[LangGraph State] " + ", ".join(parts)
 
-    def get_task_context(self, session: SessionModel) -> list[dict[str, Any]]:
-        """Session messages for current task."""
+    def _task_header(self, session: SessionModel) -> dict[str, Any] | None:
+        """Return the live task header as a post-snapshot suffix block."""
+        if not session.task_id:
+            return None
+        task = self.db.query(Task).filter(Task.id == session.task_id).first()
+        if not task:
+            return None
+        content = (
+            f"You are Control Tower AI Assistant helping with Task [{task.id}]: "
+            f"'{task.title}'. Project: '{task.project}', Status: '{task.status}'."
+        )
+        if task.plan:
+            content += f"\nTask Plan:\n{task.plan}"
+        graph_summary = self._graph_state_summary(session.task_id)
+        if graph_summary:
+            content += f"\n{graph_summary}"
+        return {"role": "system", "content": content}
+
+    @staticmethod
+    def _tool_result_summary(message: dict[str, Any]) -> str:
+        """Build a compact, decision-preserving representation of old output."""
+
+        content = message.get("content", "")
+        try:
+            value = json.loads(content) if isinstance(content, str) else content
+        except (TypeError, ValueError):
+            value = content
+
+        important = {
+            "id", "task_id", "taskId", "verdict", "status", "action",
+            "result", "error", "title", "constraints", "constraint",
+        }
+
+        def compact(item: Any) -> Any:
+            if isinstance(item, dict):
+                selected = {key: compact(val) for key, val in item.items() if key in important}
+                return selected or {key: compact(val) for key, val in list(item.items())[:4]}
+            if isinstance(item, list):
+                return [compact(val) for val in item[:4]]
+            return item
+
+        detail = compact(value)
+        rendered = json.dumps(detail, ensure_ascii=False, sort_keys=True) if not isinstance(detail, str) else detail
+        if len(rendered) > 600:
+            rendered = rendered[:597] + "..."
+        tool_name = message.get("name") or message.get("tool_name") or "unknown"
+        call_id = message.get("tool_call_id") or "unknown"
+        return f"[Pruned tool result] tool={tool_name} tool_call_id={call_id} result={rendered}"
+
+    def _replay_session_messages(self, session: SessionModel) -> list[dict[str, Any]]:
+        """Replay history while retaining complete results for recent tool turns."""
+
+        raw = [
+            message for message in list(session.messages or [])
+            if message.get("status", "complete") == "complete"
+            and message.get("role") in {"user", "assistant", "tool", "system"}
+        ]
+        tool_turns: list[str] = []
+        for message in raw:
+            if message.get("role") == "tool" and message.get("turn_id"):
+                turn_id = str(message["turn_id"])
+                if turn_id not in tool_turns:
+                    tool_turns.append(turn_id)
+        full_turns = set(tool_turns[-self.tool_result_replay_turns:])
+
+        replay: list[dict[str, Any]] = []
+        summarized_turns: set[str] = set()
+        for message in raw:
+            if message.get("role") != "tool" or not message.get("turn_id"):
+                replay.append(message)
+                continue
+            turn_id = str(message["turn_id"])
+            if turn_id in full_turns:
+                replay.append(message)
+            elif turn_id not in summarized_turns:
+                replay.append({
+                    "role": "tool",
+                    "turn_id": turn_id,
+                    "content": self._tool_result_summary(message),
+                })
+                summarized_turns.add(turn_id)
+        return replay
+
+    def get_task_context(
+        self,
+        session: SessionModel,
+        *,
+        include_latest_user: bool = True,
+        include_task_header: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Task header plus durable session history, with bounded tool replay."""
         messages: list[dict[str, Any]] = []
 
-        if session.task_id:
-            task = self.db.query(Task).filter(Task.id == session.task_id).first()
-            if task:
-                content = (
-                    f"You are Control Tower AI Assistant helping with Task [{task.id}]: "
-                    f"'{task.title}'. Project: '{task.project}', Status: '{task.status}'."
-                )
-                if task.plan:
-                    content += f"\nTask Plan:\n{task.plan}"
-                graph_summary = self._graph_state_summary(session.task_id)
-                if graph_summary:
-                    content += f"\n{graph_summary}"
-                messages.append({"role": "system", "content": content})
+        if include_task_header:
+            task_header = self._task_header(session)
+            if task_header:
+                messages.append(task_header)
 
-        for message in list(session.messages or []):
-            if message.get("status", "complete") != "complete":
-                continue
-            if message.get("role") not in {"user", "assistant", "tool", "system"}:
+        history = self._replay_session_messages(session)
+        latest_user_index = next(
+            (index for index in range(len(history) - 1, -1, -1) if history[index].get("role") == "user"),
+            None,
+        )
+        for index, message in enumerate(history):
+            if not include_latest_user and index == latest_user_index:
                 continue
             item = {
                 "role": message["role"],
@@ -201,14 +287,13 @@ class ContextHierarchy:
         self,
         session: SessionModel,
         project_id: str | None = None,
+        current_turn_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Compose tiers in increasing order of volatility:
 
-        Global (static) -> Project (semi-stable) -> Snapshot (dynamic) ->
-        Task/session (dynamic). Global and Project messages are marked
-        ``pinned: True`` so ``budget_messages`` keeps them as a stable
-        prefix; the snapshot is its own message so a project/task mutation
-        no longer rewrites the Global tier's bytes.
+        Global -> Project -> append-only task/history -> Snapshot -> latest user.
+        The snapshot is deliberately last in the stable prefix so mutations do
+        not invalidate the history that precedes it.
         """
         if not project_id and session.task_id:
             task = self.db.query(Task).filter(Task.id == session.task_id).first()
@@ -229,13 +314,37 @@ class ContextHierarchy:
             messages.extend(project_ctx)
             messages[-1]["pinned"] = True
 
-        # Tier 2.5: Context snapshot (dynamic, own message - not pinned)
+        # Task/history precedes the dynamic snapshot. The newest user message
+        # is placed after the snapshot as the request-specific suffix.
+        task_context = self.get_task_context(
+            session,
+            include_latest_user=current_turn_id is None,
+            include_task_header=False,
+        )
+        messages.extend(task_context)
+
+        # Dynamic snapshot: keep this as the last prefix block.
         messages.append(
             {"role": "system", "content": get_context_snapshot(session, self.db)}
         )
 
-        # Tier 3: Task (dynamic - not pinned)
-        messages.extend(self.get_task_context(session))
+        task_header = self._task_header(session)
+        if task_header:
+            messages.append(task_header)
+
+        if current_turn_id and session.messages:
+            latest_user = next(
+                (message for message in reversed(session.messages)
+                 if message.get("role") == "user"
+                 and message.get("turn_id") == current_turn_id
+                 and message.get("status", "complete") == "complete"),
+                None,
+            )
+            if latest_user:
+                messages.append({
+                    key: latest_user[key] for key in ("role", "content", "name", "tool_name", "tool_call_id", "tool_calls")
+                    if key in latest_user
+                })
 
         return messages
 

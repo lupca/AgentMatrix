@@ -37,6 +37,7 @@ def _usage_totals(rows: list[LLMUsage]) -> dict[str, Any]:
     input_tokens = sum(row.input_tokens or 0 for row in rows)
     output_tokens = sum(row.output_tokens or 0 for row in rows)
     cached_tokens = sum(row.cached_tokens or 0 for row in rows)
+    uncached_tokens = max(0, input_tokens - cached_tokens)
     cost = sum((row.cost_usd or Decimal("0") for row in rows), Decimal("0"))
     latency = sum(row.latency_ms or 0 for row in rows)
     return {
@@ -44,6 +45,7 @@ def _usage_totals(rows: list[LLMUsage]) -> dict[str, Any]:
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
         "cached_tokens": cached_tokens,
+        "uncached_tokens": uncached_tokens,
         # Cached input is a subset of input, so it must not be double counted.
         "total_tokens": input_tokens + output_tokens,
         "cost_usd": round(float(cost), 8),
@@ -158,6 +160,7 @@ def get_token_stats(
         "total_input_tokens": totals["input_tokens"],
         "total_output_tokens": totals["output_tokens"],
         "total_cached_tokens": totals["cached_tokens"],
+        "total_uncached_tokens": totals["uncached_tokens"],
         "total_tokens": totals["total_tokens"],
         "total_cost_usd": totals["cost_usd"],
         "average_latency_ms": totals["average_latency_ms"],
