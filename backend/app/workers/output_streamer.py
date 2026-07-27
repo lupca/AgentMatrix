@@ -25,6 +25,7 @@ redis_client = redis.Redis.from_url(
     retry_on_error=[
         redis.ConnectionError,
         redis.TimeoutError,
+        redis.BusyLoadingError,
         ConnectionResetError,
     ],
 )
@@ -49,7 +50,7 @@ def _publish(run_id: str, payload: dict[str, Any]) -> None:
         try:
             redis_client.publish(get_channel(run_id), encoded)
             return
-        except (redis.ConnectionError, redis.TimeoutError) as exc:
+        except (redis.ConnectionError, redis.TimeoutError, redis.BusyLoadingError) as exc:
             last_error = exc
             time.sleep(0.1 * (2**attempt))
     logger.warning("Unable to publish Redis event for run %s: %s", run_id, last_error)
@@ -98,12 +99,12 @@ def request_cancel(run_id: str, *, ttl_seconds: int = 86_400) -> None:
 def clear_cancel_request(run_id: str) -> None:
     try:
         redis_client.delete(get_cancel_key(run_id))
-    except (redis.ConnectionError, redis.TimeoutError):
+    except (redis.ConnectionError, redis.TimeoutError, redis.BusyLoadingError):
         logger.warning("Could not clear cancellation key for run %s", run_id)
 
 
 def is_cancel_requested(run_id: str) -> bool:
     try:
         return bool(redis_client.exists(get_cancel_key(run_id)))
-    except (redis.ConnectionError, redis.TimeoutError):
+    except (redis.ConnectionError, redis.TimeoutError, redis.BusyLoadingError):
         return False
