@@ -41,6 +41,15 @@ class IdempotencyConflictError(OrchestrationError):
     pass
 
 
+class StaleIdempotencyRecordError(OrchestrationError):
+    """A cached gate record refers to a run that is no longer active.
+
+    Returning this record's cached ``applied=True`` result would tell the
+    caller a dispatch is in flight when in fact nothing is running. Callers
+    must retry with a new idempotency key rather than reusing the stale one.
+    """
+
+
 @dataclass(frozen=True)
 class TransitionResult:
     task: Task
@@ -60,6 +69,9 @@ class TaskOrchestrationService:
     MODES = {"supervised", "plan-only", "bypass"}
     GATED_ACTIONS = {"dispatch", "review_order", "verdict"}
     PATCHABLE_FIELDS = {"plan", "acceptance_criteria", "priority", "tags"}
+    # A run in any of these statuses is no longer "in flight" — queued/running
+    # are the only statuses a dispatch caller may safely be told are active.
+    _DEAD_RUN_STATUSES = {"success", "failed", "timeout", "cancelled"}
 
     def __init__(self, db: Session):
         self.db = db
@@ -205,6 +217,7 @@ class TaskOrchestrationService:
         input_hash = self._input_hash(decision_payload)
         existing = self._idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
+            self._reject_if_stale_dispatch_record(existing)
             return self._result_for_record(task, existing)
 
         prior_decision = (
@@ -493,6 +506,7 @@ class TaskOrchestrationService:
         input_hash = self._input_hash(request_payload)
         existing = self._idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
+            self._reject_if_stale_dispatch_record(existing)
             return self._result_for_record(task, existing)
         self._assert_status(task, expected_status)
         if gate_type == "dispatch":
@@ -723,6 +737,28 @@ class TaskOrchestrationService:
                 f"Idempotency key {idempotency_key!r} was reused with different input"
             )
         return record
+
+    def _reject_if_stale_dispatch_record(self, record: GateRecord) -> None:
+        """Guard against handing back a dispatch "success" for a dead run.
+
+        A cached dispatch-gate record whose AgentRun has already left
+        queued/running (succeeded, failed, timed out, or was cancelled) is no
+        longer "in flight". Returning it as ``applied=True`` would make a
+        caller believe a run is actively executing when none is; the caller
+        must obtain a fresh idempotency key (e.g. a new attempt number) and
+        retry instead.
+        """
+        if record.gate_type != "dispatch" or record.status != "approved":
+            return
+        if not record.output_ref:
+            return
+        run = self.db.get(AgentRun, record.output_ref)
+        if run is not None and run.status in self._DEAD_RUN_STATUSES:
+            raise StaleIdempotencyRecordError(
+                f"Idempotency key {record.idempotency_key!r} refers to run "
+                f"{run.id!r} which is already terminal (status={run.status!r}); "
+                "retry dispatch with a new idempotency key"
+            )
 
     def _result_for_record(
         self,

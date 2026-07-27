@@ -122,6 +122,136 @@ async def test_command_router_persists_run_before_enqueueing(db_session):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_retry_after_queue_failure_creates_new_run(db_session):
+    """Regression for CTV2-088: `_command_key` used to hash session+action+args
+    only, so a coordinator retry of `/dispatch` after a queue failure reused
+    the exact same idempotency key. The stale ledger record (still `approved`,
+    still pointing at the now-dead AgentRun) was returned as `applied=True`
+    without ever creating a new run — a silent stuck dispatch. The attempt
+    number in the key, plus the stale-record guard, must force a fresh run."""
+    from app.db.models import Agent, AgentRun, Project, Task
+    from app.services.task_orchestration import TaskOrchestrationService
+
+    db_session.add(Project(id="proj-retry", name="Retry Project", repo_root="/tmp"))
+    db_session.add(
+        Agent(id="@agent-retry", name="Agent Retry", role="executor", cli="codex")
+    )
+    db_session.add(
+        Task(
+            id="TASK-RETRY",
+            project="proj-retry",
+            title="Retry task",
+            status="todo",
+            current_gate="spec",
+            mode="bypass",
+        )
+    )
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+
+    with patch(
+        "app.workers.agent_runner.run_agent.send",
+        side_effect=RuntimeError("queue unavailable"),
+    ):
+        first = await router.execute("dispatch_task", "TASK-RETRY @agent-retry", "s-1")
+
+    assert "error" in first
+    first_run_id = first["run_id"]
+    first_run = db_session.get(AgentRun, first_run_id)
+    assert first_run.status == "failed"
+    task = db_session.get(Task, "TASK-RETRY")
+    assert task.status == "todo"  # queue-failure handling resets it
+
+    with patch("app.workers.agent_runner.run_agent.send") as mock_send:
+        second = await router.execute("dispatch_task", "TASK-RETRY @agent-retry", "s-1")
+
+    assert second["action"] == "dispatched"
+    assert second["run_id"] != first_run_id
+    mock_send.assert_called_once()
+    assert (
+        db_session.query(AgentRun).filter(AgentRun.task_id == "TASK-RETRY").count()
+        == 2
+    )
+
+
+def test_concurrent_dispatch_with_same_idempotency_key_creates_one_run(tmp_path):
+    """AC: two concurrent calls with identical args in the same cycle must
+    only ever create a single AgentRun, relying on the existing DB
+    idempotency-key uniqueness rather than widening any row lock."""
+    import threading
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.base import Base
+    from app.db.models import Agent, AgentRun, Project, Task
+    from app.services.task_orchestration import TaskOrchestrationService
+
+    db_path = tmp_path / "race.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}", connect_args={"timeout": 30, "check_same_thread": False}
+    )
+    Base.metadata.create_all(engine)
+    SessionFactory = sessionmaker(bind=engine)
+
+    setup = SessionFactory()
+    setup.add(Project(id="proj-race", name="Race Project", repo_root="/tmp"))
+    setup.add(Agent(id="@agent-race", name="Agent Race", role="executor", cli="codex"))
+    setup.add(
+        Task(
+            id="TASK-RACE",
+            project="proj-race",
+            title="Race task",
+            status="todo",
+            mode="bypass",
+        )
+    )
+    setup.commit()
+    setup.close()
+
+    barrier = threading.Barrier(2)
+    results = []
+    results_lock = threading.Lock()
+
+    def attempt():
+        session = SessionFactory()
+        try:
+            barrier.wait(timeout=5)
+            result = TaskOrchestrationService(session).request_dispatch(
+                task_id="TASK-RACE",
+                agent_id="@agent-race",
+                actor="@operator",
+                idempotency_key="race-key",
+            )
+            run_id = result.agent_run.id if result.agent_run else None
+            with results_lock:
+                results.append(("ok", run_id))
+        except Exception as exc:  # noqa: BLE001 - any failure is recorded, not raised
+            with results_lock:
+                results.append(("error", type(exc).__name__))
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    successful_run_ids = {run_id for kind, run_id in results if kind == "ok"}
+    assert len(successful_run_ids) <= 1
+
+    verify = SessionFactory()
+    try:
+        assert (
+            verify.query(AgentRun).filter(AgentRun.task_id == "TASK-RACE").count() == 1
+        )
+    finally:
+        verify.close()
+
+
+@pytest.mark.asyncio
 async def test_query_db_agents_never_includes_api_key(db_session):
     from app.db.models import Agent
 

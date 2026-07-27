@@ -443,7 +443,10 @@ class CommandRouter:
                 agent_id=agent_id,
                 actor=f"chat:{session_id or 'anonymous'}",
                 idempotency_key=self._command_key(
-                    session_id, "dispatch", args
+                    session_id,
+                    "dispatch",
+                    args,
+                    attempt=self._dispatch_attempt(task_id),
                 ),
             )
         except OrchestrationError as exc:
@@ -827,9 +830,24 @@ class CommandRouter:
         }
 
     @staticmethod
-    def _command_key(session_id: str, action: str, args: str) -> str:
+    def _command_key(session_id: str, action: str, args: str, attempt: int = 1) -> str:
         digest = hashlib.sha256(args.strip().encode("utf-8")).hexdigest()[:24]
-        return f"chat:{session_id or 'anonymous'}:{action}:{digest}"[:100]
+        return (
+            f"chat:{session_id or 'anonymous'}:{action}:{digest}:{attempt}"[:100]
+        )
+
+    def _dispatch_attempt(self, task_id: str) -> int:
+        """Number of times this task has already had a run created for it.
+
+        Deterministic from persisted state (not a timestamp/random nonce) so
+        the same coordinator retry always maps to a stable, resumable key —
+        while a genuinely new attempt (issued after a prior run exists) gets
+        a fresh idempotency key instead of colliding with a stale one.
+        """
+        existing_runs = (
+            self.db.query(AgentRun).filter(AgentRun.task_id == task_id).count()
+        )
+        return existing_runs + 1
 
     async def _handle_get_status(self, args: str, session_id: str) -> dict:
         if not self.db:

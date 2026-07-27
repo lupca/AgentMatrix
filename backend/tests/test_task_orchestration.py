@@ -4,6 +4,7 @@ from sqlalchemy.exc import StatementError
 from app.db.models import Agent, AgentRun, GateRecord, Project, Task
 from app.services.task_orchestration import (
     IdempotencyConflictError,
+    StaleIdempotencyRecordError,
     TaskOrchestrationService,
 )
 
@@ -129,6 +130,44 @@ def test_gate_records_are_append_only(orchestration, db_session):
     with pytest.raises((ValueError, StatementError), match="append-only"):
         db_session.commit()
     db_session.rollback()
+
+
+def test_reusing_idempotency_key_after_run_goes_terminal_is_rejected(
+    orchestration,
+    db_session,
+):
+    """Regression for CTV2-088: a stale dispatch record must never be
+    replayed as `applied=True` once its AgentRun has left queued/running,
+    even though the task's own status has since reverted to a state that
+    would otherwise pass `_assert_status` (e.g. after a queue failure)."""
+    task = _task(db_session, "GATE-STALE", mode="bypass")
+
+    first = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="stale-key",
+    )
+    assert first.applied is True
+    run = first.agent_run
+    assert run is not None
+
+    # Simulate the run dying (e.g. the queue failed to accept it) and the
+    # task being reset to "todo" so it once again satisfies expected_status.
+    run.status = "failed"
+    task.status = "todo"
+    db_session.commit()
+
+    with pytest.raises(StaleIdempotencyRecordError):
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="stale-key",
+        )
+
+    # No new run was silently created, and the dead run is still the only one.
+    assert db_session.query(AgentRun).filter(AgentRun.task_id == task.id).count() == 1
 
 
 def test_decide_gate_idempotent_retry_preserves_dispatch_context(orchestration, db_session):
