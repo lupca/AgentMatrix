@@ -566,11 +566,12 @@ def test_project_context_capped_at_25kb(db_session):
     assert "truncated" in proj_ctx[0]["content"]
 
 
-def test_task_context_enriches_with_langgraph_state(db_session):
-    from app.graph.builder import build_graph
-    from langgraph.checkpoint.memory import MemorySaver
-
-    task = Task(id="GRAPH-1", project="proj-graph", title="Graph Task", status="dispatched")
+def test_task_context_enriches_with_persisted_gate_state(db_session):
+    task = Task(
+        id="GRAPH-1", project="proj-graph", title="Graph Task", status="done",
+        current_gate="verdict", verdict="pass", findings=["all good"],
+        executor="@executor", reviewer="@reviewer", result_ref="base..head",
+    )
     session = SessionModel(
         id="sess-graph",
         task_id="GRAPH-1",
@@ -581,19 +582,16 @@ def test_task_context_enriches_with_langgraph_state(db_session):
     db_session.add_all([task, session])
     db_session.commit()
 
-    graph = build_graph(checkpointer=MemorySaver())
-    config = {"configurable": {"thread_id": "GRAPH-1"}}
-    graph.invoke({"raw_input": "ship it", "task_id": "GRAPH-1"}, config=config)
-
-    hierarchy = ContextHierarchy(db_session, graph=graph)
+    hierarchy = ContextHierarchy(db_session)
     task_ctx = hierarchy.get_task_context(session)
 
     assert len(task_ctx) == 1
-    assert "[LangGraph State]" in task_ctx[0]["content"]
+    assert "[Task Gate State]" in task_ctx[0]["content"]
     assert "verdict=pass" in task_ctx[0]["content"]
+    assert "findings=all good" in task_ctx[0]["content"]
 
 
-def test_task_context_without_graph_is_unaffected(db_session):
+def test_task_context_without_gate_record_is_still_enriched(db_session):
     task = Task(id="NOGRAPH-1", project="proj-nograph", title="No Graph Task", status="todo")
     session = SessionModel(
         id="sess-nograph",
@@ -609,7 +607,7 @@ def test_task_context_without_graph_is_unaffected(db_session):
     task_ctx = hierarchy.get_task_context(session)
 
     assert len(task_ctx) == 1
-    assert "[LangGraph State]" not in task_ctx[0]["content"]
+    assert "[Task Gate State]" in task_ctx[0]["content"]
 
 
 @pytest.mark.asyncio

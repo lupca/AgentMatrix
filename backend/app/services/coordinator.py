@@ -155,7 +155,6 @@ class CoordinatorService:
         max_tool_iterations: int | None = None,
         max_turn_tokens: int | None = None,
         max_repeated_tool_calls: int | None = None,
-        graph: Any | None = None,
     ):
         if dispatcher is not None and cli_dispatcher is not None:
             raise ValueError("Pass either dispatcher or cli_dispatcher, not both")
@@ -163,10 +162,6 @@ class CoordinatorService:
             raise ValueError("Pass either router or providers, not both")
         self.db = db
         self.dispatcher = dispatcher or cli_dispatcher or CLIDispatcher()
-        # Optional compiled LangGraph pipeline (see app.graph.builder.build_graph).
-        # When provided, ContextHierarchy enriches Task-tier context with live
-        # gate state read from the graph's checkpointer.
-        self.graph = graph
         if router is not None:
             self.router = router
         elif providers is not None:
@@ -443,7 +438,7 @@ class CoordinatorService:
         return drop_orphan_tool_pairs(selected_prefix + selected_recent)
 
     def _context_hierarchy(self) -> ContextHierarchy:
-        return ContextHierarchy(self.db, graph=self.graph)
+        return ContextHierarchy(self.db)
 
     def _canonical_messages(
         self,

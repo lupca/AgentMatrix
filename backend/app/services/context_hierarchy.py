@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session as DBSession
 
-from app.db.models import Project, Session as SessionModel, Task
+from app.db.models import GateRecord, Project, Session as SessionModel, Task
 from app.core.config import settings
 from app.core.compression import count_tokens, context_window_for_model
 from app.graph.context import get_context_snapshot
@@ -74,16 +74,13 @@ def drop_orphan_tool_pairs(messages: list[dict[str, Any]]) -> list[dict[str, Any
 class ContextHierarchy:
     """Compose 3-tiered prompt context (Global -> Project -> Task) with Anthropic prompt caching markers.
 
-    Optionally integrates with a compiled LangGraph pipeline (see
-    ``app.graph.builder.build_graph``): when ``graph`` is provided, the Task
-    tier enriches its system message with the gate pipeline's live state
-    (current gate, verdict, findings) read via the graph's checkpointer.
+    The Task tier enriches its system message with the authoritative task
+    lifecycle state persisted by TaskOrchestrationService and GateRecord.
     """
 
-    def __init__(self, db: DBSession, graph: Any | None = None):
+    def __init__(self, db: DBSession):
         self.db = db
         self._global_context: list[dict[str, Any]] | None = None
-        self.graph = graph
         self.tool_result_replay_turns = max(0, settings.TOOL_RESULT_REPLAY_TURNS)
 
     def _load_global(self) -> list[dict[str, Any]]:
@@ -184,32 +181,37 @@ class ContextHierarchy:
         ]
 
     def _graph_state_summary(self, task_id: str | None) -> str | None:
-        """Read live gate-pipeline state for ``task_id`` from the LangGraph checkpointer."""
-        if not self.graph or not task_id:
+        """Read authoritative gate state persisted for ``task_id``."""
+        if not task_id:
             return None
-        try:
-            snapshot = self.graph.get_state({"configurable": {"thread_id": task_id}})
-        except Exception as e:
-            logger.warning("Failed to read LangGraph checkpoint for task %s: %s", task_id, e)
-            return None
-
-        values = getattr(snapshot, "values", None) if snapshot else None
-        if not values:
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if task is None:
             return None
 
         parts: list[str] = []
-        gate = values.get("current_gate")
-        if gate is not None:
-            parts.append(f"current_gate={getattr(gate, 'value', gate)}")
-        verdict = values.get("verdict")
+        if task.current_gate:
+            parts.append(f"current_gate={task.current_gate}")
+        verdict = task.verdict
         if verdict:
             parts.append(f"verdict={verdict}")
-        findings = values.get("findings")
+        findings = task.findings or []
+        if not findings:
+            latest_verdict = (
+                self.db.query(GateRecord)
+                .filter(
+                    GateRecord.task_id == task_id,
+                    GateRecord.gate_type == "verdict",
+                )
+                .order_by(GateRecord.id.desc())
+                .first()
+            )
+            payload = (latest_verdict.input_payload or {}) if latest_verdict else {}
+            findings = payload.get("findings", [])
         if findings:
-            parts.append(f"findings={'; '.join(findings)}")
+            parts.append(f"findings={'; '.join(map(str, findings))}")
         if not parts:
             return None
-        return "[LangGraph State] " + ", ".join(parts)
+        return "[Task Gate State] " + ", ".join(parts)
 
     def _task_header(self, session: SessionModel) -> dict[str, Any] | None:
         """Return the live task header as a post-snapshot suffix block."""
@@ -224,9 +226,9 @@ class ContextHierarchy:
         )
         if task.plan:
             content += f"\nTask Plan:\n{task.plan}"
-        graph_summary = self._graph_state_summary(session.task_id)
-        if graph_summary:
-            content += f"\n{graph_summary}"
+        gate_summary = self._graph_state_summary(session.task_id)
+        if gate_summary:
+            content += f"\n{gate_summary}"
         return {"role": "system", "content": content}
 
     @staticmethod
