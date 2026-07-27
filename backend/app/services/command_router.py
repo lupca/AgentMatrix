@@ -886,18 +886,24 @@ class CommandRouter:
 
         try:
             gate_record_id = int(raw_id)
+            # Look up task_id from gate record
+            gate_rec = self.db.query(GateRecord).filter(GateRecord.id == gate_record_id).first()
+            if gate_rec is None:
+                return {'error': f'Gate record {gate_record_id} not found'}
+            task_id = gate_rec.task_id
         except ValueError:
+            task_id = raw_id
             pending = (
                 self.db.query(GateRecord)
                 .filter(
-                    GateRecord.task_id == raw_id,
+                    GateRecord.task_id == task_id,
                     GateRecord.status == "pending",
                 )
                 .order_by(GateRecord.id.desc())
                 .first()
             )
             if pending is None:
-                return {'error': f'No pending gate found for task {raw_id}'}
+                return {'error': f'No pending gate found for task {task_id}'}
             gate_record_id = pending.id
         service = TaskOrchestrationService(self.db)
         try:
@@ -905,7 +911,7 @@ class CommandRouter:
                 gate_record_id=gate_record_id,
                 decision=decision,
                 actor=f"chat:{session_id or 'anonymous'}",
-                idempotency_key=self._command_key(session_id, "approve", args),
+                idempotency_key=self._command_key(session_id, "approve", args, self._approve_attempt(task_id)),
             )
         except OrchestrationError as exc:
             return {'error': str(exc)}
@@ -1170,6 +1176,23 @@ class CommandRouter:
             self.db.query(AgentRun).filter(AgentRun.task_id == task_id).count()
         )
         return existing_runs + 1
+
+    def _approve_attempt(self, task_id: str) -> int:
+        """Number of gate decisions already made for this task.
+
+        Used to generate unique idempotency keys for approve_gate retries,
+        allowing users to change agent or retry after a crash while keeping
+        full history of all attempts.
+        """
+        existing_decisions = (
+            self.db.query(GateRecord)
+            .filter(
+                GateRecord.task_id == task_id,
+                GateRecord.status.in_(["approved", "rejected"]),
+            )
+            .count()
+        )
+        return existing_decisions + 1
 
     async def _handle_get_status(self, args: str, session_id: str) -> dict:
         if not self.db:
