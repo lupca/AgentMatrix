@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.db.base import Base, engine
@@ -18,10 +19,21 @@ from app.api import (
 # Ensure tables are created
 Base.metadata.create_all(bind=engine)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: start Redis subscriber for WebSocket notifications
+    ws.start_redis_subscriber()
+    yield
+    # Shutdown: stop Redis subscriber
+    ws.stop_redis_subscriber()
+
+
 app = FastAPI(
     title="Control Tower V2 API",
     description="FastAPI CRUD & State Management for Control Tower V2",
-    version="0.1.0"
+    version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(

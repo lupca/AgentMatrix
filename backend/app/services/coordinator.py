@@ -294,15 +294,15 @@ class CoordinatorService:
         global_session.last_activity_at = datetime.now(timezone.utc)
         self.db.commit()
 
-        # Notify connected clients about the task status update
-        from app.api.ws import publish_event
-        publish_event({
-            "type": "task_rollup",
-            "session_id": global_session.id,
-            "task_id": task.id,
-            "status": payload["status"],
-            "message": message,
-        })
+        # Notify connected clients via Redis (works from both API and worker)
+        from app.workers.output_streamer import publish_task_event
+        publish_task_event(
+            "task_rollup",
+            session_id=global_session.id,
+            task_id=task.id,
+            status=payload["status"],
+            message=message,
+        )
 
         return message
 
