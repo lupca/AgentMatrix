@@ -451,6 +451,11 @@ def test_context_compaction_keeps_tool_call_pairs_through_adapter(db_session):
     assert assistant_ids == tool_ids == {first_call, second_call}
     assert "CTV2-095" in next(m["content"] for m in rendered if m.get("tool_call_id") == first_call)
 
+    # Pair-preserving expansion pushed the real cutoff to index 1 (only the
+    # leading "requests" message was dropped) — the summary must say so, not
+    # the pre-expansion "10 kept" guess (2 messages).
+    assert "Summarized 1 previous messages" in session.messages[0]["content"]
+
 
 def test_get_tool_definitions_returns_only_baseline_eager_tools(db_session):
     hierarchy = ContextHierarchy(db_session)

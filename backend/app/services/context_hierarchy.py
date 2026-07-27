@@ -26,6 +26,50 @@ _TRUNCATION_NOTICE = "\n\n[... project context truncated to fit 25KB cap ...]"
 PROJECT_MEMORY_TASK_LIMIT = 5
 
 
+def drop_orphan_tool_pairs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip assistant ``tool_calls`` entries and ``tool`` messages left unpaired.
+
+    Safety net for any place a message list may be truncated (compaction,
+    token budgeting) in a way that separates an assistant's tool_calls[]
+    from the matching tool result — OpenAI-compatible APIs reject that
+    pairing mismatch with a 400.
+    """
+
+    retained_call_ids = {
+        str(call["id"])
+        for message in messages
+        if message.get("role") == "assistant"
+        for call in (message.get("tool_calls") or [])
+        if isinstance(call, dict) and call.get("id") is not None
+    }
+    retained_tool_ids = {
+        str(message["tool_call_id"])
+        for message in messages
+        if message.get("role") == "tool" and message.get("tool_call_id") is not None
+    }
+    paired_call_ids = retained_call_ids & retained_tool_ids
+
+    sanitized: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            message = dict(message)
+            tool_calls = [
+                call for call in message["tool_calls"]
+                if isinstance(call, dict)
+                and call.get("id") is not None
+                and str(call["id"]) in paired_call_ids
+            ]
+            message.pop("tool_calls", None)
+            if tool_calls:
+                message["tool_calls"] = tool_calls
+        elif message.get("role") == "tool":
+            call_id = message.get("tool_call_id")
+            if call_id is None or str(call_id) not in paired_call_ids:
+                continue
+        sanitized.append(message)
+    return sanitized
+
+
 class ContextHierarchy:
     """Compose 3-tiered prompt context (Global -> Project -> Task) with Anthropic prompt caching markers.
 
@@ -380,13 +424,6 @@ class ContextHierarchy:
         if len(raw_msgs) <= threshold:
             return False
 
-        older_count = max(0, len(raw_msgs) - 10)
-        if summary is None:
-            summary = (
-                f"[Context Compaction: Summarized {older_count} previous messages "
-                "in conversation history]"
-            )
-
         # Do not cut through an assistant tool call/result pair.  A plain
         # suffix slice can retain a tool result while dropping the assistant
         # message that declared its tool_call_id (or vice versa), producing
@@ -414,39 +451,17 @@ class ContextHierarchy:
                 break
             start = expanded_start
 
-        kept = [dict(message) for message in raw_msgs[start:]]
-        retained_call_ids = {
-            str(call["id"])
-            for message in kept
-            if message.get("role") == "assistant"
-            for call in (message.get("tool_calls") or [])
-            if isinstance(call, dict) and call.get("id") is not None
-        }
-        retained_tool_ids = {
-            str(message["tool_call_id"])
-            for message in kept
-            if message.get("role") == "tool" and message.get("tool_call_id") is not None
-        }
-        paired_call_ids = retained_call_ids & retained_tool_ids
+        # ``start`` may have been pushed earlier than the original -10 cut to
+        # avoid splitting a tool call/result pair, so the count below must
+        # reflect the boundary actually used, not the pre-expansion guess.
+        if summary is None:
+            summary = (
+                f"[Context Compaction: Summarized {start} previous messages "
+                "in conversation history]"
+            )
 
-        sanitized: list[dict[str, Any]] = []
-        for message in kept:
-            if message.get("role") == "assistant" and message.get("tool_calls"):
-                tool_calls = [
-                    call for call in message["tool_calls"]
-                    if isinstance(call, dict)
-                    and call.get("id") is not None
-                    and str(call["id"]) in paired_call_ids
-                ]
-                message.pop("tool_calls", None)
-                if tool_calls:
-                    message["tool_calls"] = tool_calls
-            elif message.get("role") == "tool":
-                call_id = message.get("tool_call_id")
-                if call_id is None or str(call_id) not in paired_call_ids:
-                    continue
-            sanitized.append(message)
-        kept = sanitized
+        kept = [dict(message) for message in raw_msgs[start:]]
+        kept = drop_orphan_tool_pairs(kept)
         summary_msg = {
             "id": f"msg-compact-{session.id}",
             "role": "system",

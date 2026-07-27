@@ -372,6 +372,43 @@ def test_context_budget_keeps_newest_turns_and_system_prefix(db_session):
     assert all(message["content"] != "old " * 30 for message in budgeted)
 
 
+def test_context_budget_does_not_reorphan_tool_call_pairs(db_session):
+    """budget_messages can drop the assistant side of a pair while keeping the
+    (smaller, newer) tool result, which would otherwise leave a provider-invalid
+    orphan tool message in the final request."""
+    service = CoordinatorService(
+        db_session,
+        max_output_tokens=10,
+        context_safety_tokens=0,
+        context_windows={"claude": 35},
+    )
+    messages = [
+        {"role": "system", "content": "system"},
+        {
+            "role": "assistant", "content": "older " * 20,
+            "tool_calls": [{"id": "c1", "name": "get_status", "input": {}}],
+        },
+        {"role": "tool", "tool_call_id": "c1", "name": "get_status", "content": "ok"},
+        {"role": "user", "content": "newest"},
+    ]
+
+    budgeted = service.budget_messages(messages, "claude-test")
+
+    assistant_ids = {
+        call["id"]
+        for message in budgeted
+        if message["role"] == "assistant"
+        for call in (message.get("tool_calls") or [])
+    }
+    tool_ids = {
+        message["tool_call_id"]
+        for message in budgeted
+        if message["role"] == "tool"
+    }
+    assert assistant_ids == tool_ids
+    assert budgeted[-1]["content"] == "newest"
+
+
 def test_provider_router_resolves_only_openai_adapter():
     openai = _FakeProvider("openai", [])
     router = ProviderRouter({"openai": openai})

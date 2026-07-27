@@ -30,7 +30,7 @@ from app.services.cli_dispatcher import (
     format_history_as_prompt,
     route_model,
 )
-from app.services.context_hierarchy import ContextHierarchy
+from app.services.context_hierarchy import ContextHierarchy, drop_orphan_tool_pairs
 from app.services.crypto import decrypt_api_key
 from app.services.command_router import CommandRouter
 from app.services.tool_registry import get_group_tool_definitions, get_spec, resolve_tool_name
@@ -436,7 +436,11 @@ class CoordinatorService:
                 selected_recent.append(truncated)
             break
         selected_recent.reverse()
-        return selected_prefix + selected_recent
+        # Token budgeting can trim either side of the prefix/recent split
+        # independently, which may separate an assistant's tool_calls[] from
+        # its tool result (or vice versa) even though compact_context already
+        # protected the stored history — sanitize the final selection too.
+        return drop_orphan_tool_pairs(selected_prefix + selected_recent)
 
     def _context_hierarchy(self) -> ContextHierarchy:
         return ContextHierarchy(self.db, graph=self.graph)
