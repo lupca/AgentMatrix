@@ -210,16 +210,20 @@ class TaskOrchestrationService:
     ) -> TransitionResult:
         if kind not in {"execute", "review"}:
             raise PrerequisiteError(f"Invalid dispatch kind: {kind}")
-        if expected_status is None:
-            expected_status = "awaiting-review" if kind == "review" else "todo"
-        elif kind == "execute" and expected_status != "todo":
-            # Only a review dispatch may target a non-"todo" pre-state; the
-            # execute path stays locked to "todo" so this parameter can't be
-            # used to silently widen the execute-run status gate.
-            raise PrerequisiteError(
-                "execute dispatch requires expected_status='todo'"
-            )
         task = self._task(task_id)
+        if expected_status is None:
+            if kind == "review":
+                expected_status = "awaiting-review"
+            elif task.status == "failed":
+                expected_status = "failed"  # Allow retry of failed tasks
+            else:
+                expected_status = "todo"
+        elif kind == "execute" and expected_status not in {"todo", "failed"}:
+            # Execute dispatch accepts "todo" (normal) or "failed" (retry).
+            # Review dispatch may target other pre-states like "awaiting-review".
+            raise PrerequisiteError(
+                "execute dispatch requires expected_status='todo' or 'failed'"
+            )
         if not (task.acceptance_criteria or []) and not task.legacy_no_ac:
             raise PrerequisiteError(
                 "dispatch requires acceptance_criteria; run the spec/plan gate "
