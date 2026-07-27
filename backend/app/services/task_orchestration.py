@@ -50,6 +50,14 @@ class StaleIdempotencyRecordError(OrchestrationError):
     """
 
 
+def _split_result_range(result_ref: str) -> tuple[str | None, str | None]:
+    """Expose the committed review range to the review gate/run context."""
+    if ".." not in result_ref:
+        return None, result_ref
+    base, head = result_ref.split("..", 1)
+    return base or None, head or None
+
+
 @dataclass(frozen=True)
 class TransitionResult:
     task: Task
@@ -146,13 +154,19 @@ class TaskOrchestrationService:
         if not reviewer or not reviewer.strip():
             raise PrerequisiteError("reviewer is required")
         self._require_independent(task.executor, reviewer)
+        base_ref, head_ref = _split_result_range(task.result_ref)
         return self._request_gate(
             task=task,
             gate_type="review_order",
             actor=actor,
             idempotency_key=idempotency_key,
             expected_status=expected_status,
-            payload={"reviewer": reviewer, "result_ref": task.result_ref},
+            payload={
+                "reviewer": reviewer,
+                "result_ref": task.result_ref,
+                "base_ref": base_ref,
+                "head_ref": head_ref,
+            },
         )
 
     def request_verdict(

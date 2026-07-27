@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import time
@@ -13,15 +14,15 @@ from datetime import datetime, timezone
 import dramatiq
 import psutil
 from dramatiq.middleware import CurrentMessage
+from pydantic import ValidationError
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from pydantic import ValidationError
 
 from app.db.base import SessionLocal
 from app.db.models import AgentOutputChunk, AgentRun
-from app.services.process_manager import ProcessManager, ProcessResult, ProcessStatus
 from app.services.command_builder import _is_review_task, review_result_path
 from app.schemas.task import ReviewResult
+from app.services.process_manager import ProcessManager, ProcessResult, ProcessStatus
 from app.services.task_orchestration import TaskOrchestrationService
 from app.workers import redis_broker
 from app.workers.output_streamer import (
@@ -210,6 +211,29 @@ def run_agent(
         run.exit_code = None
         run.pid = None
         run.error_message = None
+        # Keep the baseline on the durable run record.  This is intentionally
+        # written before the process starts so a retry cannot silently move
+        # the review boundary forward.
+        base_ref = _run_base_ref(run.result_ref) or _parse_result_ref(repo_root)
+        if base_ref is None:
+            run.status = "failed"
+            run.error_message = "Could not determine repository HEAD before execution"
+            db.commit()
+            TaskOrchestrationService(db).record_execution_failure(
+                task_id=task_id,
+                error=run.error_message,
+                actor=f"agent:{run.agent_id}",
+                idempotency_key=f"run:{run.id}:missing-base",
+                run_id=run.id,
+            )
+            return None
+        if _has_uncommitted_changes(repo_root):
+            logger.warning(
+                "Repository %s was dirty before agent execution; "
+                "only the committed base..head range will be reviewed",
+                repo_root,
+            )
+        run.result_ref = f"{base_ref}.."
         db.commit()
 
         def record_pid(pid: int) -> None:
@@ -231,6 +255,7 @@ def run_agent(
         line_count = starting_lines
         total_bytes = starting_bytes
         chunk_buffer: list[str] = []
+        explicit_result_ref: str | None = None
         active_chunk: AgentOutputChunk | None = None
         next_chunk_index = _next_chunk_index(db, run_id)
         result: ProcessResult | None = None
@@ -243,6 +268,9 @@ def run_agent(
             line_count += 1
             total_bytes += len(output.encode("utf-8"))
             chunk_buffer.append(output)
+            explicit_result_ref = (
+                _extract_explicit_result_ref(output) or explicit_result_ref
+            )
 
             if active_chunk is None:
                 active_chunk = AgentOutputChunk(
@@ -294,6 +322,7 @@ def run_agent(
 
         run.status = result.status.value
         run.completed_at = datetime.now(timezone.utc)
+        effective_status = result.status.value
         if result.status == ProcessStatus.COMPLETED:
             if is_review_task and task is not None:
                 review_result = load_review_result(
@@ -307,14 +336,31 @@ def run_agent(
                     review_result_path(repo_root, review_result.task_id), repo_root
                 )
             else:
-                run.result_ref = _parse_result_ref(repo_root)
-            TaskOrchestrationService(db).record_execution_success(
-                task_id=task_id,
-                result_ref=run.result_ref,
-                actor=f"agent:{run.agent_id}",
-                idempotency_key=f"run:{run.id}:execution-success",
-                run_id=run.id,
-            )
+                result_ref, no_change_error = _build_execution_result_ref(
+                    repo_root,
+                    base_ref,
+                    explicit_result_ref,
+                )
+                if no_change_error:
+                    run.status = ProcessStatus.FAILED.value
+                    effective_status = ProcessStatus.FAILED.value
+                    run.error_message = no_change_error
+                    TaskOrchestrationService(db).record_execution_failure(
+                        task_id=task_id,
+                        error=no_change_error,
+                        actor=f"agent:{run.agent_id}",
+                        idempotency_key=f"run:{run.id}:no-committed-changes",
+                        run_id=run.id,
+                    )
+                else:
+                    run.result_ref = result_ref
+                    TaskOrchestrationService(db).record_execution_success(
+                        task_id=task_id,
+                        result_ref=run.result_ref,
+                        actor=f"agent:{run.agent_id}",
+                        idempotency_key=f"run:{run.id}:execution-success",
+                        run_id=run.id,
+                    )
         else:
             TaskOrchestrationService(db).record_execution_failure(
                 task_id=task_id,
@@ -325,16 +371,17 @@ def run_agent(
             )
         db.commit()
 
+        effective_error = run.error_message or result.error
         publish_status(
             run_id,
-            result.status.value,
+            effective_status,
             attempt=attempt,
             exit_code=result.exit_code,
             result_ref=run.result_ref,
-            error=result.error,
+            error=effective_error,
         )
         clear_cancel_request(run_id)
-        logger.info("Agent run %s completed: %s", run_id, result.status.value)
+        logger.info("Agent run %s completed: %s", run_id, effective_status)
         return result.exit_code
     except AgentExecutionError:
         # State is already set to queued/retrying. Raising lets Dramatiq apply
@@ -439,6 +486,125 @@ def _parse_result_ref(repo_root: str) -> str | None:
         return result.stdout.strip()[:12] if result.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+_EXPLICIT_RESULT_REF = re.compile(
+    r"^\s*(?:result[_-]ref|result reference)\s*:\s*([^\s]+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _extract_explicit_result_ref(line: str) -> str | None:
+    """Read the optional commit ref convention emitted by an executor."""
+    match = _EXPLICIT_RESULT_REF.match(line)
+    return match.group(1) if match else None
+
+
+def _run_base_ref(result_ref: str | None) -> str | None:
+    """Recover a baseline persisted as ``base..`` during an active run."""
+    if not result_ref or ".." not in result_ref:
+        return None
+    base, _ = result_ref.split("..", 1)
+    return base or None
+
+
+def _git_ref(repo_root: str, ref: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{ref}^{{commit}}"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _is_ancestor(repo_root: str, ancestor: str, descendant: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", ancestor, descendant],
+            cwd=repo_root,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _has_committed_diff(repo_root: str, base: str, head: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--quiet", base, head],
+            cwd=repo_root,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 1
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _has_uncommitted_changes(repo_root: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _build_execution_result_ref(
+    repo_root: str,
+    base_ref: str,
+    explicit_ref: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Return a validated review range, or a concrete no-change error."""
+    head_ref = _parse_result_ref(repo_root)
+    if head_ref is None:
+        return None, "Could not determine repository HEAD after execution"
+    base = _git_ref(repo_root, base_ref)
+    head = _git_ref(repo_root, head_ref)
+    if base is None or head is None:
+        return None, "Could not validate repository execution range"
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if status.returncode == 0 and status.stdout.strip():
+        logger.warning(
+            "Repository %s has uncommitted changes after agent execution; "
+            "only committed changes will be reviewed",
+            repo_root,
+        )
+
+    if base == head or not _has_committed_diff(repo_root, base, head):
+        return None, "Agent completed without committed changes; escalating for review"
+
+    selected = head
+    if explicit_ref:
+        explicit = _git_ref(repo_root, explicit_ref)
+        if explicit is None or not _is_ancestor(repo_root, base, explicit) or not _is_ancestor(repo_root, explicit, head):
+            return None, "Executor result-ref is outside the actual base..head range"
+        selected = explicit
+    if not _has_committed_diff(repo_root, base, selected):
+        return None, "Executor result-ref points to an empty diff"
+    return f"{base[:12]}..{selected[:12]}", None
 
 
 def _prepare_review_artifact(repo_root: str, task_id: str) -> None:
