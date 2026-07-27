@@ -782,12 +782,20 @@ class CoordinatorService:
         latency_ms: int,
     ) -> None:
         usage = response.usage or UsageCounts()
+
+        # Detect operation type
+        operation = "chat"
+        if response.tool_calls:
+            operation = "tool"
+        elif db_session.current_gate == "plan":
+            operation = "plan"
+
         record = LLMUsage(
             session_id=db_session.id,
             task_id=db_session.task_id,
             model=response.model,
             provider=response.provider,
-            operation="chat",
+            operation=operation,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cached_tokens=usage.cached_tokens,
