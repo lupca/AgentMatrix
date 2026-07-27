@@ -57,6 +57,8 @@ class AgentRunResponse(BaseModel):
     agent_id: str
     cli: str
     command: str
+    kind: str
+    agent_role: str
     status: str
     pid: int | None
     dramatiq_message_id: str | None

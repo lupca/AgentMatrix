@@ -361,6 +361,11 @@ class AgentRun(Base):
     cli = Column(String(20), nullable=False)
     command = Column(Text, nullable=False)
 
+    kind = Column(String(20), nullable=False, default="execute", server_default="execute")
+    agent_role = Column(
+        String(20), nullable=False, default="executor", server_default="executor"
+    )
+
     status = Column(String(20), nullable=False, default="queued", index=True)
     pid = Column(Integer, nullable=True)
     dramatiq_message_id = Column(String(50), nullable=True)
@@ -400,6 +405,10 @@ class AgentRun(Base):
         CheckConstraint("timeout_seconds > 0", name="ck_agent_runs_timeout_positive"),
         CheckConstraint("attempt > 0", name="ck_agent_runs_attempt_positive"),
         CheckConstraint("max_attempts > 0", name="ck_agent_runs_max_attempts_positive"),
+        CheckConstraint("kind IN ('execute', 'review')", name="ck_agent_runs_kind"),
+        CheckConstraint(
+            "agent_role IN ('executor', 'reviewer')", name="ck_agent_runs_agent_role"
+        ),
     )
 
 

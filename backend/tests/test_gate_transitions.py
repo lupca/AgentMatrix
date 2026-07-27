@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.db.models import Agent, GateRecord, Project, Task
+from app.db.models import Agent, AgentRun, GateRecord, Project, Task
 from app.services.task_orchestration import (
     ModeViolationError,
     PrerequisiteError,
@@ -18,6 +18,14 @@ def service(db_session):
             id="@executor",
             name="Executor",
             role="executor",
+            cli="codex",
+        )
+    )
+    db_session.add(
+        Agent(
+            id="@reviewer",
+            name="Reviewer",
+            role="reviewer",
             cli="codex",
         )
     )
@@ -178,3 +186,65 @@ def test_database_rejects_done_without_completion_fields(db_session):
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
+
+
+def test_review_dispatch_at_awaiting_review_creates_review_run(service, db_session):
+    task = _add_task(
+        db_session,
+        "REVDISP-001",
+        status="awaiting-review",
+        executor="@executor",
+        result_ref="abc123",
+    )
+
+    result = service.request_dispatch(
+        task_id=task.id,
+        agent_id="@reviewer",
+        actor="@operator",
+        idempotency_key="review-dispatch-1",
+        kind="review",
+    )
+
+    assert result.task.status == "dispatched"
+    assert result.task.reviewer == "@reviewer"
+    assert result.task.executor == "@executor"
+    run = db_session.query(AgentRun).filter(AgentRun.task_id == task.id).one()
+    assert run.kind == "review"
+    assert run.agent_role == "reviewer"
+
+
+def test_execute_dispatch_at_awaiting_review_still_conflicts(service, db_session):
+    task = _add_task(
+        db_session,
+        "REVDISP-002",
+        status="awaiting-review",
+        executor="@executor",
+        result_ref="abc123",
+    )
+
+    with pytest.raises(TransitionConflictError, match="expected status"):
+        service.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="execute-dispatch-conflict",
+        )
+
+
+def test_review_dispatch_rejects_reviewer_equal_to_executor(service, db_session):
+    task = _add_task(
+        db_session,
+        "REVDISP-003",
+        status="awaiting-review",
+        executor="@executor",
+        result_ref="abc123",
+    )
+
+    with pytest.raises(PrerequisiteError, match="differ from executor"):
+        service.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="review-dispatch-four-eyes",
+            kind="review",
+        )

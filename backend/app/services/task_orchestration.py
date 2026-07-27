@@ -112,12 +112,26 @@ class TaskOrchestrationService:
         actor: str,
         idempotency_key: str,
         timeout_seconds: int = 14_400,
-        expected_status: str = "todo",
+        kind: str = "execute",
+        expected_status: str | None = None,
     ) -> TransitionResult:
+        if kind not in {"execute", "review"}:
+            raise PrerequisiteError(f"Invalid dispatch kind: {kind}")
+        if expected_status is None:
+            expected_status = "awaiting-review" if kind == "review" else "todo"
+        elif kind == "execute" and expected_status != "todo":
+            # Only a review dispatch may target a non-"todo" pre-state; the
+            # execute path stays locked to "todo" so this parameter can't be
+            # used to silently widen the execute-run status gate.
+            raise PrerequisiteError(
+                "execute dispatch requires expected_status='todo'"
+            )
         task = self._task(task_id)
         agent = self.db.get(Agent, agent_id)
         if agent is None:
             raise PrerequisiteError(f"Agent {agent_id} not found")
+        if kind == "review":
+            self._require_independent(task.executor, agent_id)
         project = self.db.get(Project, task.project)
         try:
             command, repo_root, cli = build_dispatch_command(task, agent, project)
@@ -136,6 +150,8 @@ class TaskOrchestrationService:
                 "repo_root": repo_root,
                 "cli": cli,
                 "timeout_seconds": timeout_seconds,
+                "kind": kind,
+                "agent_role": "reviewer" if kind == "review" else "executor",
             },
         )
 
@@ -638,19 +654,28 @@ class TaskOrchestrationService:
         now = datetime.now(timezone.utc)
         if gate_type == "dispatch":
             run_id = str(uuid.uuid4())
+            kind = str(payload.get("kind", "execute"))
+            agent_role = str(payload.get("agent_role", "executor"))
+            if kind == "review":
+                self._require_independent(task.executor, str(payload["agent_id"]))
             run = AgentRun(
                 id=run_id,
                 task_id=task.id,
                 agent_id=str(payload["agent_id"]),
                 cli=str(payload["cli"]),
                 command=str(payload["command"]),
+                kind=kind,
+                agent_role=agent_role,
                 status="queued",
                 timeout_seconds=int(payload["timeout_seconds"]),
             )
             self.db.add(run)
             task.status = "dispatched"
             task.current_gate = "dispatch"
-            task.executor = str(payload["agent_id"])
+            if kind == "review":
+                task.reviewer = str(payload["agent_id"])
+            else:
+                task.executor = str(payload["agent_id"])
             task.dispatched_at = now
             task.error = None
             task.awaiting_approval = False
