@@ -196,7 +196,9 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          onClose(session.id);
+                          if (confirm('Delete this chat session?')) {
+                            onClose(session.id);
+                          }
                         }}
                         className="p-1.5 rounded-md text-gray-500 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-gray-700/80 transition-all"
                         title="Delete session"
