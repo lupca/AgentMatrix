@@ -6,11 +6,13 @@ kept as the stable home for usage normalization and pricing utilities.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
+logger = logging.getLogger(__name__)
 
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "siliconflow").lower()
 SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
@@ -41,26 +43,55 @@ class ModelPricing:
     cached_input: Decimal
 
 
-MODEL_PRICING: dict[str, ModelPricing] = {
-    "claude-3-5-sonnet": ModelPricing(Decimal("3.00"), Decimal("15.00"), Decimal("0.30")),
-    "claude-3-7-sonnet": ModelPricing(Decimal("3.00"), Decimal("15.00"), Decimal("0.30")),
-    "claude-sonnet-4": ModelPricing(Decimal("3.00"), Decimal("15.00"), Decimal("0.30")),
-    "claude-3-5-haiku": ModelPricing(Decimal("0.80"), Decimal("4.00"), Decimal("0.08")),
-    "claude-3-haiku": ModelPricing(Decimal("0.25"), Decimal("1.25"), Decimal("0.03")),
-    "gemini-2.5-flash-lite": ModelPricing(Decimal("0.10"), Decimal("0.40"), Decimal("0.01")),
-    "gemini-2.5-flash": ModelPricing(Decimal("0.30"), Decimal("2.50"), Decimal("0.03")),
-    "gemini-2.5-pro": ModelPricing(Decimal("1.25"), Decimal("10.00"), Decimal("0.125")),
-    "gemini-3.5-flash": ModelPricing(Decimal("1.50"), Decimal("9.00"), Decimal("0.15")),
-    "moonshotai/kimi-k3": ModelPricing(Decimal("0.60"), Decimal("2.50"), Decimal("0.60")),
-    "moonshotai/kimi-k2": ModelPricing(Decimal("0.60"), Decimal("2.50"), Decimal("0.60")),
-}
-
+# Fallback pricing when DB not available
 PROVIDER_FALLBACK_PRICING: dict[str, ModelPricing] = {
     "anthropic": ModelPricing(Decimal("3.00"), Decimal("15.00"), Decimal("0.30")),
     "google": ModelPricing(Decimal("0.30"), Decimal("2.50"), Decimal("0.03")),
     "siliconflow": ModelPricing(Decimal("0.60"), Decimal("2.50"), Decimal("0.60")),
     "openai": ModelPricing(Decimal("1.00"), Decimal("4.00"), Decimal("0.50")),
 }
+
+# Cache for DB pricing (refreshed on each call for simplicity)
+_pricing_cache: dict[str, ModelPricing] = {}
+_cache_loaded: bool = False
+
+
+def _load_pricing_from_db() -> dict[str, ModelPricing]:
+    """Load pricing from database model_pricing table."""
+    global _pricing_cache, _cache_loaded
+    if _cache_loaded:
+        return _pricing_cache
+
+    try:
+        from app.db.base import SessionLocal
+        from app.db.models import ModelPricing as ModelPricingDB
+
+        db = SessionLocal()
+        try:
+            rows = db.query(ModelPricingDB).all()
+            for row in rows:
+                key = row.model.lower()
+                _pricing_cache[key] = ModelPricing(
+                    input=Decimal(str(row.input_price_per_mtok or 1)),
+                    output=Decimal(str(row.output_price_per_mtok or 4)),
+                    cached_input=Decimal(str(row.cached_input_price_per_mtok or 0.5)),
+                )
+            _cache_loaded = True
+            logger.debug("Loaded %d pricing entries from database", len(_pricing_cache))
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("Failed to load pricing from DB, using fallbacks: %s", e)
+
+    return _pricing_cache
+
+
+def refresh_pricing_cache() -> None:
+    """Force refresh pricing cache from database."""
+    global _pricing_cache, _cache_loaded
+    _pricing_cache = {}
+    _cache_loaded = False
+    _load_pricing_from_db()
 
 
 def _read_value(source: Any, *names: str, default: Any = 0) -> Any:
@@ -114,10 +145,21 @@ def extract_usage(response: Any, provider: str) -> UsageCounts:
 
 
 def get_model_pricing(model: str, provider: str) -> ModelPricing:
+    """Get pricing from DB cache, fallback to provider defaults."""
     normalized = (model or "").lower()
-    for model_key in sorted(MODEL_PRICING, key=len, reverse=True):
-        if model_key in normalized:
-            return MODEL_PRICING[model_key]
+
+    # Try DB cache first
+    db_pricing = _load_pricing_from_db()
+    if db_pricing:
+        # Exact match
+        if normalized in db_pricing:
+            return db_pricing[normalized]
+        # Partial match (longest key first)
+        for model_key in sorted(db_pricing, key=len, reverse=True):
+            if model_key in normalized:
+                return db_pricing[model_key]
+
+    # Fallback to provider defaults
     return PROVIDER_FALLBACK_PRICING.get(
         provider.lower(),
         ModelPricing(Decimal("1.00"), Decimal("4.00"), Decimal("0.50")),
@@ -149,5 +191,5 @@ __all__ = [
     "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "GOOGLE_API_KEY", "GOOGLE_MODEL",
     "LLM_PROVIDER", "ModelPricing", "OPENAI_MODEL", "SILICONFLOW_API_KEY",
     "SILICONFLOW_BASE_URL", "SILICONFLOW_MODEL", "UsageCounts", "calculate_cost",
-    "extract_usage", "get_model_pricing",
+    "extract_usage", "get_model_pricing", "refresh_pricing_cache",
 ]
