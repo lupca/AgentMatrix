@@ -108,6 +108,64 @@ def test_token_stats_support_operation_filter(client, db_session):
     assert data["by_operation"][0]["operation"] == "plan"
 
 
+def test_token_stats_expose_cached_uncached_per_turn(client, db_session):
+    """AC5: cached/uncached must be measurable per turn, not just aggregated.
+
+    Simulates the CTV2-095 pruning effect within one session: turn 1 replays
+    the full (uncached-heavy) history, later turns increasingly hit the
+    stable cached prefix as history/snapshot pruning takes effect.
+    """
+    db_session.add_all(
+        [
+            _usage(
+                session_id="session-turns",
+                task_id="CTV2-095",
+                operation="chat",
+                input_tokens=1_000,
+                output_tokens=50,
+                cached_tokens=0,
+            ),
+            _usage(
+                session_id="session-turns",
+                task_id="CTV2-095",
+                operation="chat",
+                input_tokens=1_200,
+                output_tokens=50,
+                cached_tokens=900,
+            ),
+            _usage(
+                session_id="session-turns",
+                task_id="CTV2-095",
+                operation="chat",
+                input_tokens=1_400,
+                output_tokens=50,
+                cached_tokens=1_150,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    data = client.get("/api/stats/tokens?session_id=session-turns").json()
+
+    turns = data["by_turn"]
+    assert len(turns) == 3
+    assert [turn["turn_index"] for turn in turns] == [1, 2, 3]
+
+    # Before pruning: turn 1 is fully uncached.
+    assert turns[0]["cached_tokens"] == 0
+    assert turns[0]["uncached_tokens"] == 1_000
+
+    # After pruning takes hold: later turns are mostly cached.
+    assert turns[1]["cached_tokens"] == 900
+    assert turns[1]["uncached_tokens"] == 300
+    assert turns[2]["cached_tokens"] == 1_150
+    assert turns[2]["uncached_tokens"] == 250
+
+    # Measured effect matches the ledger: uncached tokens shrink turn over
+    # turn as more of the prefix is served from cache.
+    assert turns[0]["uncached_tokens"] > turns[1]["uncached_tokens"] > turns[2]["uncached_tokens"]
+
+
 def test_token_comparison_uses_v1_baseline_per_measured_cycle(client, db_session):
     db_session.add_all(
         [

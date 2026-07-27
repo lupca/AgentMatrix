@@ -1,3 +1,5 @@
+import hashlib
+import json
 import pytest
 import os
 from app.db.models import Agent, Project, Session as SessionModel, Task, LLMUsage
@@ -5,8 +7,32 @@ from app.services.context_hierarchy import ContextHierarchy, PROJECT_CONTEXT_MAX
 from app.services.coordinator import CoordinatorService
 from app.services.command_router import CommandRouter
 from app.services.providers import ProviderResponse
+from app.services.providers.openai_adapter import OpenAIAdapter
 from app.services.llm_client import UsageCounts
 from app.graph.context import build_context_snapshot, invalidate_context_snapshot
+
+
+def _tool_turn(turn_id: str, *, call_id: str, name: str, content: str, final_text: str) -> list[dict]:
+    """A realistic turn: user ask -> assistant tool_calls -> tool result -> assistant reply."""
+    return [
+        {"role": "user", "content": f"Please run {name}", "status": "complete", "turn_id": turn_id},
+        {
+            "role": "assistant",
+            "content": "",
+            "status": "complete",
+            "turn_id": turn_id,
+            "tool_calls": [{"id": call_id, "name": name, "input": {}}],
+        },
+        {
+            "role": "tool",
+            "name": name,
+            "tool_call_id": call_id,
+            "turn_id": turn_id,
+            "status": "complete",
+            "content": content,
+        },
+        {"role": "assistant", "content": final_text, "status": "complete", "turn_id": turn_id},
+    ]
 
 
 def test_global_context_loaded_and_cached(db_session):
@@ -141,9 +167,93 @@ def test_old_tool_results_are_pruned_but_decision_fields_survive(db_session):
     assert tools[-1]["content"].startswith('{"task_id"')
 
 
+def test_pruned_multi_tool_call_turn_keeps_one_summary_per_tool_message(db_session):
+    """A turn with two tool calls must survive pruning as two summaries, each
+    carrying its own tool_call_id/name — not collapsed into one per turn_id
+    (which would silently drop the second call's decision fields and orphan
+    the first tool_call_id the assistant message referenced)."""
+    project = Project(id="proj-multi", name="Multi Project")
+    old_turn = [
+        {
+            "role": "assistant",
+            "content": "",
+            "status": "complete",
+            "turn_id": "turn-old",
+            "tool_calls": [
+                {"id": "call-old-1", "name": "update_task", "input": {}},
+                {"id": "call-old-2", "name": "record_verdict", "input": {}},
+            ],
+        },
+        {
+            "role": "tool",
+            "name": "update_task",
+            "tool_call_id": "call-old-1",
+            "turn_id": "turn-old",
+            "status": "complete",
+            "content": json.dumps({"task_id": "CTV2-095", "verdict": "pass"}),
+        },
+        {
+            "role": "tool",
+            "name": "record_verdict",
+            "tool_call_id": "call-old-2",
+            "turn_id": "turn-old",
+            "status": "complete",
+            "content": json.dumps({"task_id": "CTV2-200", "verdict": "changes_requested"}),
+        },
+    ]
+    recent_turns = [
+        {
+            "role": "tool",
+            "name": "noop",
+            "tool_call_id": f"call-recent-{i}",
+            "turn_id": f"turn-recent-{i}",
+            "status": "complete",
+            "content": "{}",
+        }
+        for i in range(3)
+    ]
+    session = SessionModel(
+        id="sess-multi",
+        project_id="proj-multi",
+        context_level="project",
+        messages=old_turn + recent_turns,
+    )
+    db_session.add_all([project, session])
+    db_session.commit()
+
+    hierarchy = ContextHierarchy(db_session)
+    hierarchy.tool_result_replay_turns = 3  # pushes turn-old out of the replay window
+
+    pruned = [
+        m for m in hierarchy.get_task_context(session)
+        if m["role"] == "tool" and m["content"].startswith("[Pruned tool result]")
+    ]
+    assert len(pruned) == 2  # one summary per tool MESSAGE, not one per turn_id
+
+    by_call_id = {m["tool_call_id"]: m for m in pruned}
+    assert by_call_id.keys() == {"call-old-1", "call-old-2"}
+    assert by_call_id["call-old-1"]["name"] == "update_task"
+    assert by_call_id["call-old-2"]["name"] == "record_verdict"
+    assert "CTV2-095" in by_call_id["call-old-1"]["content"]
+    assert "CTV2-200" in by_call_id["call-old-2"]["content"]
+    assert "changes_requested" in by_call_id["call-old-2"]["content"]
+
+    # Regression guard: without tool_call_id, OpenAIAdapter demotes a "tool"
+    # message to role="user", which then leaves the preceding assistant
+    # tool_calls without a matching response and the provider replies 400.
+    rendered = OpenAIAdapter.render_messages(pruned)
+    assert all(item["role"] == "tool" for item in rendered)
+    assert {item["tool_call_id"] for item in rendered} == {"call-old-1", "call-old-2"}
+
+
 def test_build_messages_prefix_stable_across_task_mutation(db_session):
-    """Global + Project message bytes stay identical across a task mutation;
-    only the snapshot message (Tier 2.5) changes."""
+    """The entire pre-snapshot slice (Global + Project + append-only history,
+    including a real assistant tool_calls <-> tool result pair) stays byte-
+    identical across a task mutation; only the snapshot message changes.
+
+    A ``messages=[]`` session does not exercise this: with no history the
+    pre-snapshot slice is just Global+Project, which was already covered
+    before CTV2-078 and does not prove history survives a mutation."""
     project = Project(
         id="proj-stable",
         name="Stable Project",
@@ -155,18 +265,39 @@ def test_build_messages_prefix_stable_across_task_mutation(db_session):
         title="Stable Task",
         status="todo",
     )
+    messages: list[dict] = []
+    for i in range(4):
+        messages.extend(
+            _tool_turn(
+                f"turn-{i}",
+                call_id=f"call-{i}",
+                name="update_task",
+                content=json.dumps({"task_id": "CTV2-095", "verdict": "pass"}),
+                final_text=f"Done with step {i}",
+            )
+        )
     session = SessionModel(
         id="sess-stable",
         task_id="TASK-STABLE-1",
         project_id="proj-stable",
         context_level="task",
-        messages=[],
+        messages=messages,
     )
     db_session.add_all([project, task, session])
     db_session.commit()
 
     hierarchy = ContextHierarchy(db_session)
+    hierarchy.tool_result_replay_turns = 3  # fewer than the 4 turns above: turn-0 gets pruned
     before = hierarchy.build_messages(session)
+
+    snapshot_index = next(i for i, m in enumerate(before) if "## System State" in m["content"])
+    before_prefix = before[:snapshot_index]
+
+    # Sanity: the slice under test actually contains real history, including
+    # the assistant tool_calls <-> tool result pairing this AC cares about.
+    assert len(before_prefix) > 4
+    assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in before_prefix)
+    assert any(m.get("role") == "tool" and m.get("tool_call_id") for m in before_prefix)
 
     # Mutate: add a new task in the same project, which changes the snapshot's
     # task-count/recent-tasks content.
@@ -181,10 +312,16 @@ def test_build_messages_prefix_stable_across_task_mutation(db_session):
     invalidate_context_snapshot(db_session, project_id="proj-stable")
 
     after = hierarchy.build_messages(session)
+    after_snapshot_index = next(i for i, m in enumerate(after) if "## System State" in m["content"])
+    after_prefix = after[:after_snapshot_index]
 
-    assert before[0] == after[0]  # Global tier bytes unchanged
-    assert before[1] == after[1]  # Project tier bytes unchanged
-    snapshot_index = next(i for i, m in enumerate(before) if "## System State" in m["content"])
+    assert after_snapshot_index == snapshot_index
+    assert before_prefix == after_prefix  # whole pre-snapshot slice, not just a few elements
+
+    before_hash = hashlib.sha256(json.dumps(before_prefix, sort_keys=True).encode()).hexdigest()
+    after_hash = hashlib.sha256(json.dumps(after_prefix, sort_keys=True).encode()).hexdigest()
+    assert before_hash == after_hash
+
     assert before[snapshot_index] != after[snapshot_index]  # Snapshot message changed
     assert "TASK-STABLE-2" in after[snapshot_index]["content"]
     assert "TASK-STABLE-2" not in before[snapshot_index]["content"]

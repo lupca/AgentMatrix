@@ -53,6 +53,36 @@ def _usage_totals(rows: list[LLMUsage]) -> dict[str, Any]:
     }
 
 
+def _turn_breakdown(rows: list[LLMUsage]) -> list[dict]:
+    """Cached vs uncached tokens for each individual call (turn), not summed.
+
+    The aggregate totals in ``_usage_totals`` hide whether prompt-caching
+    savings are per-turn or a fluke of one huge call; this exposes each row
+    in insertion order (per session) so before/after pruning changes can be
+    compared turn by turn.
+    """
+    ordered = sorted(rows, key=lambda row: (row.session_id or "", row.id))
+    turn_index: dict[str | None, int] = {}
+    breakdown = []
+    for row in ordered:
+        turn_index[row.session_id] = turn_index.get(row.session_id, 0) + 1
+        input_tokens = row.input_tokens or 0
+        cached_tokens = row.cached_tokens or 0
+        breakdown.append(
+            {
+                "turn_index": turn_index[row.session_id],
+                "session_id": row.session_id,
+                "task_id": row.task_id,
+                "operation": row.operation,
+                "input_tokens": input_tokens,
+                "output_tokens": row.output_tokens or 0,
+                "cached_tokens": cached_tokens,
+                "uncached_tokens": max(0, input_tokens - cached_tokens),
+            }
+        )
+    return breakdown
+
+
 def _usage_breakdown(rows: list[LLMUsage], attribute: str, key_name: str) -> list[dict]:
     grouped: dict[str | None, list[LLMUsage]] = {}
     for row in rows:
@@ -170,6 +200,7 @@ def get_token_stats(
         "by_operation": _usage_breakdown(rows, "operation", "operation"),
         "by_model": _usage_breakdown(rows, "model", "model"),
         "by_provider": _usage_breakdown(rows, "provider", "provider"),
+        "by_turn": _turn_breakdown(rows),
     }
 
 

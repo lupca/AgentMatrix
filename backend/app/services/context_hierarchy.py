@@ -216,7 +216,16 @@ class ContextHierarchy:
         return f"[Pruned tool result] tool={tool_name} tool_call_id={call_id} result={rendered}"
 
     def _replay_session_messages(self, session: SessionModel) -> list[dict[str, Any]]:
-        """Replay history while retaining complete results for recent tool turns."""
+        """Replay history while retaining complete results for recent tool turns.
+
+        Every tool *message* older than the replay window is summarized
+        individually (not deduped per turn_id): a turn can carry several tool
+        calls, and each one has its own tool_call_id that an earlier assistant
+        message's tool_calls[] still points to. Dropping tool_call_id/name
+        from a summary, or emitting only one summary for a multi-tool turn,
+        leaves the provider unable to pair assistant tool_calls with their
+        tool responses (OpenAI-compatible APIs reject that with a 400).
+        """
 
         raw = [
             message for message in list(session.messages or [])
@@ -232,7 +241,6 @@ class ContextHierarchy:
         full_turns = set(tool_turns[-self.tool_result_replay_turns:])
 
         replay: list[dict[str, Any]] = []
-        summarized_turns: set[str] = set()
         for message in raw:
             if message.get("role") != "tool" or not message.get("turn_id"):
                 replay.append(message)
@@ -240,13 +248,19 @@ class ContextHierarchy:
             turn_id = str(message["turn_id"])
             if turn_id in full_turns:
                 replay.append(message)
-            elif turn_id not in summarized_turns:
-                replay.append({
-                    "role": "tool",
-                    "turn_id": turn_id,
-                    "content": self._tool_result_summary(message),
-                })
-                summarized_turns.add(turn_id)
+                continue
+            summary: dict[str, Any] = {
+                "role": "tool",
+                "turn_id": turn_id,
+                "content": self._tool_result_summary(message),
+            }
+            tool_call_id = message.get("tool_call_id")
+            if tool_call_id:
+                summary["tool_call_id"] = tool_call_id
+            name = message.get("name") or message.get("tool_name")
+            if name:
+                summary["name"] = name
+            replay.append(summary)
         return replay
 
     def get_task_context(
