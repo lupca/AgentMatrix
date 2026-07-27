@@ -183,7 +183,9 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
             "acceptance criterion."
         )
     sections.append(
-        "Complete every acceptance criterion, run the relevant tests, and commit the changes."
+        "Complete every acceptance criterion, run the relevant tests, and commit the changes. "
+        "When done, print the resulting commit hash on its own final line as 'RESULT_REF: <hash>'. "
+        "A task with no commit has no result-ref and cannot be reviewed."
     )
     return "\n\n".join(sections)
 
