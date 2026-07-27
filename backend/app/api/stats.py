@@ -168,6 +168,8 @@ def get_token_stats(
         "by_session": _usage_breakdown(rows, "session_id", "session_id"),
         "by_task": _usage_breakdown(rows, "task_id", "task_id"),
         "by_operation": _usage_breakdown(rows, "operation", "operation"),
+        "by_model": _usage_breakdown(rows, "model", "model"),
+        "by_provider": _usage_breakdown(rows, "provider", "provider"),
     }
 
 

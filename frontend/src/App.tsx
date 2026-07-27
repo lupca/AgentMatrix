@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, FolderKanban, Bot, CheckSquare, LayoutGrid, Settings as SettingsIcon, Moon, Sun } from 'lucide-react';
+import { LayoutDashboard, FolderKanban, Bot, CheckSquare, LayoutGrid, Settings as SettingsIcon, Moon, Sun, Activity } from 'lucide-react';
 import Dashboard from './pages/Dashboard';
 import ProjectsPage from './pages/Projects';
 import ProjectDetailPage from './pages/ProjectDetail';
@@ -9,6 +9,7 @@ import AgentDetailPage from './pages/AgentDetail';
 import TasksPage from './pages/Tasks';
 import TaskDetailPage from './pages/TaskDetail';
 import KanbanPage from './pages/Kanban';
+import TokensPage from './pages/Tokens';
 import ErrorBoundary from './components/ErrorBoundary';
 import { Toaster } from 'react-hot-toast';
 import { ThemeProvider, useTheme } from './contexts/ThemeContext';
@@ -25,6 +26,7 @@ function Navigation() {
     { path: '/agents', label: 'Agents', icon: Bot },
     { path: '/tasks', label: 'Tasks', icon: CheckSquare },
     { path: '/kanban', label: 'Kanban', icon: LayoutGrid },
+    { path: '/telemetry', label: 'Telemetry', icon: Activity },
     { path: '/settings', label: 'Settings', icon: SettingsIcon },
   ];
 
@@ -125,6 +127,7 @@ export default function App() {
                 <Route path="/tasks" element={<TasksPage />} />
                 <Route path="/tasks/:id" element={<TaskDetailPage />} />
                 <Route path="/kanban" element={<KanbanPage />} />
+                <Route path="/telemetry" element={<TokensPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
               </Routes>
             </main>
