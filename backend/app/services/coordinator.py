@@ -293,6 +293,17 @@ class CoordinatorService:
         global_session.message_count = len(messages)
         global_session.last_activity_at = datetime.now(timezone.utc)
         self.db.commit()
+
+        # Notify connected clients about the task status update
+        from app.api.ws import publish_event
+        publish_event({
+            "type": "task_rollup",
+            "session_id": global_session.id,
+            "task_id": task.id,
+            "status": payload["status"],
+            "message": message,
+        })
+
         return message
 
     def append_message(
@@ -884,19 +895,50 @@ class CoordinatorService:
             provider_name, resolved_model, agent = self._resolve_selection(
                 db_session, model, provider
             )
+
+            def summarizer_with_usage(messages: list, **kwargs: Any) -> str:
+                response = self.llm_service.complete_sync(
+                    agent,
+                    messages,
+                    model=kwargs.get("model"),
+                    max_tokens=kwargs.get("max_tokens", self.max_output_tokens),
+                    temperature=kwargs.get("temperature", 0),
+                )
+                # Track compaction usage
+                if response.usage:
+                    record = LLMUsage(
+                        session_id=db_session.id,
+                        task_id=db_session.task_id,
+                        model=response.model,
+                        provider=response.provider,
+                        operation="compaction",
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        cached_tokens=response.usage.cached_tokens,
+                        cost_usd=calculate_cost(
+                            response.model,
+                            response.provider,
+                            response.usage.input_tokens,
+                            response.usage.output_tokens,
+                            response.usage.cached_tokens,
+                        ),
+                        latency_ms=0,
+                    )
+                    try:
+                        self.db.add(record)
+                        self.db.commit()
+                    except Exception:
+                        self.db.rollback()
+                        logger.warning("Failed to record compaction usage for session=%s", db_session.id)
+                return response.text
+
             ctx = self._context_hierarchy()
             ctx.compact_context(
                 db_session,
                 model=resolved_model,
                 context_window=self._context_window(resolved_model),
                 agent=agent,
-                summarizer=lambda messages, **kwargs: self.llm_service.complete_sync(
-                    agent,
-                    messages,
-                    model=kwargs.get("model"),
-                    max_tokens=kwargs.get("max_tokens", self.max_output_tokens),
-                    temperature=kwargs.get("temperature", 0),
-                ).text,
+                summarizer=summarizer_with_usage,
             )
             canonical = self.budget_messages(
                 ctx.build_messages(db_session, current_turn_id=turn_id),
@@ -1102,19 +1144,50 @@ class CoordinatorService:
             provider_name, resolved_model, agent = self._resolve_selection(
                 db_session, model, provider
             )
+
+            def summarizer_with_usage(messages: list, **kwargs: Any) -> str:
+                response = self.llm_service.complete_sync(
+                    agent,
+                    messages,
+                    model=kwargs.get("model"),
+                    max_tokens=kwargs.get("max_tokens", self.max_output_tokens),
+                    temperature=kwargs.get("temperature", 0),
+                )
+                # Track compaction usage
+                if response.usage:
+                    record = LLMUsage(
+                        session_id=db_session.id,
+                        task_id=db_session.task_id,
+                        model=response.model,
+                        provider=response.provider,
+                        operation="compaction",
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        cached_tokens=response.usage.cached_tokens,
+                        cost_usd=calculate_cost(
+                            response.model,
+                            response.provider,
+                            response.usage.input_tokens,
+                            response.usage.output_tokens,
+                            response.usage.cached_tokens,
+                        ),
+                        latency_ms=0,
+                    )
+                    try:
+                        self.db.add(record)
+                        self.db.commit()
+                    except Exception:
+                        self.db.rollback()
+                        logger.warning("Failed to record compaction usage for session=%s", db_session.id)
+                return response.text
+
             ctx = self._context_hierarchy()
             ctx.compact_context(
                 db_session,
                 model=resolved_model,
                 context_window=self._context_window(resolved_model),
                 agent=agent,
-                summarizer=lambda messages, **kwargs: self.llm_service.complete_sync(
-                    agent,
-                    messages,
-                    model=kwargs.get("model"),
-                    max_tokens=kwargs.get("max_tokens", self.max_output_tokens),
-                    temperature=kwargs.get("temperature", 0),
-                ).text,
+                summarizer=summarizer_with_usage,
             )
             canonical = self.budget_messages(
                 ctx.build_messages(db_session, current_turn_id=turn_id),

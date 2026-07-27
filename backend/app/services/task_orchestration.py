@@ -207,6 +207,7 @@ class TaskOrchestrationService:
         timeout_seconds: int | None = None,
         kind: str = "execute",
         expected_status: str | None = None,
+        effort: str | None = None,
     ) -> TransitionResult:
         if kind not in {"execute", "review"}:
             raise PrerequisiteError(f"Invalid dispatch kind: {kind}")
@@ -235,8 +236,11 @@ class TaskOrchestrationService:
         if kind == "review":
             self._require_independent(task.executor, agent_id)
         project = self.db.get(Project, task.project)
+        resolved_effort = effort or agent.effort or "medium"
         try:
-            command, repo_root, cli = build_dispatch_command(task, agent, project)
+            command, repo_root, cli = build_dispatch_command(
+                task, agent, project, effort=resolved_effort
+            )
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc
 
@@ -254,6 +258,7 @@ class TaskOrchestrationService:
                 "timeout_seconds": timeout_seconds or self.run_timeout_seconds,
                 "kind": kind,
                 "agent_role": "reviewer" if kind == "review" else "executor",
+                "effort": resolved_effort,
             },
         )
 
@@ -1218,6 +1223,7 @@ class TaskOrchestrationService:
                 agent_role=agent_role,
                 status="queued",
                 timeout_seconds=int(payload["timeout_seconds"]),
+                effort=payload.get("effort"),
             )
             self.db.add(run)
             task.status = "dispatched"

@@ -146,6 +146,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "properties": {
                     "task_id": {"type": "string"},
                     "executor": {"type": "string"},
+                    "effort": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "extra-high", "max"],
+                        "description": (
+                            "Override the executor agent's default effort for "
+                            "this dispatch only."
+                        ),
+                    },
                 },
                 "required": ["task_id"],
             },

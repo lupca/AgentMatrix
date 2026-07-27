@@ -21,6 +21,7 @@ def build_dispatch_command(
     task: Task,
     agent: Agent,
     project: Optional[Project] = None,
+    effort: Optional[str] = None,
 ) -> tuple[str, str, str]:
     cli = (agent.cli or _infer_cli(agent.model, agent.id)).strip().lower()
     if cli not in SUPPORTED_CLIS:
@@ -36,6 +37,7 @@ def build_dispatch_command(
     if not os.path.isdir(repo_root):
         raise ValueError(f"Project repository does not exist: {repo_root}")
 
+    resolved_effort = effort or agent.effort or "medium"
     prompt = _task_prompt(task, review_result_path(repo_root, task.id))
     if cli == "codex":
         argv = ["codex", "exec"]
@@ -44,7 +46,7 @@ def build_dispatch_command(
         argv.extend(
             [
                 "-c",
-                f"model_reasoning_effort={agent.effort or 'medium'}",
+                f"model_reasoning_effort={resolved_effort}",
                 "--dangerously-bypass-approvals-and-sandbox",
                 prompt,
             ]
@@ -53,12 +55,14 @@ def build_dispatch_command(
         argv = ["claude"]
         if agent.model:
             argv.extend(["--model", agent.model])
-        argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
+        argv.extend(["--effort", resolved_effort, "-p", prompt, "--dangerously-skip-permissions"])
     else:
         argv = ["agy"]
         if agent.model:
             argv.extend(["--model", agent.model])
-        argv.extend(["--print", prompt, "--dangerously-skip-permissions"])
+        argv.extend(
+            ["--effort", resolved_effort, "--print", prompt, "--dangerously-skip-permissions"]
+        )
 
     return shlex.join(argv), repo_root, cli
 

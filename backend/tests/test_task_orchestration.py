@@ -137,6 +137,53 @@ def test_bypass_dispatch_is_audited_and_idempotent(orchestration, db_session):
     )
 
 
+def test_dispatch_effort_override_takes_precedence_over_agent_default(
+    orchestration, db_session
+):
+    db_session.query(Agent).filter(Agent.id == "@executor").update({"effort": "low"})
+    db_session.commit()
+    task = _task(db_session, "GATE-EFFORT-1", mode="bypass")
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-effort-override",
+        effort="high",
+    )
+
+    assert result.agent_run.effort == "high"
+    assert "model_reasoning_effort=high" in result.agent_run.command
+
+
+def test_dispatch_effort_falls_back_to_agent_default(orchestration, db_session):
+    db_session.query(Agent).filter(Agent.id == "@executor").update({"effort": "low"})
+    db_session.commit()
+    task = _task(db_session, "GATE-EFFORT-2", mode="bypass")
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-effort-default",
+    )
+
+    assert result.agent_run.effort == "low"
+
+
+def test_dispatch_effort_defaults_to_medium_when_unset(orchestration, db_session):
+    task = _task(db_session, "GATE-EFFORT-3", mode="bypass")
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-effort-medium",
+    )
+
+    assert result.agent_run.effort == "medium"
+
+
 def test_autonomy_disabled_blocks_dispatch_and_is_audited(orchestration, db_session):
     task = _task(db_session, "GATE-BRAKE-1", mode="bypass")
     db_session.add(Setting(key="autonomy_enabled", value=False))

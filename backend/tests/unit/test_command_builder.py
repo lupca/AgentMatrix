@@ -40,6 +40,34 @@ def test_builds_shell_safe_cli_commands(cli, model, expected_prefix):
     assert any("$(touch /tmp/nope)" in value for value in argv)
 
 
+@pytest.mark.parametrize("cli", ["claude", "agy"])
+def test_dispatch_effort_override_adds_flag(cli):
+    task = Task(id="CMD-EFFORT-1", project="p", title="Task", acceptance_criteria=["Pass"])
+    agent = Agent(id="@agent", name="Agent", role="executor", cli=cli, effort="low")
+    project = Project(id="p", name="Project", repo_root="/tmp")
+
+    command, _, _ = build_dispatch_command(task, agent, project, effort="high")
+    argv = shlex.split(command)
+
+    assert "--effort" in argv
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_dispatch_effort_defaults_to_agent_effort_then_medium():
+    task = Task(id="CMD-EFFORT-2", project="p", title="Task", acceptance_criteria=["Pass"])
+    project = Project(id="p", name="Project", repo_root="/tmp")
+
+    agent_with_effort = Agent(id="@agent", name="Agent", role="executor", cli="claude", effort="low")
+    command, _, _ = build_dispatch_command(task, agent_with_effort, project)
+    argv = shlex.split(command)
+    assert argv[argv.index("--effort") + 1] == "low"
+
+    agent_without_effort = Agent(id="@agent", name="Agent", role="executor", cli="claude")
+    command, _, _ = build_dispatch_command(task, agent_without_effort, project)
+    argv = shlex.split(command)
+    assert argv[argv.index("--effort") + 1] == "medium"
+
+
 def test_rejects_project_without_repository():
     task = Task(id="CMD-002", project="p", title="Task")
     agent = Agent(id="@agent", name="Agent", role="executor", cli="codex")

@@ -280,6 +280,43 @@ async def test_command_router_persists_run_before_enqueueing(db_session):
 
 
 @pytest.mark.asyncio
+async def test_dispatch_task_parses_effort_flag(db_session):
+    from app.db.models import Agent, AgentRun, Project, Task
+
+    db_session.add(Project(id="proj-1", name="Test Project", repo_root="/tmp"))
+    db_session.add(
+        Agent(
+            id="@agent-1",
+            name="Agent 1",
+            role="executor",
+            cli="codex",
+        )
+    )
+    db_session.add(
+        Task(
+            id="TASK-EFFORT",
+            project="proj-1",
+            title="Dispatch task",
+            status="todo",
+            current_gate="spec",
+            mode="bypass",
+            acceptance_criteria=["Tests pass"],
+        )
+    )
+    db_session.commit()
+
+    with patch("app.workers.agent_runner.run_agent.send"):
+        result = await CommandRouter(db_session).execute(
+            "dispatch_task", "TASK-EFFORT @agent-1 --effort high", "session-1"
+        )
+
+    assert result["action"] == "dispatched"
+    run = db_session.get(AgentRun, result["run_id"])
+    assert run.effort == "high"
+    assert "model_reasoning_effort=high" in run.command
+
+
+@pytest.mark.asyncio
 async def test_dispatch_retry_after_queue_failure_creates_new_run(db_session):
     """Regression for CTV2-088: `_command_key` used to hash session+action+args
     only, so a coordinator retry of `/dispatch` after a queue failure reused

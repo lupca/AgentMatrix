@@ -407,6 +407,7 @@ class AgentRun(Base):
     agent_role = Column(
         String(20), nullable=False, default="executor", server_default="executor"
     )
+    effort = Column(String(20), nullable=True)
 
     status = Column(String(20), nullable=False, default="queued", index=True)
     pid = Column(Integer, nullable=True)

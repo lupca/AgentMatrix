@@ -250,7 +250,10 @@ class CommandRouter:
             if not task_id:
                 return {'error': 'task_id is required'}
             executor = str(args.get('executor', '') or '').strip()
-            command_args = ' '.join(part for part in (task_id, executor) if part)
+            effort = str(args.get('effort', '') or '').strip()
+            command_args = ' '.join(
+                part for part in (task_id, executor, f'--effort {effort}' if effort else '') if part
+            )
         elif canonical_name == 'record_verdict':
             task_id = str(args.get('task_id', '')).strip()
             verdict = str(args.get('verdict', '')).strip().lower()
@@ -575,7 +578,15 @@ class CommandRouter:
 
         parts = args.strip().split()
         if not parts:
-            return {'error': 'Usage: /dispatch <task_id> [agent_id]'}
+            return {'error': 'Usage: /dispatch <task_id> [agent_id] [--effort <level>]'}
+
+        effort = None
+        if '--effort' in parts:
+            flag_index = parts.index('--effort')
+            if flag_index + 1 >= len(parts):
+                return {'error': 'Usage: /dispatch <task_id> [agent_id] [--effort <level>]'}
+            effort = parts[flag_index + 1]
+            del parts[flag_index:flag_index + 2]
 
         task_id = parts[0]
         task = self.db.query(Task).filter(Task.id == task_id).first()
@@ -604,6 +615,7 @@ class CommandRouter:
                     args,
                     attempt=self._dispatch_attempt(task_id),
                 ),
+                effort=effort,
             )
         except OrchestrationError as exc:
             return {'error': str(exc)}
