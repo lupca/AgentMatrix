@@ -94,4 +94,37 @@ describe('ChatMessage Markdown rendering', () => {
     expect(container.querySelectorAll('ul > li')).toHaveLength(2);
     expect(container.querySelectorAll('ul > li')[1]?.textContent).toBe('Item 2');
   });
+
+  it('parses <think> tags and displays ThinkingAccordion with collapsed state', () => {
+    renderMessage('<think>Analyzing user query</think>\n\nHere is the response.');
+
+    expect(container.textContent).toContain('Thought process');
+    expect(container.textContent).toContain('Here is the response.');
+    expect(container.textContent).not.toContain('Analyzing user query');
+  });
+
+  it('renders tool calls as collapsible blocks when toolCalls array is provided', () => {
+    act(() => {
+      root.render(
+        <ChatMessage
+          message={{
+            id: 'msg-tool',
+            role: 'assistant',
+            content: 'Running tool now...',
+            toolCalls: [
+              {
+                id: 'tool-1',
+                name: 'fetch_data',
+                arguments: { query: 'test' },
+                result: { success: true },
+                status: 'completed',
+              },
+            ],
+          }}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain('fetch_data');
+  });
 });

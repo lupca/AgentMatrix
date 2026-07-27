@@ -1,6 +1,7 @@
 import React from 'react';
 import { Bot, User, Copy, Check, AlertCircle } from 'lucide-react';
 import MessageContent from './MessageContent';
+import type { ToolCall } from './ToolCallBlock';
 
 export interface Message {
   id: string;
@@ -9,6 +10,7 @@ export interface Message {
   timestamp?: string;
   isStreaming?: boolean;
   error?: boolean;
+  toolCalls?: ToolCall[];
 }
 
 interface ChatMessageProps {
@@ -84,7 +86,11 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
         </div>
 
         <div className="font-sans text-xs sm:text-sm">
-          <MessageContent content={message.content} />
+          <MessageContent
+            content={message.content}
+            isStreaming={message.isStreaming}
+            toolCalls={message.toolCalls}
+          />
           {message.isStreaming && (
             <span className="inline-block w-2 h-4 ml-1 bg-indigo-400 animate-pulse align-middle" />
           )}

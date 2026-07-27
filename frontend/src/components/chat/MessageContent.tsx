@@ -8,6 +8,10 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import oneLight from 'react-syntax-highlighter/dist/esm/styles/prism/one-light';
 import oneDark from 'react-syntax-highlighter/dist/esm/styles/prism/one-dark';
 
+import { parseThinkingContent } from '../../utils/parseThinking';
+import ThinkingAccordion from './ThinkingAccordion';
+import ToolCallBlock, { type ToolCall } from './ToolCallBlock';
+
 interface CodeNode {
   position?: {
     start: { line: number };
@@ -144,8 +148,10 @@ const components: Components = {
   hr: () => <hr className="my-4 border-gray-700/70" />,
 };
 
-interface MessageContentProps {
+export interface MessageContentProps {
   content: string;
+  isStreaming?: boolean;
+  toolCalls?: ToolCall[];
 }
 
 /**
@@ -159,18 +165,46 @@ export const normalizeMarkdownContent = (content: string): string =>
     .replace(/\\n/g, '\n')
     .replace(/\\r/g, '\r');
 
-export const MessageContent: React.FC<MessageContentProps> = ({ content }) => {
+export const MessageContent: React.FC<MessageContentProps> = ({
+  content,
+  isStreaming = false,
+  toolCalls,
+}) => {
   const normalizedContent = normalizeMarkdownContent(content);
+  const { thinkingContent, finalContent, isThinking } = parseThinkingContent(normalizedContent);
+
+  const hasThinking = thinkingContent !== null || isThinking;
+  const hasToolCalls = Array.isArray(toolCalls) && toolCalls.length > 0;
 
   return (
-    <div className="markdown-content leading-relaxed whitespace-pre-wrap">
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks]}
-        rehypePlugins={[rehypeSanitize]}
-        components={components}
-      >
-        {normalizedContent}
-      </ReactMarkdown>
+    <div className="space-y-2">
+      {hasThinking && (
+        <ThinkingAccordion
+          content={thinkingContent || ''}
+          isThinking={isThinking}
+          isStreaming={isStreaming && isThinking}
+        />
+      )}
+
+      {hasToolCalls && (
+        <div className="space-y-2 my-2">
+          {toolCalls.map((tool, index) => (
+            <ToolCallBlock key={tool.id || `tool-${index}`} toolCall={tool} />
+          ))}
+        </div>
+      )}
+
+      {(finalContent || (!hasThinking && !hasToolCalls)) && (
+        <div className="markdown-content leading-relaxed whitespace-pre-wrap">
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkBreaks]}
+            rehypePlugins={[rehypeSanitize]}
+            components={components}
+          >
+            {finalContent}
+          </ReactMarkdown>
+        </div>
+      )}
     </div>
   );
 };

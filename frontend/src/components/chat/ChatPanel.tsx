@@ -112,6 +112,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           role: m.role || 'assistant',
           content: m.content || '',
           timestamp: m.timestamp || new Date().toISOString(),
+          toolCalls: m.tool_calls || m.toolCalls || undefined,
         }));
         setMessages(formattedMessages);
       } else {
@@ -269,6 +270,50 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                     ? { ...msg, content: accumulatedContent, isStreaming: true }
                     : msg
                 )
+              );
+            } else if (data.type === 'tool_start' || data.type === 'tool_call' || data.type === 'tool_use') {
+              const toolName = data.tool || data.name || data.tool_name || 'tool';
+              const toolArgs = data.args || data.arguments || data.input || {};
+              const toolId = data.id || data.tool_id || data.tool_call_id || `tool-${Date.now()}`;
+
+              setMessages((prev) =>
+                prev.map((msg) => {
+                  if (msg.id !== assistantMessageId) return msg;
+                  const existing = msg.toolCalls || [];
+                  const updated = [
+                    ...existing.filter((t) => t.id !== toolId),
+                    {
+                      id: toolId,
+                      name: toolName,
+                      arguments: toolArgs,
+                      status: 'executing' as const,
+                      isExecuting: true,
+                    },
+                  ];
+                  return { ...msg, toolCalls: updated };
+                })
+              );
+            } else if (data.type === 'tool_result' || data.type === 'tool_done' || data.type === 'tool_end') {
+              const toolId = data.id || data.tool_id || data.tool_call_id;
+              const toolResult = data.result ?? data.output ?? data.content;
+
+              setMessages((prev) =>
+                prev.map((msg) => {
+                  if (msg.id !== assistantMessageId) return msg;
+                  const existing = msg.toolCalls || [];
+                  const updated = existing.map((t) => {
+                    if (toolId ? t.id === toolId : t.isExecuting) {
+                      return {
+                        ...t,
+                        result: toolResult,
+                        status: data.error ? ('error' as const) : ('completed' as const),
+                        isExecuting: false,
+                      };
+                    }
+                    return t;
+                  });
+                  return { ...msg, toolCalls: updated };
+                })
               );
             } else if (data.type === 'done') {
               const finalContent = data.content ?? accumulatedContent;
