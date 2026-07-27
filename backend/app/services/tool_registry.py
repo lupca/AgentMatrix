@@ -54,6 +54,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "properties": {
                     "title": {"type": "string", "description": "Task title"},
                     "project": {"type": "string", "description": "Project id"},
+                    "depends_on": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Task ids that must reach 'done' before this task "
+                            "may dispatch"
+                        ),
+                    },
                 },
                 "required": ["title"],
             },

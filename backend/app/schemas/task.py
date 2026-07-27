@@ -136,6 +136,7 @@ class TaskCreate(BaseModel):
     prediction_factors: dict[str, Any] | None = None
     session_id: str | None = None
     deadline: date | None = None
+    depends_on: list[str] | None = None
 
 
 class TaskUpdate(BaseModel):
@@ -178,6 +179,7 @@ class Task(BaseModel):
     files: list[Any] | None = []
     tests: list[Any] | None = []
     flows: list[Any] | None = []
+    depends_on: list[str] | None = []
     plan: str | None = None
     result_ref: str | None = None
     findings: list[Any] | None = []

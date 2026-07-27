@@ -19,7 +19,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.base import SessionLocal
-from app.db.models import AgentOutputChunk, AgentRun, AuditLog, Task
+from app.db.models import AgentOutputChunk, AgentRun, AuditLog, Task, TaskDependency
 from app.services.agent_matcher import AgentMatcher
 from app.services.command_builder import _is_review_task, review_result_path
 from app.schemas.task import ReviewResult
@@ -564,6 +564,7 @@ def advance_task(task_id: str, trigger: str) -> str:
             return "not_found"
 
         status_before = task.status
+        service = TaskOrchestrationService(db)
         if task.awaiting_approval:
             # Already parked for a human decision (a gate pending, or a
             # brake escalation) -- that is the correct stopped state, not a
@@ -578,7 +579,6 @@ def advance_task(task_id: str, trigger: str) -> str:
             )
             outcome = "escalated_stall"
         else:
-            service = TaskOrchestrationService(db)
             outcome = _advance_task_step(db, service, task)
 
         db.add(
@@ -594,6 +594,13 @@ def advance_task(task_id: str, trigger: str) -> str:
             )
         )
         db.commit()
+        if status_before != "failed" and task.status == "failed":
+            # `_escalate` (missing AC, no agent, a failed dependency, a
+            # round/stall cap, ...) sets task.status directly rather than
+            # going through TaskOrchestrationService, so this is the one
+            # place that catches every escalation path and wakes whatever
+            # is waiting on this task (CTV2-094).
+            service.wake_dependents(task_id)
         logger.info(
             "advance_task: task %s trigger=%s %s -> %s (%s)",
             task_id,
@@ -677,7 +684,46 @@ def _advance_todo(db: Session, service: TaskOrchestrationService, task: Task) ->
     return _dispatch_execute(db, service, task)
 
 
+def _blocked_by_dependencies(db: Session, task: Task) -> str | None:
+    """Gate dispatch on every task_dependencies edge reaching `done` (CTV2-094).
+
+    A missing or `failed` dependency can never reach `done`, so the
+    dependent task is escalated immediately instead of waiting forever;
+    an unmet-but-still-active dependency just parks the task -- it is woken
+    by `TaskOrchestrationService.wake_dependents` once the dependency closes.
+    """
+    dep_ids = [
+        row.depends_on_task_id
+        for row in db.query(TaskDependency.depends_on_task_id)
+        .filter(TaskDependency.task_id == task.id)
+        .all()
+    ]
+    if not dep_ids:
+        return None
+
+    by_id = {row.id: row for row in db.query(Task).filter(Task.id.in_(dep_ids)).all()}
+    failed = sorted(
+        dep_id for dep_id in dep_ids if by_id.get(dep_id) is None or by_id[dep_id].status == "failed"
+    )
+    if failed:
+        _escalate(
+            db,
+            task,
+            f"dependency task(s) failed or are missing, so this task can "
+            f"never dispatch: {', '.join(failed)}",
+        )
+        return "escalated_dependency_failed"
+
+    if any(by_id[dep_id].status != "done" for dep_id in dep_ids):
+        return "waiting_dependency"
+    return None
+
+
 def _dispatch_execute(db: Session, service: TaskOrchestrationService, task: Task) -> str:
+    blocked = _blocked_by_dependencies(db, task)
+    if blocked is not None:
+        return blocked
+
     agent_id = task.executor
     if not agent_id:
         suggestions = AgentMatcher(db).suggest_agents(task, top_n=1)

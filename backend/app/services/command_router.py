@@ -223,7 +223,10 @@ class CommandRouter:
             if not title:
                 return {'error': 'title is required'}
             project = str(args.get('project', '')).strip()
+            depends_on = args.get('depends_on') or []
             command_args = title + (f' --project {project}' if project else '')
+            if depends_on:
+                command_args += ' --depends-on ' + ','.join(str(d) for d in depends_on)
         elif canonical_name == 'get_status':
             command_args = str(args.get('task_id', '') or '')
         elif canonical_name == 'query_db':
@@ -466,7 +469,13 @@ class CommandRouter:
         from datetime import datetime
         from sqlalchemy import update as sa_update
 
-        # Parse args: 'task title --project name'
+        # Parse args: 'task title --project name --depends-on id1,id2'
+        depends_on: list[str] = []
+        if '--depends-on' in args:
+            args, dep_part = args.split('--depends-on', 1)
+            dep_part = dep_part.strip().split()[0] if dep_part.strip() else ''
+            depends_on = [dep_id for dep_id in dep_part.split(',') if dep_id]
+
         project = None
         title = args
         if '--project' in args:
@@ -526,7 +535,29 @@ class CommandRouter:
         self.db.add(task)
         self.db.commit()
 
-        return {'action': 'created', 'task_id': task.id, 'title': title, 'project': project}
+        if depends_on:
+            service = TaskOrchestrationService(self.db)
+            for dep_id in depends_on:
+                try:
+                    service.add_dependency(
+                        task_id=task.id,
+                        depends_on_task_id=dep_id,
+                        actor=f"chat:{session_id or 'anonymous'}",
+                    )
+                except OrchestrationError as exc:
+                    return {
+                        'action': 'error',
+                        'error': str(exc),
+                        'task_id': task.id,
+                    }
+
+        return {
+            'action': 'created',
+            'task_id': task.id,
+            'title': title,
+            'project': project,
+            'depends_on': depends_on,
+        }
 
     async def _handle_dispatch_task(self, args: str, session_id: str) -> dict:
         from app.workers.agent_runner import run_agent

@@ -86,7 +86,8 @@ def get_tasks(
 @router.post("", response_model=Task, status_code=status.HTTP_201_CREATED)
 def create_task(task_in: TaskCreate, db: Session = Depends(get_db)):
     task_data = task_in.model_dump(exclude_unset=True)
-    
+    depends_on = task_data.pop("depends_on", None) or []
+
     task_id = task_data.get("id")
     if not task_id:
         task_id = generate_task_id(db, task_in.project)
@@ -128,9 +129,23 @@ def create_task(task_in: TaskCreate, db: Session = Depends(get_db)):
         }
     )
     db.add(audit_entry)
-    
+
     db.commit()
     db.refresh(db_task)
+
+    if depends_on:
+        service = TaskOrchestrationService(db)
+        for dep_id in depends_on:
+            try:
+                service.add_dependency(
+                    task_id=db_task.id, depends_on_task_id=dep_id, actor="system"
+                )
+            except OrchestrationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+                ) from exc
+        db.refresh(db_task)
+
     invalidate_context_snapshot(db, project_id=db_task.project)
     return db_task
 

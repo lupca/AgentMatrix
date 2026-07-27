@@ -1,12 +1,26 @@
+from unittest.mock import patch
+
 import pytest
 from sqlalchemy.exc import StatementError
 
-from app.db.models import Agent, AgentRun, AuditLog, GateRecord, LLMUsage, Project, Setting, Task
+from app.db.models import (
+    Agent,
+    AgentRun,
+    AuditLog,
+    GateRecord,
+    LLMUsage,
+    Project,
+    Setting,
+    Task,
+    TaskDependency,
+)
 from app.services.task_orchestration import (
     BrakeViolationError,
+    DependencyCycleError,
     IdempotencyConflictError,
     PrerequisiteError,
     StaleIdempotencyRecordError,
+    TaskNotFoundError,
     TaskOrchestrationService,
     TransitionConflictError,
 )
@@ -606,3 +620,167 @@ def test_write_spec_plan_requires_todo_status(orchestration, db_session):
             risk="low",
             flows=[],
         )
+
+
+# ---------------------------------------------------------------------------
+# task_dependencies: add_dependency, cycle rejection, wake_dependents (CTV2-094)
+# ---------------------------------------------------------------------------
+
+
+def test_add_dependency_records_edge(orchestration, db_session):
+    upstream = _task(db_session, "DEP-001")
+    downstream = _task(db_session, "DEP-002")
+
+    edge = orchestration.add_dependency(
+        task_id=downstream.id, depends_on_task_id=upstream.id, actor="@operator"
+    )
+
+    assert edge.task_id == "DEP-002"
+    assert edge.depends_on_task_id == "DEP-001"
+    assert (
+        db_session.query(TaskDependency)
+        .filter(TaskDependency.task_id == "DEP-002")
+        .count()
+        == 1
+    )
+    assert (
+        db_session.query(AuditLog)
+        .filter(AuditLog.task_id == "DEP-002", AuditLog.action == "add_dependency")
+        .count()
+        == 1
+    )
+
+
+def test_add_dependency_is_idempotent(orchestration, db_session):
+    upstream = _task(db_session, "DEP-003")
+    downstream = _task(db_session, "DEP-004")
+
+    first = orchestration.add_dependency(
+        task_id=downstream.id, depends_on_task_id=upstream.id, actor="@operator"
+    )
+    second = orchestration.add_dependency(
+        task_id=downstream.id, depends_on_task_id=upstream.id, actor="@operator"
+    )
+
+    assert first.task_id == second.task_id
+    assert (
+        db_session.query(TaskDependency)
+        .filter(TaskDependency.task_id == "DEP-004")
+        .count()
+        == 1
+    )
+
+
+def test_add_dependency_rejects_self_reference(orchestration, db_session):
+    task = _task(db_session, "DEP-005")
+
+    with pytest.raises(DependencyCycleError):
+        orchestration.add_dependency(
+            task_id=task.id, depends_on_task_id=task.id, actor="@operator"
+        )
+
+
+def test_add_dependency_rejects_direct_cycle(orchestration, db_session):
+    a = _task(db_session, "DEP-006")
+    b = _task(db_session, "DEP-007")
+    orchestration.add_dependency(task_id=b.id, depends_on_task_id=a.id, actor="@op")
+
+    with pytest.raises(DependencyCycleError):
+        orchestration.add_dependency(task_id=a.id, depends_on_task_id=b.id, actor="@op")
+
+
+def test_add_dependency_rejects_transitive_cycle(orchestration, db_session):
+    a = _task(db_session, "DEP-008")
+    b = _task(db_session, "DEP-009")
+    c = _task(db_session, "DEP-010")
+    # C depends on B, B depends on A -- A -> C would close the loop.
+    orchestration.add_dependency(task_id=c.id, depends_on_task_id=b.id, actor="@op")
+    orchestration.add_dependency(task_id=b.id, depends_on_task_id=a.id, actor="@op")
+
+    with pytest.raises(DependencyCycleError):
+        orchestration.add_dependency(task_id=a.id, depends_on_task_id=c.id, actor="@op")
+
+
+def test_add_dependency_requires_existing_tasks(orchestration, db_session):
+    task = _task(db_session, "DEP-011")
+
+    with pytest.raises(TaskNotFoundError):
+        orchestration.add_dependency(
+            task_id=task.id, depends_on_task_id="MISSING", actor="@op"
+        )
+    with pytest.raises(TaskNotFoundError):
+        orchestration.add_dependency(
+            task_id="MISSING", depends_on_task_id=task.id, actor="@op"
+        )
+
+
+def test_unmet_and_failed_dependencies(orchestration, db_session):
+    upstream = _task(db_session, "DEP-012")
+    downstream = _task(db_session, "DEP-013")
+    orchestration.add_dependency(
+        task_id=downstream.id, depends_on_task_id=upstream.id, actor="@op"
+    )
+
+    assert [t.id for t in orchestration.unmet_dependencies(downstream.id)] == ["DEP-012"]
+    assert orchestration.failed_dependencies(downstream.id) == []
+
+    upstream = db_session.get(Task, upstream.id)
+    upstream.status = "failed"
+    db_session.commit()
+    assert orchestration.failed_dependencies(downstream.id) == ["DEP-012"]
+
+    upstream = db_session.get(Task, upstream.id)
+    upstream.executor = "@executor"
+    upstream.reviewer = "@reviewer"
+    upstream.result_ref = "base..head"
+    upstream.status = "done"
+    db_session.commit()
+    assert orchestration.unmet_dependencies(downstream.id) == []
+    assert orchestration.failed_dependencies(downstream.id) == []
+
+
+def test_wake_dependents_sends_advance_task_for_every_dependent(orchestration, db_session):
+    upstream = _task(db_session, "DEP-014")
+    downstream_a = _task(db_session, "DEP-015")
+    downstream_b = _task(db_session, "DEP-016")
+    orchestration.add_dependency(
+        task_id=downstream_a.id, depends_on_task_id=upstream.id, actor="@op"
+    )
+    orchestration.add_dependency(
+        task_id=downstream_b.id, depends_on_task_id=upstream.id, actor="@op"
+    )
+
+    with patch("app.workers.agent_runner.advance_task") as driver_actor:
+        orchestration.wake_dependents(upstream.id)
+
+    sent = {call.args[0] for call in driver_actor.send.call_args_list}
+    assert sent == {"DEP-015", "DEP-016"}
+
+
+def test_wake_dependents_is_a_noop_with_no_dependents(orchestration, db_session):
+    task = _task(db_session, "DEP-017")
+
+    with patch("app.workers.agent_runner.advance_task") as driver_actor:
+        orchestration.wake_dependents(task.id)
+
+    driver_actor.send.assert_not_called()
+
+
+def test_record_execution_failure_wakes_dependents(orchestration, db_session):
+    upstream = _task(db_session, "DEP-018")
+    downstream = _task(db_session, "DEP-019")
+    orchestration.add_dependency(
+        task_id=downstream.id, depends_on_task_id=upstream.id, actor="@op"
+    )
+    upstream.status = "dispatched"
+    db_session.commit()
+
+    with patch("app.workers.agent_runner.advance_task") as driver_actor:
+        orchestration.record_execution_failure(
+            task_id=upstream.id,
+            error="boom",
+            actor="agent:@executor",
+            idempotency_key="dep-018-fail",
+        )
+
+    driver_actor.send.assert_called_once_with("DEP-019", "dependency_closed")

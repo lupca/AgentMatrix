@@ -80,6 +80,16 @@ class Task(Base):
     gate_records = relationship("GateRecord", back_populates="task", cascade="all, delete-orphan")
     agent_runs = relationship("AgentRun", back_populates="task", cascade="all, delete-orphan")
     llm_usages = relationship("LLMUsage", back_populates="task")
+    dependency_edges = relationship(
+        "TaskDependency",
+        foreign_keys="TaskDependency.task_id",
+        cascade="all, delete-orphan",
+    )
+    dependent_edges = relationship(
+        "TaskDependency",
+        foreign_keys="TaskDependency.depends_on_task_id",
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -110,6 +120,36 @@ class Task(Base):
                 f"Four-eyes violation: reviewer '{value}' cannot be the same as executor '{other_val}'."
             )
         return value
+
+    @property
+    def depends_on(self) -> list[str]:
+        return [edge.depends_on_task_id for edge in self.dependency_edges]
+
+
+class TaskDependency(Base):
+    """One edge of the task DAG: ``task_id`` cannot dispatch until
+
+    ``depends_on_task_id`` reaches ``done`` (CTV2-094). Cycle/self-loop
+    rejection lives in ``TaskOrchestrationService.add_dependency`` -- this
+    table only stores whatever edges pass that check.
+    """
+
+    __tablename__ = "task_dependencies"
+
+    task_id = Column(
+        String(20), ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True
+    )
+    depends_on_task_id = Column(
+        String(20), ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "task_id <> depends_on_task_id", name="ck_task_dependencies_no_self"
+        ),
+        Index("ix_task_dependencies_depends_on", "depends_on_task_id"),
+    )
 
 
 class GateRecord(Base):

@@ -9,7 +9,7 @@ from alembic.config import Config
 from alembic import command
 
 from app.db.base import Base
-from app.db.models import Task, GateRecord, Session, AuditLog
+from app.db.models import Task, GateRecord, Session, AuditLog, TaskDependency
 from app.graph.state import FourEyesViolation
 from app.schemas.task import TaskState, GateRecordCreate, GateRecord as GateRecordSchema
 
@@ -41,6 +41,14 @@ def test_alembic_migration_head():
     assert "gate_records" in tables
     assert "sessions" in tables
     assert "audit_log" in tables
+    assert "task_dependencies" in tables
+
+    # Inspect task_dependencies columns
+    dep_cols = {col["name"]: col for col in inspector.get_columns("task_dependencies")}
+    assert "task_id" in dep_cols
+    assert "depends_on_task_id" in dep_cols
+    pk_cols = set(inspector.get_pk_constraint("task_dependencies")["constrained_columns"])
+    assert pk_cols == {"task_id", "depends_on_task_id"}
 
     # Inspect tasks columns
     task_cols = {col["name"]: col for col in inspector.get_columns("tasks")}
@@ -296,3 +304,52 @@ def test_four_eyes_allowed_cases(db_session):
     assert t1.executor == "@alice" and t1.reviewer is None
     assert t2.executor is None and t2.reviewer == "@bob"
     assert t3.executor == "@alice" and t3.reviewer == "@bob"
+
+
+# ---------------------------------------------------------------------------
+# Category 4: task_dependencies (CTV2-094)
+# ---------------------------------------------------------------------------
+
+def test_task_dependency_crud_and_relationship(db_session):
+    """Verify CRUD and the Task.depends_on projection over task_dependencies."""
+    upstream = Task(id="DAG-UP", project="p", title="Upstream")
+    downstream = Task(id="DAG-DOWN", project="p", title="Downstream")
+    db_session.add_all([upstream, downstream])
+    db_session.commit()
+
+    edge = TaskDependency(task_id="DAG-DOWN", depends_on_task_id="DAG-UP")
+    db_session.add(edge)
+    db_session.commit()
+
+    db_session.refresh(downstream)
+    assert downstream.depends_on == ["DAG-UP"]
+
+    fetched = db_session.get(TaskDependency, ("DAG-DOWN", "DAG-UP"))
+    assert fetched is not None
+
+
+def test_task_dependency_rejects_self_reference(db_session):
+    """The `task_id <> depends_on_task_id` check constraint blocks self-loops."""
+    task = Task(id="DAG-SELF", project="p", title="Self")
+    db_session.add(task)
+    db_session.commit()
+
+    db_session.add(TaskDependency(task_id="DAG-SELF", depends_on_task_id="DAG-SELF"))
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_task_dependency_cascades_on_task_deletion(db_session):
+    """Deleting either side of an edge removes the task_dependencies row."""
+    upstream = Task(id="DAG-CASC-UP", project="p", title="Upstream")
+    downstream = Task(id="DAG-CASC-DOWN", project="p", title="Downstream")
+    db_session.add_all([upstream, downstream])
+    db_session.commit()
+    db_session.add(TaskDependency(task_id="DAG-CASC-DOWN", depends_on_task_id="DAG-CASC-UP"))
+    db_session.commit()
+
+    db_session.delete(downstream)
+    db_session.commit()
+
+    assert db_session.query(TaskDependency).count() == 0

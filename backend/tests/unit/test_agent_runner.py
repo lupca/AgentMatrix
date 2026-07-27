@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 import subprocess
 import threading
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -11,7 +11,17 @@ from sqlalchemy.pool import StaticPool
 
 import app.workers.agent_runner as runner
 from app.db.base import Base
-from app.db.models import Agent, AgentOutputChunk, AgentRun, AuditLog, GateRecord, Project, Setting, Task
+from app.db.models import (
+    Agent,
+    AgentOutputChunk,
+    AgentRun,
+    AuditLog,
+    GateRecord,
+    Project,
+    Setting,
+    Task,
+    TaskDependency,
+)
 from app.services.process_manager import ProcessResult, ProcessStatus, WorktreeUnsupportedError
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "review_results"
@@ -988,3 +998,93 @@ def test_advance_task_audit_trail_records_every_call(driver_db):
     assert entries[0].details["status_after"] == "dispatched"
     assert entries[0].details["outcome"] == "dispatched"
     db.close()
+
+
+# ---------------------------------------------------------------------------
+# advance_task: task_dependencies gate + wake-up (CTV2-094)
+# ---------------------------------------------------------------------------
+
+
+def test_advance_task_todo_waits_for_unmet_dependency(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-UP", status="dispatched", acceptance_criteria=["Tests pass"])
+    _driver_task(factory, "ADV-DOWN", acceptance_criteria=["Tests pass"])
+    db = factory()
+    db.add(TaskDependency(task_id="ADV-DOWN", depends_on_task_id="ADV-UP"))
+    db.commit()
+    db.close()
+
+    outcome = runner.advance_task.fn("ADV-DOWN", "manual")
+
+    assert outcome == "waiting_dependency"
+    db = factory()
+    task = db.get(Task, "ADV-DOWN")
+    assert task.status == "todo"
+    db.close()
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_todo_dispatches_once_dependency_is_done(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-UP2",
+        status="done",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="base..head",
+        acceptance_criteria=["Tests pass"],
+    )
+    _driver_task(factory, "ADV-DOWN2", acceptance_criteria=["Tests pass"])
+    db = factory()
+    db.add(TaskDependency(task_id="ADV-DOWN2", depends_on_task_id="ADV-UP2"))
+    db.commit()
+    db.close()
+
+    outcome = runner.advance_task.fn("ADV-DOWN2", "manual")
+
+    assert outcome == "dispatched"
+    db = factory()
+    task = db.get(Task, "ADV-DOWN2")
+    assert task.status == "dispatched"
+    db.close()
+    run_agent_mock.send.assert_called_once()
+
+
+def test_advance_task_escalates_when_dependency_failed(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-UP3", status="failed", acceptance_criteria=["Tests pass"])
+    _driver_task(factory, "ADV-DOWN3", acceptance_criteria=["Tests pass"])
+    db = factory()
+    db.add(TaskDependency(task_id="ADV-DOWN3", depends_on_task_id="ADV-UP3"))
+    db.commit()
+    db.close()
+
+    outcome = runner.advance_task.fn("ADV-DOWN3", "manual")
+
+    assert outcome == "escalated_dependency_failed"
+    db = factory()
+    task = db.get(Task, "ADV-DOWN3")
+    assert task.status == "failed"
+    assert task.awaiting_approval is True
+    db.close()
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_wakes_dependents_when_it_fails(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-UP4", acceptance_criteria=[])
+    _driver_task(factory, "ADV-DOWN4", acceptance_criteria=["Tests pass"])
+    db = factory()
+    db.add(TaskDependency(task_id="ADV-DOWN4", depends_on_task_id="ADV-UP4"))
+    db.commit()
+    db.close()
+
+    # ADV-UP4 has no acceptance_criteria, so it escalates to "failed" --
+    # this must wake ADV-DOWN4, the task waiting on it.
+    real_advance_fn = runner.advance_task.fn
+    with patch.object(runner, "advance_task") as mocked_advance:
+        outcome = real_advance_fn("ADV-UP4", "manual")
+
+    assert outcome == "escalated_missing_ac"
+    mocked_advance.send.assert_called_once_with("ADV-DOWN4", "dependency_closed")

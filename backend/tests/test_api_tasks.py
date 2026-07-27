@@ -134,3 +134,35 @@ def test_audit_logs_endpoint(client):
     assert len(logs) == 1
     assert logs[0]["task_id"] == task_id
     assert logs[0]["action"] == "create_task"
+
+
+def test_create_task_with_depends_on_records_edges(client):
+    upstream = client.post("/api/tasks", json={"project": "web", "title": "Upstream"})
+    upstream_id = upstream.json()["id"]
+
+    downstream = client.post(
+        "/api/tasks",
+        json={
+            "project": "web",
+            "title": "Downstream",
+            "depends_on": [upstream_id],
+        },
+    )
+    assert downstream.status_code == 201
+    data = downstream.json()
+    assert data["depends_on"] == [upstream_id]
+
+    fetched = client.get(f"/api/tasks/{data['id']}")
+    assert fetched.json()["depends_on"] == [upstream_id]
+
+
+def test_create_task_with_missing_dependency_is_rejected(client):
+    response = client.post(
+        "/api/tasks",
+        json={
+            "project": "web",
+            "title": "Orphan dependent",
+            "depends_on": ["MISSING-TASK"],
+        },
+    )
+    assert response.status_code == 422

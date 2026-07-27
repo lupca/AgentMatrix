@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,8 +15,20 @@ from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.models import Agent, AgentRun, AuditLog, GateRecord, LLMUsage, Project, Setting, Task
+from app.db.models import (
+    Agent,
+    AgentRun,
+    AuditLog,
+    GateRecord,
+    LLMUsage,
+    Project,
+    Setting,
+    Task,
+    TaskDependency,
+)
 from app.services.command_builder import build_dispatch_command, build_review_command
+
+logger = logging.getLogger(__name__)
 
 GateDecision = Literal["approved", "rejected"]
 
@@ -55,6 +68,10 @@ class StaleIdempotencyRecordError(OrchestrationError):
 
 class BrakeViolationError(OrchestrationError):
     """An autonomy or budget brake stopped forward progress."""
+
+
+class DependencyCycleError(OrchestrationError):
+    """A requested task_dependencies edge would close a cycle (or self-loop)."""
 
 
 @dataclass(frozen=True)
@@ -353,6 +370,8 @@ class TaskOrchestrationService:
         self.db.refresh(record)
         if run is not None:
             self.db.refresh(run)
+        if pending.gate_type == "verdict" and task.status == "done":
+            self.wake_dependents(task.id)
         return TransitionResult(
             task=task,
             gate_record=record,
@@ -444,6 +463,7 @@ class TaskOrchestrationService:
         self.db.commit()
         self.db.refresh(task)
         self.db.refresh(record)
+        self.wake_dependents(task_id)
         return TransitionResult(task, record, True)
 
     def record_review_failure(
@@ -495,6 +515,7 @@ class TaskOrchestrationService:
         self.db.commit()
         self.db.refresh(task)
         self.db.refresh(record)
+        self.wake_dependents(task_id)
         return TransitionResult(task, record, True)
 
     def record_dispatch_queue_failure(
@@ -738,6 +759,145 @@ class TaskOrchestrationService:
             .count()
         )
 
+    def add_dependency(
+        self,
+        *,
+        task_id: str,
+        depends_on_task_id: str,
+        actor: str,
+    ) -> TaskDependency:
+        """Record that ``task_id`` cannot dispatch until ``depends_on_task_id`` is done.
+
+        Rejects a self-dependency and any edge that would close a cycle in
+        the existing dependency graph (checked by DFS before the row is
+        written) -- both are ``DependencyCycleError`` so callers can treat
+        them identically.
+        """
+        if task_id == depends_on_task_id:
+            raise DependencyCycleError(f"Task {task_id} cannot depend on itself")
+        if self.db.get(Task, task_id) is None:
+            raise TaskNotFoundError(f"Task {task_id} not found")
+        if self.db.get(Task, depends_on_task_id) is None:
+            raise TaskNotFoundError(f"Task {depends_on_task_id} not found")
+
+        existing = self.db.get(TaskDependency, (task_id, depends_on_task_id))
+        if existing is not None:
+            return existing
+
+        if self._creates_cycle(task_id, depends_on_task_id):
+            raise DependencyCycleError(
+                f"Adding dependency {task_id} -> {depends_on_task_id} would "
+                "create a cycle"
+            )
+
+        edge = TaskDependency(task_id=task_id, depends_on_task_id=depends_on_task_id)
+        self.db.add(edge)
+        self.db.add(
+            AuditLog(
+                task_id=task_id,
+                action="add_dependency",
+                actor=actor,
+                details={"depends_on_task_id": depends_on_task_id},
+            )
+        )
+        self.db.commit()
+        self.db.refresh(edge)
+        return edge
+
+    def _creates_cycle(self, task_id: str, depends_on_task_id: str) -> bool:
+        """Would ``task_id -> depends_on_task_id`` close a cycle?
+
+        True iff ``depends_on_task_id`` can already reach ``task_id`` by
+        walking existing ``depends_on`` edges forward -- i.e. a path
+        ``depends_on_task_id -> ... -> task_id`` already exists, so adding
+        the new edge would complete the loop.
+        """
+        adjacency: dict[str, list[str]] = {}
+        for edge in self.db.query(TaskDependency).all():
+            adjacency.setdefault(edge.task_id, []).append(edge.depends_on_task_id)
+
+        stack = [depends_on_task_id]
+        visited: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current == task_id:
+                return True
+            if current in visited:
+                continue
+            visited.add(current)
+            stack.extend(adjacency.get(current, []))
+        return False
+
+    def unmet_dependencies(self, task_id: str) -> list[Task]:
+        """Dependencies of ``task_id`` that have not reached ``done``."""
+        dep_ids = self._dependency_ids(task_id)
+        if not dep_ids:
+            return []
+        return (
+            self.db.query(Task)
+            .filter(Task.id.in_(dep_ids), Task.status != "done")
+            .all()
+        )
+
+    def failed_dependencies(self, task_id: str) -> list[str]:
+        """Dependency ids of ``task_id`` that are missing or ``failed``.
+
+        A missing/failed dependency can never reach ``done``, so it must
+        escalate the dependent task instead of leaving it parked forever.
+        """
+        dep_ids = self._dependency_ids(task_id)
+        if not dep_ids:
+            return []
+        found = {
+            row.id: row
+            for row in self.db.query(Task).filter(Task.id.in_(dep_ids)).all()
+        }
+        return [
+            dep_id
+            for dep_id in dep_ids
+            if dep_id not in found or found[dep_id].status == "failed"
+        ]
+
+    def _dependency_ids(self, task_id: str) -> list[str]:
+        return [
+            row.depends_on_task_id
+            for row in self.db.query(TaskDependency.depends_on_task_id)
+            .filter(TaskDependency.task_id == task_id)
+            .all()
+        ]
+
+    def dependent_task_ids(self, task_id: str) -> list[str]:
+        """Ids of every task whose dependency graph includes ``task_id``."""
+        return [
+            row.task_id
+            for row in self.db.query(TaskDependency.task_id)
+            .filter(TaskDependency.depends_on_task_id == task_id)
+            .all()
+        ]
+
+    def wake_dependents(self, task_id: str) -> None:
+        """Nudge the orchestration driver for every task waiting on ``task_id``.
+
+        Called after ``task_id`` reaches a terminal status (``done`` or
+        ``failed``) so a dependent parked on it is not left waiting until
+        some unrelated trigger happens to re-check it. Deferred import
+        avoids a module cycle (``agent_runner`` imports this service at
+        module scope); safe to call unconditionally even when ``task_id``
+        has no dependents.
+        """
+        from app.workers.agent_runner import advance_task
+
+        for dependent_id in self.dependent_task_ids(task_id):
+            try:
+                advance_task.send(dependent_id, "dependency_closed")
+            except Exception:
+                logger.warning(
+                    "Could not enqueue advance_task for dependent %s of %s",
+                    dependent_id,
+                    task_id,
+                    exc_info=True,
+                )
+
     def _request_gate(
         self,
         *,
@@ -854,6 +1014,8 @@ class TaskOrchestrationService:
         self.db.refresh(record)
         if run is not None:
             self.db.refresh(run)
+        if gate_type == "verdict" and task.status == "done":
+            self.wake_dependents(task.id)
         return TransitionResult(
             task,
             record,
@@ -1040,6 +1202,8 @@ class TaskOrchestrationService:
             )
         )
         self.db.commit()
+        if decision.code in {"autonomy_disabled", "cost_limit"}:
+            self.wake_dependents(task.id)
 
     def _task_cost(self, task: Task) -> Decimal:
         value = (
