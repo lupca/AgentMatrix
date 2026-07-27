@@ -1,11 +1,19 @@
+import subprocess
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import psutil
 import pytest
 
-from app.services.process_manager import ProcessManager, ProcessResult, ProcessStatus
+from app.services.process_manager import (
+    ProcessManager,
+    ProcessResult,
+    ProcessStatus,
+    WorktreeManager,
+    WorktreeUnsupportedError,
+)
 
 
 def final_result(results):
@@ -221,3 +229,129 @@ def test_terminate_falls_back_when_process_group_signal_is_denied():
         manager.terminate()
 
     parent.terminate.assert_called_once()
+
+
+def _head(repo_root: str) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+
+def _worktree_list(repo_root: str) -> str:
+    return subprocess.run(
+        ["git", "worktree", "list"], cwd=repo_root, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def _commit_in(worktree_path: str, message: str) -> str:
+    (Path(worktree_path) / f"{message}.txt").write_text(message)
+    subprocess.run(["git", "add", "."], cwd=worktree_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", message], cwd=worktree_path, check=True, capture_output=True
+    )
+    return _head(worktree_path)
+
+
+def test_worktree_create_checks_out_isolated_copy(git_repo_root, tmp_path):
+    manager = WorktreeManager(git_repo_root, worktree_root=str(tmp_path / "worktrees"))
+    base = _head(git_repo_root)
+
+    path = manager.create("run-a", base)
+
+    assert Path(path).is_dir()
+    assert _head(path) == base
+    assert "run-a" in _worktree_list(git_repo_root)
+
+
+def test_worktree_commits_are_visible_in_main_repo_after_removal(git_repo_root, tmp_path):
+    manager = WorktreeManager(git_repo_root, worktree_root=str(tmp_path / "worktrees"))
+    base = _head(git_repo_root)
+    path = manager.create("run-b", base)
+
+    commit_sha = _commit_in(path, "change-from-worktree")
+
+    # No merge performed -- the commit is already reachable from the shared
+    # object store, and stays reachable once the worktree checkout is gone.
+    manager.remove("run-b")
+
+    assert "run-b" not in _worktree_list(git_repo_root)
+    assert not Path(path).exists()
+    log = subprocess.run(
+        ["git", "log", "--all", "--format=%H"],
+        cwd=git_repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert commit_sha in log
+
+
+def test_worktree_create_raises_for_non_git_directory(tmp_path):
+    manager = WorktreeManager(str(tmp_path), worktree_root=str(tmp_path / "worktrees"))
+
+    with pytest.raises(WorktreeUnsupportedError):
+        manager.create("run-c", "HEAD")
+
+
+def test_worktree_remove_is_idempotent_for_missing_worktree(git_repo_root, tmp_path):
+    manager = WorktreeManager(git_repo_root, worktree_root=str(tmp_path / "worktrees"))
+
+    manager.remove("never-created")  # must not raise
+
+
+def test_worktree_create_recovers_from_a_stale_orphan(git_repo_root, tmp_path):
+    manager = WorktreeManager(git_repo_root, worktree_root=str(tmp_path / "worktrees"))
+    base = _head(git_repo_root)
+    first_path = manager.create("run-d", base)
+    _commit_in(first_path, "orphaned")
+
+    # Simulate a crash: nothing calls remove(), so the worktree/branch are
+    # still registered when the same run_id is retried.
+    second_path = manager.create("run-d", base)
+
+    assert second_path == first_path
+    assert _head(second_path) == base
+
+
+def test_two_concurrent_worktrees_commit_independently_without_lock_contention(
+    git_repo_root, tmp_path
+):
+    manager = WorktreeManager(git_repo_root, worktree_root=str(tmp_path / "worktrees"))
+    base = _head(git_repo_root)
+    path_a = manager.create("run-e", base)
+    path_b = manager.create("run-f", base)
+
+    shas = {}
+    errors = []
+
+    def commit(run_id, path, label):
+        try:
+            shas[run_id] = _commit_in(path, label)
+        except Exception as exc:  # pragma: no cover - failure surfaced via assert
+            errors.append(exc)
+
+    t1 = threading.Thread(target=commit, args=("run-e", path_a, "from-e"))
+    t2 = threading.Thread(target=commit, args=("run-f", path_b, "from-f"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert not errors
+    assert not Path(git_repo_root, ".git", "index.lock").exists()
+    assert shas["run-e"] != shas["run-f"]
+
+    manager.remove("run-e")
+    manager.remove("run-f")
+
+    log = subprocess.run(
+        ["git", "log", "--all", "--format=%H"],
+        cwd=git_repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert shas["run-e"] in log
+    assert shas["run-f"] in log
+    assert _worktree_list(git_repo_root).count("[") == 1  # only the primary checkout remains

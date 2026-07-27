@@ -52,10 +52,21 @@ def recovery_db(monkeypatch, git_repo_root):
     engine.dispose()
 
 
-def process_manager_for(result):
+def process_manager_for(result, *, commit_in_cwd=False):
     manager = MagicMock()
     manager.pid = 100
-    manager.run_with_streaming.return_value = iter(result)
+    if commit_in_cwd:
+        # ProcessManager is fully mocked here, so it never actually runs a
+        # command in the per-run worktree. Simulate "the executor committed"
+        # the same way the real process would: as a side effect of running
+        # in whatever cwd run_agent passes in (the isolated worktree).
+        def run_with_streaming(command, cwd, env=None):
+            commit_change(cwd)
+            return iter(result)
+
+        manager.run_with_streaming.side_effect = run_with_streaming
+    else:
+        manager.run_with_streaming.return_value = iter(result)
     return manager
 
 
@@ -66,7 +77,8 @@ def test_failed_agent_retries_until_third_attempt_succeeds(
         process_manager_for([ProcessResult(ProcessStatus.FAILED, 1, "failure 1")]),
         process_manager_for([ProcessResult(ProcessStatus.FAILED, 1, "failure 2")]),
         process_manager_for(
-            ["recovered", ProcessResult(ProcessStatus.COMPLETED, 0, None)]
+            ["recovered", ProcessResult(ProcessStatus.COMPLETED, 0, None)],
+            commit_in_cwd=True,
         ),
     ]
     monkeypatch.setattr(runner, "ProcessManager", MagicMock(side_effect=managers))
@@ -75,9 +87,6 @@ def test_failed_agent_retries_until_third_attempt_succeeds(
         runner.run_agent.fn("recover-run", "T-RECOVERY", "test", git_repo_root, 10)
     with pytest.raises(runner.AgentExecutionError):
         runner.run_agent.fn("recover-run", "T-RECOVERY", "test", git_repo_root, 10)
-    # The mocked ProcessManager never touches the filesystem, so simulate the
-    # executor having actually committed on the third, successful attempt.
-    commit_change(git_repo_root)
     assert runner.run_agent.fn("recover-run", "T-RECOVERY", "test", git_repo_root, 10) == 0
 
     db = recovery_db()

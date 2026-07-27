@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import subprocess
+import threading
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 import app.workers.agent_runner as runner
 from app.db.base import Base
 from app.db.models import Agent, AgentOutputChunk, AgentRun, AuditLog, GateRecord, Project, Setting, Task
-from app.services.process_manager import ProcessResult, ProcessStatus
+from app.services.process_manager import ProcessResult, ProcessStatus, WorktreeUnsupportedError
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "review_results"
 
@@ -123,6 +124,218 @@ def test_run_agent_persists_output_and_success(worker_db, git_repo_root):
     assert base and head and base != head
     assert task.result_ref == run.result_ref
     db.close()
+
+
+def _worktree_entries(repo_root: str) -> str:
+    return subprocess.run(
+        ["git", "worktree", "list"], cwd=repo_root, check=True, capture_output=True, text=True
+    ).stdout
+
+
+# ---------------------------------------------------------------------------
+# run_agent: per-run git worktree isolation (CTV2-105)
+# ---------------------------------------------------------------------------
+
+
+def test_run_agent_executes_in_an_isolated_worktree_and_cleans_up(worker_db, git_repo_root):
+    result = runner.run_agent.fn(
+        "run-001",
+        "RUN-001",
+        "echo change > change.txt && git add change.txt && git commit -q -m change",
+        git_repo_root,
+        5,
+    )
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    assert result == 0
+    assert run.status == "success"
+    db.close()
+
+    # No worktree left registered against the shared repo, and the commit
+    # landed on the run's own branch -- never on the primary checkout.
+    entries = _worktree_entries(git_repo_root)
+    assert entries.count("[") == 1
+    branch = subprocess.run(
+        ["git", "branch", "--show-current"], cwd=git_repo_root, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert branch != "ct-run/run-001"
+    log = subprocess.run(
+        ["git", "log", "--all", "--format=%H"], cwd=git_repo_root, check=True,
+        capture_output=True, text=True,
+    ).stdout
+    base, _, head = run.result_ref.partition("..")
+    assert head in log
+
+
+def test_run_agent_falls_back_to_sequential_when_worktree_unsupported(
+    worker_db, monkeypatch, git_repo_root
+):
+    warning = MagicMock()
+    monkeypatch.setattr(runner.logger, "warning", warning)
+    monkeypatch.setattr(
+        runner.WorktreeManager,
+        "create",
+        MagicMock(side_effect=WorktreeUnsupportedError("no git worktree support")),
+    )
+
+    result = runner.run_agent.fn(
+        "run-001",
+        "RUN-001",
+        "echo change > change.txt && git add change.txt && git commit -q -m change",
+        git_repo_root,
+        5,
+    )
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    assert result == 0
+    assert run.status == "success"
+    db.close()
+    assert any(
+        "falls back to the shared sequential working tree" in str(call.args[0])
+        for call in warning.call_args_list
+    )
+    # The commit landed directly on the primary checkout's branch.
+    log = subprocess.run(
+        ["git", "log", "--format=%H"], cwd=git_repo_root, check=True,
+        capture_output=True, text=True,
+    ).stdout
+    assert run.result_ref.partition("..")[2] in log
+
+
+def test_run_agent_skips_worktree_when_disabled_via_env(worker_db, monkeypatch, git_repo_root):
+    monkeypatch.setattr(runner, "WORKTREE_ENABLED", False)
+    create = MagicMock()
+    monkeypatch.setattr(runner.WorktreeManager, "create", create)
+
+    result = runner.run_agent.fn(
+        "run-001",
+        "RUN-001",
+        "echo change > change.txt && git add change.txt && git commit -q -m change",
+        git_repo_root,
+        5,
+    )
+
+    assert result == 0
+    create.assert_not_called()
+
+
+def test_run_agent_cleans_up_worktree_after_a_failed_run(worker_db, git_repo_root):
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    run.max_attempts = 1
+    db.commit()
+    db.close()
+
+    result = runner.run_agent.fn("run-001", "RUN-001", "exit 1", git_repo_root, 5)
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    assert result == 1
+    assert run.status == "failed"
+    db.close()
+    assert _worktree_entries(git_repo_root).count("[") == 1
+
+
+def test_run_agent_cancellation_leaves_no_worktree_or_lock(worker_db, monkeypatch, git_repo_root):
+    monkeypatch.setattr(runner, "is_cancel_requested", MagicMock(return_value=True))
+
+    result = runner.run_agent.fn(
+        "run-001",
+        "RUN-001",
+        "sleep 30",
+        git_repo_root,
+        5,
+    )
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    assert run.status == "cancelled"
+    db.close()
+    assert _worktree_entries(git_repo_root).count("[") == 1
+    assert not (Path(git_repo_root) / ".git" / "index.lock").exists()
+
+
+def test_two_concurrent_agent_runs_commit_independently(monkeypatch, git_repo_root):
+    # Two fully independent DB engines, one per simulated worker thread: a
+    # single sqlite connection isn't safe to hammer from two threads at
+    # once, and that DB-layer detail is orthogonal to what this test is
+    # proving -- that two run_agent invocations can commit to the *same git
+    # repo* at the same time without contending on `.git/index.lock`.
+    factories = {}
+
+    def make_factory(task_id: str, run_id: str):
+        engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+        )
+        Base.metadata.create_all(engine)
+        factory = sessionmaker(bind=engine)
+        db = factory()
+        db.add(Project(id="project", name="Project", repo_root=git_repo_root))
+        db.add(Task(id=task_id, project="project", title="t", status="dispatched", executor="@test"))
+        db.add(AgentRun(id=run_id, task_id=task_id, agent_id="@test", cli="agy", command="echo"))
+        db.commit()
+        db.close()
+        return factory
+
+    factories["run-a"] = make_factory("TASK-A", "run-a")
+    factories["run-b"] = make_factory("TASK-B", "run-b")
+
+    def dynamic_session_local():
+        return factories[threading.current_thread().name]()
+
+    monkeypatch.setattr(runner, "SessionLocal", dynamic_session_local)
+    monkeypatch.setattr(runner, "redis_client", MagicMock())
+    monkeypatch.setattr(runner, "is_cancel_requested", MagicMock(return_value=False))
+    monkeypatch.setattr(runner, "clear_cancel_request", MagicMock())
+
+    results = {}
+    errors = []
+
+    def call(run_id, task_id, label):
+        try:
+            results[run_id] = runner.run_agent.fn(
+                run_id,
+                task_id,
+                f"echo {label} > {label}.txt && git add {label}.txt && git commit -q -m {label}",
+                git_repo_root,
+                10,
+            )
+        except Exception as exc:  # pragma: no cover - surfaced via assertion below
+            errors.append(exc)
+
+    t1 = threading.Thread(target=call, args=("run-a", "TASK-A", "from-a"), name="run-a")
+    t2 = threading.Thread(target=call, args=("run-b", "TASK-B", "from-b"), name="run-b")
+    t1.start()
+    t2.start()
+    t1.join(timeout=15)
+    t2.join(timeout=15)
+
+    assert not errors
+    assert results == {"run-a": 0, "run-b": 0}
+
+    db_a = factories["run-a"]()
+    db_b = factories["run-b"]()
+    run_a = db_a.get(AgentRun, "run-a")
+    run_b = db_b.get(AgentRun, "run-b")
+    assert run_a.status == "success"
+    assert run_b.status == "success"
+    head_a = run_a.result_ref.partition("..")[2]
+    head_b = run_b.result_ref.partition("..")[2]
+    assert head_a != head_b
+    db_a.close()
+    db_b.close()
+
+    log = subprocess.run(
+        ["git", "log", "--all", "--format=%H"], cwd=git_repo_root, check=True,
+        capture_output=True, text=True,
+    ).stdout
+    assert head_a in log
+    assert head_b in log
+    assert not (Path(git_repo_root) / ".git" / "index.lock").exists()
+    assert _worktree_entries(git_repo_root).count("[") == 1
 
 
 def test_concurrency_brake_queues_run_without_spawning_process(

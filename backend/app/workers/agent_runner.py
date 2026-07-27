@@ -23,7 +23,13 @@ from app.db.models import AgentOutputChunk, AgentRun, AuditLog, Task
 from app.services.agent_matcher import AgentMatcher
 from app.services.command_builder import _is_review_task, review_result_path
 from app.schemas.task import ReviewResult
-from app.services.process_manager import ProcessManager, ProcessResult, ProcessStatus
+from app.services.process_manager import (
+    ProcessManager,
+    ProcessResult,
+    ProcessStatus,
+    WorktreeManager,
+    WorktreeUnsupportedError,
+)
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.workers import redis_broker
 from app.workers.output_streamer import (
@@ -41,6 +47,21 @@ OUTPUT_CHUNK_LINES = max(1, int(os.getenv("AGENT_OUTPUT_CHUNK_LINES", "100")))
 # advance_task calls that see the same actionable status with no forward
 # movement. Read from a constant for now; CTV2-093 moves this to policy.
 AUTO_MAX_ROUNDS = max(1, int(os.getenv("AUTO_MAX_ROUNDS", "3")))
+
+# Each AgentRun executes in its own `git worktree` (CTV2-105) so concurrent
+# runs against the same repo never contend on `.git/index.lock` or see each
+# other's uncommitted state. Set to "0"/"false" to fall back to running
+# every agent directly in the shared repo root (fully sequential, as before
+# CTV2-105) -- e.g. for a repo/environment where worktrees are unavailable.
+WORKTREE_ENABLED = os.getenv("AGENT_RUN_USE_WORKTREE", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+}
+
+
+def _use_worktree() -> bool:
+    return WORKTREE_ENABLED
 
 
 class AgentExecutionError(RuntimeError):
@@ -208,6 +229,9 @@ def run_agent(
         timeout_seconds=timeout_seconds,
         cancel_check=cancel_check,
     )
+    worktree_manager: WorktreeManager | None = None
+    worktree_path: str | None = None
+    exec_cwd = repo_root
 
     try:
         run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
@@ -281,11 +305,29 @@ def run_agent(
             )
             _nudge_driver(task_id, "run_agent_completed")
             return None
-        if _has_uncommitted_changes(repo_root):
+
+        if _use_worktree():
+            worktree_manager = WorktreeManager(repo_root)
+            try:
+                worktree_path = worktree_manager.create(run.id, base_ref)
+                exec_cwd = worktree_path
+            except WorktreeUnsupportedError as exc:
+                logger.warning(
+                    "git worktree unavailable for %s (%s); run %s falls back to "
+                    "the shared sequential working tree",
+                    repo_root,
+                    exc,
+                    run_id,
+                )
+                worktree_manager = None
+                worktree_path = None
+                exec_cwd = repo_root
+
+        if _has_uncommitted_changes(exec_cwd):
             logger.warning(
                 "Repository %s was dirty before agent execution; "
                 "only the committed base..head range will be reviewed",
-                repo_root,
+                exec_cwd,
             )
         run.result_ref = f"{base_ref}.."
         db.commit()
@@ -314,7 +356,7 @@ def run_agent(
         next_chunk_index = _next_chunk_index(db, run_id)
         result: ProcessResult | None = None
 
-        for output in process_manager.run_with_streaming(command, repo_root):
+        for output in process_manager.run_with_streaming(command, exec_cwd):
             if isinstance(output, ProcessResult):
                 result = output
                 break
@@ -420,7 +462,7 @@ def run_agent(
                 )
             else:
                 result_ref, no_change_error = _build_execution_result_ref(
-                    repo_root,
+                    exec_cwd,
                     base_ref,
                     explicit_result_ref,
                 )
@@ -491,6 +533,8 @@ def run_agent(
         return None
     finally:
         process_manager.terminate()
+        if worktree_manager is not None and worktree_path is not None:
+            worktree_manager.remove(worktree_path)
         db.close()
 
 

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import queue
+import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -14,6 +18,8 @@ from pathlib import Path
 from typing import Callable, Generator, Optional
 
 import psutil
+
+logger = logging.getLogger(__name__)
 
 
 class ProcessStatus(Enum):
@@ -258,3 +264,154 @@ class ProcessManager:
     @property
     def pid(self) -> Optional[int]:
         return self.process.pid if self.process else None
+
+
+class WorktreeUnsupportedError(RuntimeError):
+    """A ``git worktree`` operation could not be completed for this repo.
+
+    Raised for any failure of ``git worktree add`` (missing git, repo not
+    initialized, worktree feature disabled by config, path collision that
+    survives a cleanup attempt, ...). Callers are expected to catch this and
+    fall back to running directly in the shared repo root.
+    """
+
+
+class WorktreeManager:
+    """Create and tear down one isolated ``git worktree`` per agent run.
+
+    Reconciliation strategy (CTV2-105): each run gets its own branch
+    (``ct-run/<run_id>``) created from the run's base ref. A worktree is a
+    separate checkout with its own index and HEAD, so concurrent runs never
+    contend on the main repo's ``.git/index.lock``, and a run's commits never
+    move another run's (or the primary checkout's) HEAD out from under it.
+    Because a worktree shares the parent repo's object database, any commit
+    made on ``ct-run/<run_id>`` is immediately reachable from ``repo_root``
+    (``git log --all``, ``git show <sha>``, ...) even after the worktree
+    directory itself is removed -- no merge is required for the commit to be
+    durable. Folding that branch into the task's target branch (merge,
+    fast-forward, or cherry-pick) is left to a later, explicit reconciliation
+    step: doing it here would mean force-moving a ref that may be checked
+    out in the primary worktree, which is exactly the unsafe concurrent
+    mutation this feature removes.
+    """
+
+    def __init__(self, repo_root: str, *, worktree_root: Optional[str] = None) -> None:
+        self.repo_root = repo_root
+        self.worktree_root = worktree_root or self._default_worktree_root(repo_root)
+
+    @staticmethod
+    def _default_worktree_root(repo_root: str) -> str:
+        # Kept outside repo_root's own working tree on purpose: a nested
+        # checkout under the repo would show up as an untracked directory in
+        # the primary worktree's `git status`, tripping the dirty-repo
+        # warning/checks for unrelated reasons.
+        digest = hashlib.sha1(os.path.abspath(repo_root).encode("utf-8")).hexdigest()[:16]
+        return os.path.join(tempfile.gettempdir(), "control-tower-worktrees", digest)
+
+    def branch_name(self, run_id: str) -> str:
+        return f"ct-run/{run_id}"
+
+    def worktree_path(self, run_id: str) -> str:
+        return os.path.join(self.worktree_root, run_id)
+
+    def create(self, run_id: str, base_ref: str) -> str:
+        """Create (or recreate) the worktree for ``run_id`` at ``base_ref``.
+
+        Raises :class:`WorktreeUnsupportedError` on any failure; the caller
+        decides whether/how to fall back.
+        """
+        path = self.worktree_path(run_id)
+        branch = self.branch_name(run_id)
+
+        # A redelivered message after a hard crash can leave a stale entry
+        # behind; clear it before trying again rather than failing forever.
+        self._force_remove(path)
+        self._delete_branch_if_exists(branch)
+
+        try:
+            os.makedirs(self.worktree_root, exist_ok=True)
+        except OSError as exc:
+            raise WorktreeUnsupportedError(
+                f"Could not create worktree root {self.worktree_root}: {exc}"
+            ) from exc
+
+        result = subprocess.run(
+            ["git", "worktree", "add", "-b", branch, path, base_ref],
+            cwd=self.repo_root,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if result.returncode != 0:
+            self._force_remove(path)
+            self._delete_branch_if_exists(branch)
+            raise WorktreeUnsupportedError(
+                (result.stderr or result.stdout or "git worktree add failed").strip()
+            )
+        return path
+
+    def remove(self, run_id_or_path: str) -> None:
+        """Remove a worktree, tolerating a path that is already gone.
+
+        Never raises: cleanup runs from ``finally`` blocks on every exit
+        path (success, failure, timeout, cancellation, crash) and must not
+        itself become a source of lost/hanging runs.
+        """
+        path = (
+            run_id_or_path
+            if os.path.isabs(run_id_or_path)
+            else self.worktree_path(run_id_or_path)
+        )
+        self._force_remove(path)
+
+    def _force_remove(self, path: str) -> None:
+        try:
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", path],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.warning("git worktree remove failed for %s", path, exc_info=True)
+        if os.path.exists(path):
+            shutil.rmtree(path, ignore_errors=True)
+
+    def _delete_branch_if_exists(self, branch: str) -> None:
+        try:
+            subprocess.run(
+                ["git", "branch", "-D", branch],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    def supported(self) -> bool:
+        """Best-effort capability probe used for diagnostics/logging only."""
+        try:
+            result = subprocess.run(
+                ["git", "worktree", "list"],
+                cwd=self.repo_root,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            return False
