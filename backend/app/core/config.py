@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     # Context replay: keep complete tool output only for the most recent turns.
     TOOL_RESULT_REPLAY_TURNS: int = 3
 
+    # Context compaction is based on the active model's context window rather
+    # than an arbitrary number of messages.
+    COMPACTION_THRESHOLD_RATIO: float = 0.75
+    COMPACTION_MODEL: str = "moonshotai/Kimi-K2-Instruct"
+    COMPACTION_MAX_OUTPUT_TOKENS: int = 1024
+
     # Coordinator execution budgets
     COORDINATOR_MAX_TOOL_ITERATIONS: int = 20
     COORDINATOR_MAX_TURN_TOKENS: int = 100_000

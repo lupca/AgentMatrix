@@ -7,6 +7,35 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_CONTEXT_WINDOWS = {
+    "claude": 200_000,
+    "gemini": 1_000_000,
+    "gpt": 128_000,
+}
+
+
+def estimate_tokens(message: dict[str, Any]) -> int:
+    """Conservative, dependency-free estimate used for context budgeting."""
+
+    content = str(message.get("content", ""))
+    return max(1, (len(content) + 3) // 4) + 4
+
+
+def count_tokens(messages: list[dict[str, Any]]) -> int:
+    """Estimate the tokens occupied by a list of chat messages."""
+
+    return sum(estimate_tokens(message) for message in messages)
+
+
+def context_window_for_model(model: str | None) -> int:
+    """Return the configured family default for a model name."""
+
+    normalized = (model or "").lower()
+    for model_key, token_limit in DEFAULT_CONTEXT_WINDOWS.items():
+        if model_key in normalized:
+            return token_limit
+    return min(DEFAULT_CONTEXT_WINDOWS.values())
+
 
 def compress_for_prompt(data: Union[List[str], List[dict], dict, str]) -> str:
     """

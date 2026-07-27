@@ -822,7 +822,11 @@ class CoordinatorService:
                 db_session, model, provider
             )
             ctx = self._context_hierarchy()
-            ctx.compact_context(db_session)
+            ctx.compact_context(
+                db_session,
+                model=resolved_model,
+                context_window=self._context_window(resolved_model),
+            )
             canonical = self.budget_messages(
                 ctx.build_messages(db_session, current_turn_id=turn_id),
                 resolved_model,
@@ -1013,7 +1017,11 @@ class CoordinatorService:
                 db_session, model, provider
             )
             ctx = self._context_hierarchy()
-            ctx.compact_context(db_session)
+            ctx.compact_context(
+                db_session,
+                model=resolved_model,
+                context_window=self._context_window(resolved_model),
+            )
             canonical = self.budget_messages(
                 ctx.build_messages(db_session, current_turn_id=turn_id),
                 resolved_model,

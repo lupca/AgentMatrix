@@ -1186,5 +1186,11 @@ class CommandRouter:
             return {'error': f'Session {session_id} not found'}
 
         ctx = ContextHierarchy(self.db)
-        compacted = ctx.compact_context(session, threshold=0)
+        compacted = ctx.compact_context(
+            session,
+            # An explicit /compact request is a deliberate override of the
+            # automatic token threshold; automatic coordinator turns still
+            # use the model-window ratio.
+            threshold=0,
+        )
         return {'action': 'compacted', 'session_id': session_id, 'compacted': compacted}

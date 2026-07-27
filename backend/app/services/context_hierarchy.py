@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.db.models import Project, Session as SessionModel, Task
 from app.core.config import settings
+from app.core.compression import count_tokens, context_window_for_model
 from app.graph.context import get_context_snapshot
 from app.services import tool_definitions as _tool_definitions
 
@@ -416,12 +417,34 @@ class ContextHierarchy:
     def compact_context(
         self,
         session: SessionModel,
-        threshold: int = 50,
+        threshold: int | None = None,
         summary: str | None = None,
+        *,
+        model: str | None = None,
+        context_window: int | None = None,
+        threshold_ratio: float | None = None,
+        summarizer: Any | None = None,
     ) -> bool:
-        """Compact session messages when message count exceeds threshold."""
+        """Summarize old history when it reaches the active model's budget.
+
+        ``threshold`` is retained as an explicit token threshold for callers
+        that need to force a deterministic boundary (``0`` forces it). The
+        normal path uses a ratio of the active model's context window. A
+        failed summarizer deliberately leaves the session exactly as it was.
+        """
         raw_msgs = list(session.messages or [])
-        if len(raw_msgs) <= threshold:
+        if any(message.get("id") == f"msg-compact-{session.id}" for message in raw_msgs):
+            # A compaction summary is part of the stable prefix. Do not
+            # regenerate it on every turn and invalidate the provider cache.
+            return False
+
+        if threshold is None:
+            window = context_window or context_window_for_model(model)
+            ratio = threshold_ratio if threshold_ratio is not None else settings.COMPACTION_THRESHOLD_RATIO
+            threshold_tokens = max(1, int(window * ratio))
+        else:
+            threshold_tokens = max(0, threshold)
+        if threshold_tokens > 0 and count_tokens(raw_msgs) <= threshold_tokens:
             return False
 
         # Do not cut through an assistant tool call/result pair.  A plain
@@ -455,10 +478,38 @@ class ContextHierarchy:
         # avoid splitting a tool call/result pair, so the count below must
         # reflect the boundary actually used, not the pre-expansion guess.
         if summary is None:
-            summary = (
-                f"[Context Compaction: Summarized {start} previous messages "
-                "in conversation history]"
+            old_messages = raw_msgs[:start]
+            if not old_messages:
+                return False
+            if summarizer is None:
+                from app.services.llm_client import LLMClient
+
+                summarizer = LLMClient().complete
+            prompt = (
+                "Summarize this conversation for future turns. Preserve exactly "
+                "all confirmed decisions, task IDs, result_ref values, verdicts, "
+                "acceptance criteria, constraints, and unresolved questions. "
+                "Do not invent facts. Return only the useful summary, not a "
+                "placeholder or commentary about summarization.\n\n"
+                + json.dumps(old_messages, ensure_ascii=False, default=str)
             )
+            try:
+                summary = summarizer(
+                    [{"role": "user", "content": prompt}],
+                    model=getattr(settings, "COMPACTION_MODEL", None) or model,
+                    max_tokens=settings.COMPACTION_MAX_OUTPUT_TOKENS,
+                    temperature=0,
+                    operation="context_compaction",
+                    session_id=session.id,
+                    task_id=session.task_id,
+                    db_session=self.db,
+                )
+            except Exception:
+                logger.warning("Context compaction summarization failed for session %s", session.id, exc_info=True)
+                return False
+            if not isinstance(summary, str) or not summary.strip() or summary.lstrip().startswith("[Context Compaction:"):
+                logger.warning("Context compaction returned no usable summary for session %s", session.id)
+                return False
 
         kept = [dict(message) for message in raw_msgs[start:]]
         kept = drop_orphan_tool_pairs(kept)

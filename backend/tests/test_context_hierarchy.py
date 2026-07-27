@@ -395,11 +395,13 @@ def test_context_compaction(db_session):
     hierarchy = ContextHierarchy(db_session)
     assert len(session.messages) == 60
 
-    compacted = hierarchy.compact_context(session, threshold=50)
+    compacted = hierarchy.compact_context(
+        session, threshold=50, summary="Confirmed decision: retain CTV2-096 result_ref abc123."
+    )
     assert compacted is True
     assert len(session.messages) == 11  # 1 summary msg + 10 kept
     assert session.messages[0]["role"] == "system"
-    assert "Context Compaction" in session.messages[0]["content"]
+    assert "CTV2-096" in session.messages[0]["content"]
 
 
 def test_context_compaction_keeps_tool_call_pairs_through_adapter(db_session):
@@ -434,7 +436,9 @@ def test_context_compaction_keeps_tool_call_pairs_through_adapter(db_session):
     db_session.commit()
 
     hierarchy = ContextHierarchy(db_session)
-    assert hierarchy.compact_context(session, threshold=0) is True
+    assert hierarchy.compact_context(
+        session, threshold=0, summary="CTV2-095 verdict pass; CTV2-104 verdict pass."
+    ) is True
 
     rendered = OpenAIAdapter.render_messages(session.messages)
     assistant_ids = {
@@ -451,10 +455,59 @@ def test_context_compaction_keeps_tool_call_pairs_through_adapter(db_session):
     assert assistant_ids == tool_ids == {first_call, second_call}
     assert "CTV2-095" in next(m["content"] for m in rendered if m.get("tool_call_id") == first_call)
 
-    # Pair-preserving expansion pushed the real cutoff to index 1 (only the
-    # leading "requests" message was dropped) — the summary must say so, not
-    # the pre-expansion "10 kept" guess (2 messages).
-    assert "Summarized 1 previous messages" in session.messages[0]["content"]
+    # Pair-preserving expansion retained both tool results and the injected
+    # summary preserves their decisions.
+    assert "CTV2-104" in session.messages[0]["content"]
+
+
+def test_context_compaction_uses_token_window_and_llm_summary(db_session):
+    session = SessionModel(
+        id="sess-token-compact",
+        messages=[
+            {"role": "user", "content": f"old-{i} task CTV2-096 " + ("detail " * 20), "status": "complete"}
+            for i in range(20)
+        ],
+    )
+    db_session.add(session)
+    db_session.commit()
+    original = list(session.messages)
+    prompts = []
+
+    def summarize(messages, **kwargs):
+        prompts.append(messages[0]["content"])
+        return "Decision retained: task CTV2-096 verdict pass, result_ref ref-096."
+
+    hierarchy = ContextHierarchy(db_session)
+    assert hierarchy.compact_context(
+        session, context_window=100, threshold_ratio=0.5, summarizer=summarize
+    ) is True
+    assert len(prompts) == 1
+    assert "CTV2-096" in prompts[0]
+    assert "result_ref" in session.messages[0]["content"]
+    assert session.messages[0]["content"] != "[Context Compaction]"
+    assert session.messages[1:] == original[-10:]
+
+
+def test_context_compaction_failure_keeps_history_unchanged(db_session):
+    session = SessionModel(
+        id="sess-failed-compact",
+        messages=[
+            {"role": "user", "content": f"message-{i}", "status": "complete"}
+            for i in range(20)
+        ],
+    )
+    db_session.add(session)
+    db_session.commit()
+    original = list(session.messages)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("summarizer unavailable")
+
+    hierarchy = ContextHierarchy(db_session)
+    assert hierarchy.compact_context(
+        session, context_window=100, threshold_ratio=0.5, summarizer=fail
+    ) is False
+    assert session.messages == original
 
 
 def test_get_tool_definitions_returns_only_baseline_eager_tools(db_session):
@@ -560,7 +613,7 @@ def test_task_context_without_graph_is_unaffected(db_session):
 
 
 @pytest.mark.asyncio
-async def test_compact_command_via_router(db_session):
+async def test_compact_command_via_router(db_session, monkeypatch):
     session = SessionModel(
         id="sess-cmd-compact",
         messages=[
@@ -575,10 +628,14 @@ async def test_compact_command_via_router(db_session):
     cmd, args = router.parse("/compact")
     assert cmd == "compact_context"
 
+    monkeypatch.setattr(
+        "app.services.llm_client.LLMClient.complete",
+        lambda self, *args, **kwargs: "Summary preserves task CTV2-096 verdict pass.",
+    )
     result = await router.execute(cmd, args, session.id)
     assert result["action"] == "compacted"
     assert result["compacted"] is True
 
     db_session.refresh(session)
     assert len(session.messages) == 11
-    assert "Context Compaction" in session.messages[0]["content"]
+    assert "CTV2-096" in session.messages[0]["content"]
