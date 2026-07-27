@@ -56,6 +56,7 @@ class Task(Base):
     executor = Column(String(50), nullable=True)
     reviewer = Column(String(50), nullable=True)
     acceptance_criteria = Column(JSON, default=list)
+    legacy_no_ac = Column(Boolean, nullable=False, default=False)
     files = Column(JSON, default=list)
     tests = Column(JSON, default=list)
     flows = Column(JSON, default=list)

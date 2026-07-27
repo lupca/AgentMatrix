@@ -29,6 +29,7 @@ def dispatch_context():
             title="Test task",
             status="todo",
             mode="bypass",
+            acceptance_criteria=["Tests pass"],
         )
     )
     db.add(

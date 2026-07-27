@@ -51,6 +51,21 @@ def test_create_dispatch_stream_and_complete_flow(client, db_session):
     task = db_session.get(Task, task_id)
     assert task is not None and task.status == 'todo'
 
+    # The spec/plan gate must run (writing non-empty AC) before a task can be
+    # dispatched (CTV2-091); this exercises the write path directly rather
+    # than mocking the LLM, since spec/plan generation isn't what this
+    # end-to-end test is covering.
+    TaskOrchestrationService(db_session).write_spec_plan(
+        task_id=task_id,
+        actor='@operator',
+        acceptance_criteria=['Full flow completes end to end'],
+        plan='Implement the feature end to end.',
+        files=[],
+        tests=[],
+        risk='low',
+        flows=[],
+    )
+
     # Keep the broker boundary real while simulating the durable worker result;
     # this keeps the integration test independent of Redis and Dramatiq.
     pending_dispatch = client.post(

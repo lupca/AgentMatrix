@@ -91,7 +91,7 @@ class TaskOrchestrationService:
     """The only application service allowed to mutate task lifecycle fields."""
 
     MODES = {"supervised", "plan-only", "bypass"}
-    GATED_ACTIONS = {"dispatch", "review_order", "verdict"}
+    GATED_ACTIONS = {"spec_plan", "dispatch", "review_order", "verdict"}
     PATCHABLE_FIELDS = {"plan", "acceptance_criteria", "priority", "tags"}
     # A run in any of these statuses is unconditionally no longer "in flight".
     # "failed" is deliberately excluded here: the worker retries a failed run
@@ -143,6 +143,11 @@ class TaskOrchestrationService:
                 "execute dispatch requires expected_status='todo'"
             )
         task = self._task(task_id)
+        if not (task.acceptance_criteria or []) and not task.legacy_no_ac:
+            raise PrerequisiteError(
+                "dispatch requires acceptance_criteria; run the spec/plan gate "
+                "first (or set legacy_no_ac for pre-existing tasks)"
+            )
         agent = self.db.get(Agent, agent_id)
         if agent is None:
             raise PrerequisiteError(f"Agent {agent_id} not found")
@@ -623,6 +628,57 @@ class TaskOrchestrationService:
         self.db.refresh(task)
         return task
 
+    def write_spec_plan(
+        self,
+        *,
+        task_id: str,
+        actor: str,
+        acceptance_criteria: list[str],
+        plan: str,
+        files: list[str],
+        tests: list[str],
+        risk: str,
+        flows: list[str],
+    ) -> Task:
+        """Persist the spec/plan gate's LLM output onto a task ('todo' only).
+
+        This is the sole write path for a task's AC/plan/files/tests/risk on
+        the way into dispatch: `request_dispatch` refuses tasks with empty
+        `acceptance_criteria`, so this call (or an explicit `legacy_no_ac`
+        backfill) is what actually opens the dispatch gate for a new task.
+        """
+        task = self._task(task_id)
+        if not actor or not actor.strip():
+            raise PrerequisiteError("actor is required")
+        self._assert_status(task, "todo")
+        if not acceptance_criteria:
+            raise PrerequisiteError("acceptance_criteria must not be empty")
+
+        task.acceptance_criteria = acceptance_criteria
+        task.plan = plan
+        task.files = files
+        task.tests = tests
+        task.risk = risk
+        task.flows = flows
+        task.current_gate = "plan"
+        task.updated_at = datetime.now(timezone.utc)
+        self.db.add(
+            AuditLog(
+                task_id=task.id,
+                action="spec_plan_generated",
+                actor=actor,
+                details={
+                    "ac_count": len(acceptance_criteria),
+                    "files": files,
+                    "flows": flows,
+                    "risk": risk,
+                },
+            )
+        )
+        self.db.commit()
+        self.db.refresh(task)
+        return task
+
     def _request_gate(
         self,
         *,
@@ -982,7 +1038,7 @@ class TaskOrchestrationService:
         if not task.result_ref or not task.result_ref.strip():
             raise PrerequisiteError("result_ref is required for verdict")
         evaluations = self._evaluation_results(ac_results)
-        required_count = max(1, len(task.acceptance_criteria or []))
+        required_count = len(task.acceptance_criteria or [])
         if len(evaluations) < required_count:
             raise PrerequisiteError(
                 "Acceptance-criteria evaluation results are incomplete"

@@ -5,8 +5,10 @@ from app.db.models import Agent, AgentRun, AuditLog, GateRecord, LLMUsage, Proje
 from app.services.task_orchestration import (
     BrakeViolationError,
     IdempotencyConflictError,
+    PrerequisiteError,
     StaleIdempotencyRecordError,
     TaskOrchestrationService,
+    TransitionConflictError,
 )
 
 
@@ -397,3 +399,137 @@ def test_decide_gate_replay_after_run_goes_terminal_still_returns_cached_decisio
     assert replay.agent_run.id == run.id
 
 
+
+
+def test_dispatch_rejects_task_with_no_acceptance_criteria(orchestration, db_session):
+    """CTV2-091 AC: a task with no AC (the spec/plan gate never ran) must
+    never reach dispatch — this is the fake-done hole the gate closes."""
+    task = Task(
+        id="SPEC-NO-AC",
+        project="project",
+        title="No AC yet",
+        mode="bypass",
+        acceptance_criteria=[],
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    with pytest.raises(PrerequisiteError, match="acceptance_criteria"):
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="dispatch-no-ac",
+        )
+
+
+def test_dispatch_allows_legacy_no_ac_task_without_acceptance_criteria(
+    orchestration, db_session
+):
+    """CTV2-091 migration path: pre-existing backlog tasks flagged
+    `legacy_no_ac` must not get stuck behind the new AC gate."""
+    task = Task(
+        id="SPEC-LEGACY",
+        project="project",
+        title="Pre-existing task",
+        mode="bypass",
+        acceptance_criteria=[],
+        legacy_no_ac=True,
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-legacy",
+    )
+    assert result.task.status == "dispatched"
+
+
+def test_write_spec_plan_populates_task_and_opens_dispatch_gate(
+    orchestration, db_session
+):
+    task = Task(
+        id="SPEC-001",
+        project="project",
+        title="Needs a spec",
+        mode="bypass",
+        acceptance_criteria=[],
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    updated = orchestration.write_spec_plan(
+        task_id=task.id,
+        actor="@coordinator",
+        acceptance_criteria=["Endpoint returns 200", "Unit tests pass"],
+        plan="1. Add route. 2. Add tests.",
+        files=["backend/app/api/foo.py", "unconfirmed/made_up.py *(chưa xác nhận)*"],
+        tests=["backend/tests/test_foo.py"],
+        risk="low",
+        flows=["checkout"],
+    )
+
+    assert updated.acceptance_criteria == ["Endpoint returns 200", "Unit tests pass"]
+    assert updated.plan == "1. Add route. 2. Add tests."
+    assert updated.current_gate == "plan"
+    assert updated.flows == ["checkout"]
+    audit = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.task_id == task.id, AuditLog.action == "spec_plan_generated")
+        .one()
+    )
+    assert audit.details["ac_count"] == 2
+
+    # The AC gate is now open: dispatch no longer needs legacy_no_ac.
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-after-spec-plan",
+    )
+    assert result.task.status == "dispatched"
+
+
+def test_write_spec_plan_rejects_empty_acceptance_criteria(orchestration, db_session):
+    task = Task(
+        id="SPEC-002",
+        project="project",
+        title="Needs a spec",
+        mode="bypass",
+        acceptance_criteria=[],
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    with pytest.raises(PrerequisiteError, match="acceptance_criteria"):
+        orchestration.write_spec_plan(
+            task_id=task.id,
+            actor="@coordinator",
+            acceptance_criteria=[],
+            plan="plan",
+            files=[],
+            tests=[],
+            risk="low",
+            flows=[],
+        )
+
+
+def test_write_spec_plan_requires_todo_status(orchestration, db_session):
+    task = _task(db_session, "SPEC-003")
+    task.status = "dispatched"
+    db_session.commit()
+
+    with pytest.raises(TransitionConflictError):
+        orchestration.write_spec_plan(
+            task_id=task.id,
+            actor="@coordinator",
+            acceptance_criteria=["AC"],
+            plan="plan",
+            files=[],
+            tests=[],
+            risk="low",
+            flows=[],
+        )

@@ -375,3 +375,29 @@ def test_verdict_actor_cannot_impersonate_reviewer_without_a_review_run(
             actor="@reviewer",
             idempotency_key="verdict-spoofed-actor",
         )
+
+
+def test_verdict_pass_with_three_ac_and_two_results_is_rejected(service, db_session):
+    """CTV2-091 Verification: 3 AC but only 2 ac_results must be rejected —
+    the old `max(1, len(acceptance_criteria))` let an empty-AC task pass
+    verdict with a single fabricated result; this is the exact fake-done
+    shape the gate must close."""
+    task = _add_task(
+        db_session,
+        "VER-091-INCOMPLETE",
+        status="in-review",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="abc123",
+        acceptance_criteria=["AC 1", "AC 2", "AC 3"],
+    )
+    _add_terminal_review_run(db_session, task)
+
+    with pytest.raises(PrerequisiteError, match="incomplete"):
+        service.request_verdict(
+            task_id=task.id,
+            verdict="pass",
+            ac_results=[{"passed": True}, {"passed": True}],
+            actor="@reviewer",
+            idempotency_key="verdict-3ac-2results",
+        )

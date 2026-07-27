@@ -259,6 +259,11 @@ class CommandRouter:
                 return {'error': 'task_id is required'}
             reviewer = str(args.get('reviewer', '') or '').strip()
             command_args = ' '.join(part for part in (task_id, reviewer) if part)
+        elif canonical_name == 'generate_spec_plan':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            command_args = task_id
         elif canonical_name == 'approve_gate':
             gate_id = args.get('gate_record_id', args.get('task_id'))
             if gate_id is None:
@@ -677,6 +682,54 @@ class CommandRouter:
             'task_id': task_id,
             'run_id': run.id,
             'reviewer': reviewer,
+        }
+
+    async def _handle_generate_spec_plan(self, args: str, session_id: str) -> dict:
+        from app.services.spec_plan_generator import (
+            SpecPlanGenerationError,
+            generate_spec_plan,
+        )
+
+        task_id = args.strip()
+        if not task_id:
+            return {'error': 'Usage: /spec-plan <task_id>'}
+
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return {'error': f'Task {task_id} not found'}
+
+        repo_root, _error = self._research_repo_root(session_id)
+
+        try:
+            result, flows = await generate_spec_plan(task, repo_root)
+        except SpecPlanGenerationError as exc:
+            return {'error': str(exc)}
+
+        service = TaskOrchestrationService(self.db)
+        try:
+            updated = service.write_spec_plan(
+                task_id=task_id,
+                actor=f"chat:{session_id or 'anonymous'}",
+                acceptance_criteria=result.acceptance_criteria,
+                plan=result.plan,
+                files=result.files,
+                tests=result.tests,
+                risk=result.risk,
+                flows=flows,
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        return {
+            'action': 'spec_plan_generated',
+            'task_id': task_id,
+            'acceptance_criteria': updated.acceptance_criteria,
+            'plan': updated.plan,
+            'files': updated.files,
+            'tests': updated.tests,
+            'risk': updated.risk,
+            'flows': updated.flows,
+            'repo_root': repo_root,
         }
 
     async def _handle_cancel_task(self, args: str, session_id: str) -> dict:

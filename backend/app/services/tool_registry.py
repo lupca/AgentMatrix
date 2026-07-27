@@ -226,6 +226,27 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="task_lifecycle",
         ),
         ToolSpec(
+            name="generate_spec_plan",
+            description=(
+                "Run the spec/plan gate for a 'todo' task: one LLM call, "
+                "grounded by research-tool graph queries, produces "
+                "acceptance_criteria/plan/files/tests/risk and writes them "
+                "onto the task. A task cannot be dispatched until this has "
+                "run (or the task is exempted via legacy_no_ac)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+            },
+            handler="generate_spec_plan",
+            tier="deferred",
+            permission="write",
+            entity="tasks",
+            slash_alias="/spec-plan",
+            group="task_lifecycle",
+        ),
+        ToolSpec(
             name="compact_context",
             description="Summarize older session messages to reduce context size.",
             parameters={"type": "object", "properties": {}},

@@ -4,6 +4,20 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 
 REVIEW_RESULT_SCHEMA_VERSION = "1.0"
+SPEC_PLAN_RESULT_SCHEMA_VERSION = "1.0"
+
+
+class SpecPlanResult(BaseModel):
+    """Versioned, machine-readable output produced by the spec/plan gate LLM call."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[SPEC_PLAN_RESULT_SCHEMA_VERSION]
+    acceptance_criteria: list[StrictStr] = Field(min_length=1)
+    plan: StrictStr
+    files: list[StrictStr] = Field(default_factory=list)
+    tests: list[StrictStr] = Field(default_factory=list)
+    risk: Literal["low", "medium", "high"]
 
 
 class ReviewACResult(BaseModel):

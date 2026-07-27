@@ -256,6 +256,7 @@ async def test_command_router_persists_run_before_enqueueing(db_session):
             status="todo",
             current_gate="spec",
             mode="bypass",
+            acceptance_criteria=["Tests pass"],
         )
     )
     db_session.commit()
@@ -301,6 +302,7 @@ async def test_dispatch_retry_after_queue_failure_creates_new_run(db_session):
             status="todo",
             current_gate="spec",
             mode="bypass",
+            acceptance_criteria=["Tests pass"],
         )
     )
     db_session.commit()
@@ -438,6 +440,7 @@ def test_concurrent_dispatch_with_same_idempotency_key_creates_one_run(tmp_path)
             title="Race task",
             status="todo",
             mode="bypass",
+            acceptance_criteria=["Tests pass"],
         )
     )
     setup.commit()
@@ -975,3 +978,57 @@ async def test_get_minimal_context_graph_unavailable_returns_structured_error(db
     assert result["status"] == "error"
     assert result["reason"] == "graph_unavailable"
     assert "MCP timed out" in result["detail"]
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
+    """CTV2-091: /spec-plan runs the (mocked) LLM+graph generator and writes
+    the result onto the task via TaskOrchestrationService, which is the only
+    thing that lets a subsequent dispatch through."""
+    from app.db.models import Project, Task
+    from app.schemas.task import SpecPlanResult
+
+    db_session.add(Project(id="proj-spec", name="Spec Project", repo_root="/tmp"))
+    db_session.add(
+        Task(
+            id="TASK-SPEC",
+            project="proj-spec",
+            title="Needs a spec",
+            status="todo",
+            acceptance_criteria=[],
+        )
+    )
+    db_session.commit()
+
+    fake_result = SpecPlanResult(
+        schema_version="1.0",
+        acceptance_criteria=["Does the thing"],
+        plan="Do the thing.",
+        files=["backend/app/thing.py"],
+        tests=["backend/tests/test_thing.py"],
+        risk="low",
+    )
+
+    with patch(
+        "app.services.spec_plan_generator.generate_spec_plan",
+        new=AsyncMock(return_value=(fake_result, ["thing-flow"])),
+    ):
+        result = await CommandRouter(db_session).execute(
+            "generate_spec_plan", "TASK-SPEC", "session-1"
+        )
+
+    assert result["action"] == "spec_plan_generated"
+    assert result["acceptance_criteria"] == ["Does the thing"]
+    assert result["flows"] == ["thing-flow"]
+
+    task = db_session.get(Task, "TASK-SPEC")
+    assert task.acceptance_criteria == ["Does the thing"]
+    assert task.current_gate == "plan"
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_missing_task_returns_error(db_session):
+    result = await CommandRouter(db_session).execute(
+        "generate_spec_plan", "NOPE", "session-1"
+    )
+    assert "error" in result
