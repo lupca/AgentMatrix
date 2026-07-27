@@ -117,6 +117,61 @@ class TaskOrchestrationService:
     # ``attempt >= max_attempts`` — see `_reject_if_stale_dispatch_record`.
     _DEAD_RUN_STATUSES = {"success", "timeout", "cancelled"}
 
+    @dataclass(frozen=True)
+    class AutonomyPolicy:
+        autonomy: str = "supervised"
+        auto_max_risk: str = "normal"
+        auto_max_rounds: int = 3
+
+    # Unknown risk labels, including legacy labels such as ``medium``, are
+    # deliberately ineligible for automatic execution (fail safe).
+    _RISK_LEVELS = {"low": 0, "normal": 1, "high": 2}
+    _AUTONOMY_VALUES = {"plan-only", "supervised", "auto"}
+
+    def resolve_autonomy(self, project: Project | str | None) -> AutonomyPolicy:
+        """Resolve project policy over global settings, failing safe per key."""
+        project_row = project if isinstance(project, Project) else self.db.get(Project, project)
+        override = project_row.autonomy_policy if project_row is not None else None
+        override = override if isinstance(override, dict) else {}
+
+        def value(key: str, default: Any) -> Any:
+            if key in override:
+                return override[key]
+            row = self.db.get(Setting, key)
+            return default if row is None else row.value
+
+        autonomy = value("autonomy", "supervised")
+        if not isinstance(autonomy, str) or autonomy.strip().lower() not in self._AUTONOMY_VALUES:
+            autonomy = "supervised"
+        else:
+            autonomy = autonomy.strip().lower()
+
+        max_risk = value("auto_max_risk", "normal")
+        if not isinstance(max_risk, str) or max_risk.strip().lower() not in {"low", "normal"}:
+            max_risk = "normal"
+        else:
+            max_risk = max_risk.strip().lower()
+
+        try:
+            max_rounds = int(value("auto_max_rounds", 3))
+        except (TypeError, ValueError):
+            max_rounds = 3
+        max_rounds = max(1, max_rounds)
+        return self.AutonomyPolicy(autonomy, max_risk, max_rounds)
+
+    def mode_for_task(self, task: Task, *, risk: str | None = None) -> str:
+        policy = self.resolve_autonomy(task.project)
+        if policy.autonomy == "plan-only":
+            return "plan-only"
+        if policy.autonomy != "auto":
+            return "supervised"
+        normalized_risk = (risk if risk is not None else task.risk or "").strip().lower()
+        if normalized_risk not in self._RISK_LEVELS:
+            return "supervised"
+        if self._RISK_LEVELS[normalized_risk] > self._RISK_LEVELS[policy.auto_max_risk]:
+            return "supervised"
+        return "bypass"
+
     def __init__(self, db: Session):
         self.db = db
 
@@ -680,6 +735,11 @@ class TaskOrchestrationService:
         task.files = files
         task.tests = tests
         task.risk = risk
+        # Existing explicitly governed tasks (notably legacy bypass tasks)
+        # retain their mode; newly created tasks start supervised and are
+        # resolved from the autonomy policy when their risk is known.
+        if task.mode == "supervised":
+            task.mode = self.mode_for_task(task, risk=risk)
         task.flows = flows
         task.current_gate = "plan"
         task.updated_at = datetime.now(timezone.utc)

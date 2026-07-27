@@ -43,6 +43,7 @@ _PROJECT_FIELDS = {
     "status",
     "repo_root",
     "task_prefix",
+    "autonomy_policy",
 }
 
 
@@ -305,6 +306,9 @@ SETTINGS_WHITELIST: dict[str, str] = {
     "max_cost_usd_per_task": "Maximum accumulated LLM cost allowed for one task.",
     "max_concurrent_runs": "Maximum number of queued or running agent runs.",
     "run_timeout_seconds": "Maximum wall-clock time for one agent run.",
+    "autonomy": "Task autonomy policy: plan-only, supervised, or auto.",
+    "auto_max_risk": "Highest task risk eligible for automatic execution: low or normal.",
+    "auto_max_rounds": "Maximum changes-requested replan rounds before escalation.",
 }
 
 

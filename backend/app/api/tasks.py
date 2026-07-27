@@ -104,6 +104,7 @@ def create_task(task_in: TaskCreate, db: Session = Depends(get_db)):
         task_data["session_id"] = str(uuid.uuid4())
 
     db_task = TaskModel(**task_data)
+    db_task.mode = TaskOrchestrationService(db).mode_for_task(db_task)
     db.add(db_task)
 
     # Ensure Session entry exists

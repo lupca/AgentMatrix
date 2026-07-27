@@ -356,6 +356,7 @@ class Project(Base):
     task_prefix = Column(String(20), nullable=True)
     graph_status = Column(String(20), nullable=True, default="idle")
     next_task_seq = Column(Integer, nullable=False, server_default="0", default=0)
+    autonomy_policy = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

@@ -532,6 +532,7 @@ class CommandRouter:
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )
+        task.mode = TaskOrchestrationService(self.db).mode_for_task(task)
         self.db.add(task)
         self.db.commit()
 

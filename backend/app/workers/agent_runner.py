@@ -43,9 +43,9 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_CHUNK_LINES = max(1, int(os.getenv("AGENT_OUTPUT_CHUNK_LINES", "100")))
 
-# Cap on changes-requested -> todo replan rounds, and on consecutive
-# advance_task calls that see the same actionable status with no forward
-# movement. Read from a constant for now; CTV2-093 moves this to policy.
+# Consecutive no-progress calls retain a process-level safety cap. The actual
+# changes-requested replan cap is resolved per project by the orchestration
+# policy below.
 AUTO_MAX_ROUNDS = max(1, int(os.getenv("AUTO_MAX_ROUNDS", "3")))
 
 # Each AgentRun executes in its own `git worktree` (CTV2-105) so concurrent
@@ -802,11 +802,12 @@ def _advance_changes_requested(
     task: Task,
 ) -> str:
     round_ = service.changes_round_count(task.id)
-    if round_ >= AUTO_MAX_ROUNDS:
+    max_rounds = service.resolve_autonomy(task.project).auto_max_rounds
+    if round_ >= max_rounds:
         _escalate(
             db,
             task,
-            f"changes-requested round limit reached ({round_}/{AUTO_MAX_ROUNDS}); "
+            f"changes-requested round limit reached ({round_}/{max_rounds}); "
             "escalating for a human replan",
         )
         return "escalated_round_limit"
