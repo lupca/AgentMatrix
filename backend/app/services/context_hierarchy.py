@@ -426,6 +426,7 @@ class ContextHierarchy:
         context_window: int | None = None,
         threshold_ratio: float | None = None,
         summarizer: Any | None = None,
+        agent: Any | None = None,
     ) -> bool:
         """Summarize old history when it reaches the active model's budget.
 
@@ -484,9 +485,13 @@ class ContextHierarchy:
             if not old_messages:
                 return False
             if summarizer is None:
-                from app.services.llm_client import LLMClient
+                from app.services.llm_service import LLMService
 
-                summarizer = LLMClient().complete
+                service = LLMService()
+
+                def summarizer(messages: list[dict[str, Any]], **kwargs: Any) -> str:
+                    response = service.complete_sync(agent, messages, **kwargs)
+                    return response.text
             prompt = (
                 "Summarize this conversation for future turns. Preserve exactly "
                 "all confirmed decisions, task IDs, result_ref values, verdicts, "
@@ -509,6 +514,8 @@ class ContextHierarchy:
             except Exception:
                 logger.warning("Context compaction summarization failed for session %s", session.id, exc_info=True)
                 return False
+            if hasattr(summary, "text"):
+                summary = summary.text
             if not isinstance(summary, str) or not summary.strip() or summary.lstrip().startswith("[Context Compaction:"):
                 logger.warning("Context compaction returned no usable summary for session %s", session.id)
                 return False

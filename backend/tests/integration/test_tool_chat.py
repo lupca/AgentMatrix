@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import json
 
 from app.db.models import Project, Session, Task
-from app.services.coordinator import DEFAULT_PROVIDER_ROUTER
+from app.services.coordinator import CoordinatorService
 from app.services.providers import ProviderResponse
 
 
@@ -54,7 +54,10 @@ def test_chat_executes_get_status_and_streams_tool_progress(
     db_session.commit()
 
     provider = _StreamingToolProvider()
-    monkeypatch.setitem(DEFAULT_PROVIDER_ROUTER.providers, "openai", provider)
+    monkeypatch.setattr(
+        "app.api.chat.CoordinatorService",
+        lambda db: CoordinatorService(db, providers={"openai": provider}),
+    )
 
     response = client.post(
         "/api/chat",

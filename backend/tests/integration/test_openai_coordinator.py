@@ -3,8 +3,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.db.models import LLMUsage, Session
-from app.services.coordinator import CoordinatorService, ProviderRouter
-from app.services.providers.openai_adapter import OpenAIAdapter
+from app.services.coordinator import CoordinatorService
+from app.services.providers.api_provider import APIProvider
 
 
 class _Completions:
@@ -25,8 +25,11 @@ class _Completions:
 @pytest.mark.asyncio
 async def test_coordinator_completes_with_mock_openai_api(db_session):
     client = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
-    router = ProviderRouter({"openai": OpenAIAdapter(client=client)})
-    service = CoordinatorService(db_session, router=router, retry_base_seconds=0)
+    service = CoordinatorService(
+        db_session,
+        providers={"openai": APIProvider(client=client)},
+        retry_base_seconds=0,
+    )
     session = Session(id="openai-integration-session", messages=[])
     db_session.add(session)
     db_session.commit()

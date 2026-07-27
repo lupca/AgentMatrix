@@ -1,122 +1,47 @@
+from dataclasses import dataclass
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
-
-from app.db.models import LLMUsage
-from app.services.llm_client import LLMClient, calculate_cost, extract_usage
-
-
-class _FakeResponse:
-    def __init__(self, payload):
-        self._payload = payload
-
-    def raise_for_status(self):
-        return None
-
-    def json(self):
-        return self._payload
+from app.services.llm_client import UsageCounts, calculate_cost, extract_usage
+from app.services.llm_service import ConfigurationError, LLMService
+from app.services.providers import ProviderResponse
 
 
-class _FakeClient:
-    def __init__(self, payload):
-        self.payload = payload
+@dataclass
+class _FakeAPIProvider:
+    name: str = "openai"
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        return None
-
-    def post(self, *_args, **_kwargs):
-        return _FakeResponse(self.payload)
-
-
-class _FakeStreamResponse:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_args):
-        return None
-
-    def raise_for_status(self):
-        return None
-
-    async def aiter_lines(self):
-        yield 'data: {"choices":[{"delta":{"content":"streamed"}}]}'
-        yield (
-            'data: {"choices":[],"usage":{"prompt_tokens":120,'
-            '"completion_tokens":30,"prompt_tokens_details":{"cached_tokens":20}}}'
+    async def complete(self, messages, model, stream=False, **kwargs):
+        del messages, kwargs
+        return ProviderResponse(
+            provider=self.name,
+            model=model,
+            text="unified response",
+            usage=UsageCounts(input_tokens=100, output_tokens=20),
         )
-        yield "data: [DONE]"
-
-
-class _FakeAsyncClient:
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_args):
-        return None
-
-    def stream(self, *_args, **_kwargs):
-        return _FakeStreamResponse()
-
-
-def test_siliconflow_completion_persists_usage(db_session, monkeypatch):
-    payload = {
-        "choices": [{"message": {"content": "Telemetry works"}}],
-        "usage": {
-            "prompt_tokens": 1_000,
-            "completion_tokens": 250,
-            "prompt_tokens_details": {"cached_tokens": 100},
-        },
-    }
-    client = LLMClient(provider="siliconflow", db_session=db_session)
-    monkeypatch.setattr(
-        client,
-        "_get_siliconflow_client",
-        lambda: _FakeClient(payload),
-    )
-
-    result = client.complete(
-        [{"role": "user", "content": "hello"}],
-        operation="plan",
-    )
-
-    assert result == "Telemetry works"
-    record = db_session.query(LLMUsage).one()
-    assert record.provider == "siliconflow"
-    assert record.model == "moonshotai/Kimi-K3"
-    assert record.operation == "plan"
-    assert record.input_tokens == 1_000
-    assert record.output_tokens == 250
-    assert record.cached_tokens == 100
-    assert record.cost_usd == Decimal("0.00122500")
-    assert record.latency_ms >= 0
 
 
 @pytest.mark.asyncio
-async def test_siliconflow_stream_persists_final_usage(db_session, monkeypatch):
-    client = LLMClient(provider="siliconflow", db_session=db_session)
-    monkeypatch.setattr(
-        client,
-        "_get_async_siliconflow_client",
-        lambda: _FakeAsyncClient(),
+async def test_llm_service_routes_api_agent_without_environment_fallback():
+    agent = SimpleNamespace(
+        id="api-agent",
+        agent_type="api",
+        provider="openai",
+        model="gpt-4o",
     )
+    service = LLMService(api_providers={"openai": _FakeAPIProvider()})
 
-    chunks = [
-        chunk
-        async for chunk in client.stream_async(
-            [{"role": "user", "content": "hello"}],
-            operation="chat",
-        )
-    ]
+    response = await service.complete(agent, [{"role": "user", "content": "hello"}])
 
-    assert chunks == ["streamed"]
-    record = db_session.query(LLMUsage).one()
-    assert record.operation == "chat"
-    assert record.input_tokens == 120
-    assert record.output_tokens == 30
-    assert record.cached_tokens == 20
+    assert response.text == "unified response"
+    assert response.provider == "openai"
+
+
+@pytest.mark.asyncio
+async def test_llm_service_rejects_missing_agent():
+    with pytest.raises(ConfigurationError, match="No LLM agent configured"):
+        await LLMService().complete(None, [{"role": "user", "content": "hello"}])
 
 
 def test_usage_extraction_normalizes_anthropic_cache_tokens():
@@ -164,5 +89,4 @@ def test_cost_calculation_uses_cached_input_rate():
         cached_tokens=400,
     )
 
-    # 600 * $3/MTok + 400 * $0.30/MTok + 100 * $15/MTok
     assert cost == Decimal("0.00342000")

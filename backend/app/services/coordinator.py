@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
@@ -18,25 +17,20 @@ from sqlalchemy.orm import Session as DBSession
 from app.core.config import settings
 from app.db.models import Agent as AgentModel, LLMUsage, Session as SessionModel, Task as TaskModel
 from app.services.llm_client import (
-    ANTHROPIC_MODEL,
-    GOOGLE_MODEL,
-    OPENAI_MODEL,
     UsageCounts,
     calculate_cost,
 )
 from app.services.cli_dispatcher import (
     CLIDispatchError,
     CLIDispatcher,
-    format_history_as_prompt,
-    route_model,
 )
 from app.services.context_hierarchy import ContextHierarchy, drop_orphan_tool_pairs
-from app.services.crypto import decrypt_api_key
 from app.services.command_router import CommandRouter
 from app.services.tool_registry import get_group_tool_definitions, get_spec, resolve_tool_name
 from app.graph.context import invalidate_context_snapshot
 from app.services.providers import CoordinatorProvider, ProviderResponse
-from app.services.providers.openai_adapter import OpenAIAdapter
+from app.services.providers.cli_provider import CLIProvider
+from app.services.llm_service import ConfigurationError, LLMService, provider_name_for_model
 
 
 logger = logging.getLogger(__name__)
@@ -60,81 +54,26 @@ class CoordinatorResult:
     cached: bool = False
 
 
-class ProviderRouter:
-    """Resolve the OpenAI-compatible coordinator adapter from an Agent DB record.
+@dataclass(frozen=True)
+class _ConfiguredAgent:
+    """Explicit request configuration used only by injected test providers."""
 
-    Anthropic and Google models have no SDK-direct adapter; they always
-    dispatch through the CLI (see ``route_model``).
-    """
-
-    def __init__(
-        self,
-        providers: Mapping[str, CoordinatorProvider] | None = None,
-    ):
-        self.providers: dict[str, CoordinatorProvider] = dict(providers or {})
-
-    @staticmethod
-    def provider_name(model: str) -> str:
-        normalized = (model or "").lower()
-        if "claude" in normalized:
-            return "anthropic"
-        if "gemini" in normalized:
-            return "google"
-        if normalized.startswith(("gpt-", "o1-", "chatgpt-")):
-            return "openai"
-        raise ValueError(
-            f"Cannot infer provider for coordinator model '{model}'. "
-            "Specify provider='anthropic', provider='google', or provider='openai'."
-        )
-
-    def get(
-        self,
-        model: str,
-        provider: str | None = None,
-        *,
-        agent: AgentModel | None = None,
-    ) -> CoordinatorProvider:
-        provider_name = (
-            provider
-            or (agent.provider if agent is not None else self.provider_name(model))
-        ).lower()
-        if provider_name == "openai" and agent is not None:
-            if not agent.api_key:
-                raise ValueError(
-                    f"Coordinator agent '{agent.id}' does not have an API key"
-                )
-            return OpenAIAdapter(
-                api_key=decrypt_api_key(agent.api_key),
-                base_url=agent.base_url,
-            )
-        try:
-            return self.providers[provider_name]
-        except KeyError as exc:
-            if provider_name == "openai":
-                raise ValueError(
-                    "No OpenAI coordinator agent is configured for this model"
-                ) from exc
-            raise ValueError(
-                f"Unsupported coordinator provider '{provider_name}'. "
-                "Only 'openai' resolves to a coordinator adapter; anthropic/google "
-                "models dispatch through the CLI."
-            ) from exc
-
-    # Friendly alias for call sites and tests.
-    route = get
-
-
-DEFAULT_PROVIDER_ROUTER = ProviderRouter()
+    id: str
+    name: str
+    role: str
+    agent_type: str
+    model: str
+    provider: str | None = None
+    cli: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
 
 
 class CoordinatorService:
     """Own coordinator sessions, CLI dispatch, retries, and telemetry.
 
-    Coordinator turns run on exactly two paths: the OpenAI-compatible API
-    (via ``ProviderRouter``/``OpenAIAdapter``) or an account-backed CLI
-    (``route_model`` + ``CLIDispatcher``). The ``router``/``providers``
-    constructor arguments let tests inject a fake OpenAI adapter without
-    a real Agent DB record.
+    Coordinator turns run through ``LLMService``. Its provider implementations
+    are injected here only to keep unit tests independent of external APIs.
     """
 
     _session_locks: dict[str, asyncio.Lock] = {}
@@ -145,8 +84,8 @@ class CoordinatorService:
         *,
         dispatcher: CLIDispatcher | None = None,
         cli_dispatcher: CLIDispatcher | None = None,
-        router: ProviderRouter | None = None,
         providers: Mapping[str, CoordinatorProvider] | None = None,
+        llm_service: LLMService | None = None,
         max_retries: int = 2,
         retry_base_seconds: float = 0.25,
         max_output_tokens: int = 2048,
@@ -158,16 +97,14 @@ class CoordinatorService:
     ):
         if dispatcher is not None and cli_dispatcher is not None:
             raise ValueError("Pass either dispatcher or cli_dispatcher, not both")
-        if router is not None and providers is not None:
-            raise ValueError("Pass either router or providers, not both")
         self.db = db
         self.dispatcher = dispatcher or cli_dispatcher or CLIDispatcher()
-        if router is not None:
-            self.router = router
-        elif providers is not None:
-            self.router = ProviderRouter(providers)
-        else:
-            self.router = DEFAULT_PROVIDER_ROUTER
+        self._injected_providers = dict(providers or {})
+        self._has_injected_dispatcher = dispatcher is not None or cli_dispatcher is not None
+        self.llm_service = llm_service or LLMService(
+            api_providers=self._injected_providers,
+            cli_provider=CLIProvider(self.dispatcher),
+        )
         self.max_retries = max(0, max_retries)
         self.retry_base_seconds = max(0.0, retry_base_seconds)
         self.max_output_tokens = max(1, max_output_tokens)
@@ -387,7 +324,7 @@ class CoordinatorService:
         db_session: SessionModel,
         model: str | None,
         provider: str | None,
-    ) -> tuple[str, str, CoordinatorProvider | None]:
+    ) -> tuple[str, str, AgentModel | _ConfiguredAgent]:
         requested_model = model
         if requested_model is None and provider is None:
             requested_model = db_session.selected_model
@@ -397,26 +334,16 @@ class CoordinatorService:
 
         provider = provider.lower() if provider else None
         if requested_model is None:
-            if provider == "google":
-                requested_model = GOOGLE_MODEL
-            elif provider == "anthropic":
-                requested_model = ANTHROPIC_MODEL
-            elif provider == "openai":
-                requested_model = OPENAI_MODEL
-            else:
-                requested_model = os.getenv("COORDINATOR_MODEL", ANTHROPIC_MODEL)
+            raise ConfigurationError(
+                "No model or agent is selected for this session. Configure an agent first."
+            )
 
-        if provider != "openai":
-            # Explicit OpenAI selections are resolved from the DB below;
-            # other providers still use the model-to-CLI router.
-            route = route_model(requested_model, provider)
-            provider = provider or route.provider
+        requested_model = str(requested_model)
+        if provider is None:
+            provider = provider_name_for_model(requested_model)
         if provider == "codex":
             provider = "openai"
 
-        # Only the OpenAI-compatible API path resolves an adapter; anthropic
-        # and google models always dispatch through a CLI account login.
-        adapter: CoordinatorProvider | None = None
         if provider == "openai":
             agent = (
                 self.db.query(AgentModel)
@@ -428,8 +355,49 @@ class CoordinatorService:
                 .order_by(AgentModel.is_default.desc(), AgentModel.id)
                 .first()
             )
-            adapter = self.router.get(requested_model, provider, agent=agent)
-        return provider, requested_model, adapter
+            if agent is not None:
+                return provider, requested_model, agent
+            if provider in self._injected_providers:
+                return provider, requested_model, _ConfiguredAgent(
+                    id=f"injected-{provider}",
+                    name="Injected API provider",
+                    role="test",
+                    agent_type="api",
+                    model=requested_model,
+                    provider=provider,
+                )
+            raise ConfigurationError(
+                f"No API agent is configured for model '{requested_model}'."
+            )
+
+        agent = (
+            self.db.query(AgentModel)
+            .filter(
+                AgentModel.model == requested_model,
+                AgentModel.provider == provider,
+                AgentModel.agent_type == "cli",
+            )
+            .order_by(AgentModel.is_default.desc(), AgentModel.id)
+            .first()
+        )
+        if agent is not None:
+            return provider, requested_model, agent
+        if self._has_injected_dispatcher:
+            cli = {"anthropic": "claude", "google": "agy"}.get(provider)
+            if cli is None:
+                raise ConfigurationError(f"No CLI route is configured for provider '{provider}'.")
+            return provider, requested_model, _ConfiguredAgent(
+                id=f"injected-{provider}",
+                name="Injected CLI provider",
+                role="test",
+                agent_type="cli",
+                model=requested_model,
+                provider=provider,
+                cli=cli,
+            )
+        raise ConfigurationError(
+            f"No CLI agent is configured for model '{requested_model}'."
+        )
 
     def validate_selection(
         self,
@@ -861,54 +829,6 @@ class CoordinatorService:
             cached=True,
         )
 
-    @staticmethod
-    def format_prompt(messages: list[dict[str, Any]]) -> str:
-        """Expose the canonical-to-CLI prompt conversion for callers/tests."""
-
-        return format_history_as_prompt(messages)
-
-    def _cli_response(
-        self,
-        *,
-        provider: str,
-        model: str,
-        content: str,
-        canonical: list[dict[str, Any]],
-    ) -> ProviderResponse:
-        """Normalize CLI output to the existing persistence response shape."""
-
-        return ProviderResponse(
-            provider=provider,
-            model=model,
-            text=content,
-            usage=UsageCounts(
-                input_tokens=sum(self.estimate_tokens(item) for item in canonical),
-                output_tokens=max(0, self.estimate_tokens({"content": content}) - 4),
-                cached_tokens=0,
-            ),
-            request_id=f"cli-{uuid.uuid4()}",
-            stop_reason="stop",
-        )
-
-    async def _complete_cli(
-        self,
-        *,
-        provider: str,
-        model: str,
-        prompt: str,
-        canonical: list[dict[str, Any]],
-    ) -> ProviderResponse:
-        route = route_model(model, provider)
-        chunks: list[str] = []
-        async for chunk in self.dispatcher.spawn(route.cli, model, prompt):
-            chunks.append(chunk)
-        return self._cli_response(
-            provider=provider,
-            model=model,
-            content="".join(chunks),
-            canonical=canonical,
-        )
-
     async def complete_turn(
         self,
         db_session: SessionModel,
@@ -931,7 +851,7 @@ class CoordinatorService:
             completed = self.completed_turn(db_session, turn_id)
             if completed:
                 return self._cached_result(completed, turn_id)
-            provider_name, resolved_model, adapter = self._resolve_selection(
+            provider_name, resolved_model, agent = self._resolve_selection(
                 db_session, model, provider
             )
             ctx = self._context_hierarchy()
@@ -939,19 +859,26 @@ class CoordinatorService:
                 db_session,
                 model=resolved_model,
                 context_window=self._context_window(resolved_model),
+                agent=agent,
+                summarizer=lambda messages, **kwargs: self.llm_service.complete_sync(
+                    agent,
+                    messages,
+                    model=kwargs.get("model"),
+                    max_tokens=kwargs.get("max_tokens", self.max_output_tokens),
+                    temperature=kwargs.get("temperature", 0),
+                ).text,
             )
             canonical = self.budget_messages(
                 ctx.build_messages(db_session, current_turn_id=turn_id),
                 resolved_model,
             )
-            prompt = self.format_prompt(canonical)
             started = perf_counter()
             tool_activity = False
             active_tools = ctx.get_tool_definitions()
             active_tool_names = {tool["name"] for tool in active_tools}
             for attempt in range(self.max_retries + 1):
                 try:
-                    if adapter is not None:
+                    if getattr(agent.agent_type, "value", agent.agent_type) == "api":
                         iteration = 0
                         accumulated_tokens = 0
                         executed_tool_calls_history: list[str] = []
@@ -963,13 +890,14 @@ class CoordinatorService:
 
                         while iteration < self.max_tool_iterations:
                             iteration += 1
-                            response = await adapter.complete(
+                            response = await self.llm_service.complete(
+                                agent,
                                 canonical,
-                                resolved_model,
-                                False,
+                                active_tools,
+                                model=resolved_model,
+                                stream=False,
                                 max_tokens=self.max_output_tokens,
                                 temperature=temperature,
-                                tools=active_tools,
                             )
                             last_response = response
                             if response.usage:
@@ -1074,11 +1002,14 @@ class CoordinatorService:
                                 tool_iterations=iteration,
                             )
                     else:
-                        response = await self._complete_cli(
-                            provider=provider_name,
+                        response = await self.llm_service.complete(
+                            agent,
+                            canonical,
+                            active_tools,
                             model=resolved_model,
-                            prompt=prompt,
-                            canonical=canonical,
+                            stream=False,
+                            max_tokens=self.max_output_tokens,
+                            temperature=temperature,
                         )
                     return self._persist_success(
                         db_session,
@@ -1126,7 +1057,7 @@ class CoordinatorService:
             if completed:
                 yield str(completed.get("content", ""))
                 return
-            provider_name, resolved_model, adapter = self._resolve_selection(
+            provider_name, resolved_model, agent = self._resolve_selection(
                 db_session, model, provider
             )
             ctx = self._context_hierarchy()
@@ -1134,12 +1065,19 @@ class CoordinatorService:
                 db_session,
                 model=resolved_model,
                 context_window=self._context_window(resolved_model),
+                agent=agent,
+                summarizer=lambda messages, **kwargs: self.llm_service.complete_sync(
+                    agent,
+                    messages,
+                    model=kwargs.get("model"),
+                    max_tokens=kwargs.get("max_tokens", self.max_output_tokens),
+                    temperature=kwargs.get("temperature", 0),
+                ).text,
             )
             canonical = self.budget_messages(
                 ctx.build_messages(db_session, current_turn_id=turn_id),
                 resolved_model,
             )
-            prompt = self.format_prompt(canonical)
             started = perf_counter()
             partial = ""
             tool_activity = False
@@ -1148,7 +1086,7 @@ class CoordinatorService:
             for attempt in range(self.max_retries + 1):
                 response: ProviderResponse | None = None
                 try:
-                    if adapter is not None:
+                    if getattr(agent.agent_type, "value", agent.agent_type) == "api":
                         iteration = 0
                         accumulated_tokens = 0
                         executed_tool_calls_history: list[str] = []
@@ -1159,13 +1097,14 @@ class CoordinatorService:
 
                         while iteration < self.max_tool_iterations:
                             iteration += 1
-                            response = await adapter.complete(
+                            response = await self.llm_service.complete(
+                                agent,
                                 canonical,
-                                resolved_model,
-                                True,
+                                active_tools,
+                                model=resolved_model,
+                                stream=True,
                                 max_tokens=self.max_output_tokens,
                                 temperature=temperature,
-                                tools=active_tools,
                             )
                             if response.usage:
                                 accumulated_tokens += (response.usage.input_tokens or 0) + (response.usage.output_tokens or 0)
@@ -1283,26 +1222,28 @@ class CoordinatorService:
                                 stop_reason=stop_reason,
                             )
                     else:
-                        route = route_model(resolved_model, provider_name)
-                        async for chunk in self.dispatcher.spawn(
-                            route.cli,
-                            resolved_model,
-                            prompt,
-                        ):
-                            partial += chunk
-                            yield chunk
-                        response = self._cli_response(
-                            provider=provider_name,
+                        response = await self.llm_service.complete(
+                            agent,
+                            canonical,
+                            active_tools,
                             model=resolved_model,
-                            content=partial,
-                            canonical=canonical,
+                            stream=True,
+                            max_tokens=self.max_output_tokens,
+                            temperature=temperature,
                         )
+                        if response.chunks is not None:
+                            async for chunk in response.chunks:
+                                partial += chunk
+                                yield chunk
+                        elif response.text:
+                            partial += response.text
+                            yield response.text
                     self._persist_success(
                         db_session,
                         turn_id=turn_id,
                         response=response,
                         latency_ms=round((perf_counter() - started) * 1000),
-                        tool_iterations=iteration if adapter is not None else 1,
+                        tool_iterations=iteration if getattr(agent.agent_type, "value", agent.agent_type) == "api" else 1,
                     )
                     return
                 except Exception as exc:

@@ -1,4 +1,4 @@
-"""Backward-compatible exports for the telemetry-enabled LLM client."""
+"""Backward-compatible exports for model telemetry utilities."""
 
 from app.services.llm_client import (
     ANTHROPIC_API_KEY,
@@ -7,7 +7,6 @@ from app.services.llm_client import (
     GOOGLE_MODEL,
     OPENAI_MODEL,
     LLM_PROVIDER,
-    LLMClient,
     ModelPricing,
     SILICONFLOW_API_KEY,
     SILICONFLOW_BASE_URL,
@@ -16,7 +15,6 @@ from app.services.llm_client import (
     calculate_cost,
     extract_usage,
     get_model_pricing,
-    llm,
 )
 
 __all__ = [
@@ -26,7 +24,6 @@ __all__ = [
     "GOOGLE_MODEL",
     "OPENAI_MODEL",
     "LLM_PROVIDER",
-    "LLMClient",
     "ModelPricing",
     "SILICONFLOW_API_KEY",
     "SILICONFLOW_BASE_URL",
@@ -35,5 +32,4 @@ __all__ = [
     "calculate_cost",
     "extract_usage",
     "get_model_pricing",
-    "llm",
 ]

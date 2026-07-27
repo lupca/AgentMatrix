@@ -55,11 +55,15 @@ def response_request_id(response: Any) -> str | None:
     return getattr(response, "_request_id", None) or getattr(response, "id", None)
 
 
+from app.services.providers.api_provider import APIProvider  # noqa: E402
+from app.services.providers.cli_provider import CLIProvider  # noqa: E402
 from app.services.providers.openai_adapter import OpenAIAdapter  # noqa: E402
 
 
 __all__ = [
     "CoordinatorProvider",
+    "APIProvider",
+    "CLIProvider",
     "OpenAIAdapter",
     "ProviderResponse",
     "response_request_id",

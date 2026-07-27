@@ -33,6 +33,7 @@ from app.services.graph_client import (
     get_impact_radius as graph_get_impact_radius,
     semantic_search,
 )
+from app.services.llm_service import ConfigurationError
 
 # query_db (ADR-001 §D2): entity + filter-field whitelist, and a compact
 # serializer per entity so responses stay small and never leak secrets
@@ -753,13 +754,16 @@ class CommandRouter:
                 'suggested_model': (gate_result.context or {}).get('model_config'),
             }
 
-        model_config = (gate_result.context or {}).get('model_config')
+        model_config = dict((gate_result.context or {}).get('model_config') or {})
+        agent_id = model_config.get("agent_id")
+        if agent_id:
+            model_config["agent"] = self.db.get(Agent, agent_id)
 
         repo_root, _error = self._research_repo_root(session_id)
 
         try:
             result, flows = await generate_spec_plan(task, repo_root, model_config)
-        except SpecPlanGenerationError as exc:
+        except (SpecPlanGenerationError, ConfigurationError) as exc:
             return {'error': str(exc)}
 
         try:

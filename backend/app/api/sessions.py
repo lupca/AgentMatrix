@@ -5,7 +5,7 @@ from app.db.base import get_db
 from app.db.models import ContextLevel, Session as SessionModel, SessionStatus, Task as TaskModel
 from app.graph.context import invalidate_context_snapshot
 from app.schemas.session import Session as SessionSchema, SessionCreate, SessionUpdate
-from app.services.coordinator import ProviderRouter
+from app.services.llm_service import provider_name_for_model
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -35,7 +35,7 @@ def _validate_model_selection(
             data["selected_provider"] = provider
     if model is not None:
         try:
-            inferred = ProviderRouter.provider_name(model)
+            inferred = provider_name_for_model(model)
         except ValueError as exc:
             if provider is None:
                 raise HTTPException(

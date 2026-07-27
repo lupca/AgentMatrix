@@ -906,12 +906,11 @@ def test_write_spec_plan_updates_task_mode_by_policy(orchestration, db_session):
     assert task_high.mode == "supervised"
 
 
-def test_resolve_spec_plan_model_falls_back_to_env_provider(orchestration, db_session):
+def test_resolve_spec_plan_model_requires_explicit_agent(orchestration, db_session):
     resolved = orchestration.resolve_spec_plan_model(None)
     assert resolved["agent_id"] is None
     assert resolved["model"] is None
-    assert resolved["source"] == "env"
-    assert resolved["provider"]
+    assert resolved["source"] == "unconfigured"
 
 
 def test_resolve_spec_plan_model_setting_wins_over_env(orchestration, db_session):
@@ -970,7 +969,7 @@ def test_resolve_spec_plan_model_agent_reference_requires_capability(orchestrati
     db_session.commit()
     resolved_bad = orchestration.resolve_spec_plan_model(project_bad)
     assert resolved_bad["agent_id"] is None
-    assert resolved_bad["source"] == "env"
+    assert resolved_bad["source"] == "unconfigured"
 
 
 def test_request_spec_plan_model_supervised_opens_pending_gate(orchestration, db_session):
@@ -1013,4 +1012,3 @@ def test_request_spec_plan_model_bypass_auto_selects_and_audits(orchestration, d
         .one()
     )
     assert audit.details["model"]["provider"] == "anthropic"
-

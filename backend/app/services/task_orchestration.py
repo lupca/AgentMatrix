@@ -167,14 +167,12 @@ class TaskOrchestrationService:
     def resolve_spec_plan_model(self, project: Project | str | None) -> dict[str, Any]:
         """Resolve the model/agent used to generate a task's spec/plan.
 
-        Fallback chain mirrors ``resolve_autonomy``: ``Project.autonomy_policy
-        ["spec_plan_model"]`` > ``Setting["spec_plan_model"]`` > env
-        ``LLM_PROVIDER``. The configured value may be a provider name, an
+        Configuration is explicit: project policy > the system setting > a
+        default capable agent. Environment-selected providers are never used.
+        The configured value may be a provider name, an
         ``{"provider": ..., "model": ...}`` dict, or an ``Agent`` id (must
         carry the ``coordinator`` or ``spec_plan`` capability to be honored).
         """
-        from app.services.llm_client import LLM_PROVIDER as _env_provider
-
         project_row = (
             project
             if isinstance(project, Project)
@@ -190,12 +188,32 @@ class TaskOrchestrationService:
             raw = row.value if row is not None else None
             source = "setting"
         if raw is None:
-            return {"agent_id": None, "provider": _env_provider, "model": None, "source": "env"}
+            agent = (
+                self.db.query(Agent)
+                .filter(Agent.agent_type.in_(["api", "cli"]))
+                .filter(Agent.status != "disabled")
+                .filter(Agent.capabilities.isnot(None))
+                .order_by(Agent.is_default.desc(), Agent.id)
+                .all()
+            )
+            capable = next(
+                (
+                    item for item in agent
+                    if set(item.capabilities or []) & {"coordinator", "spec_plan"}
+                ),
+                None,
+            )
+            return {
+                "agent_id": capable.id if capable is not None else None,
+                "provider": capable.provider if capable is not None else None,
+                "model": capable.model if capable is not None else None,
+                "source": "default_agent" if capable is not None else "unconfigured",
+            }
 
         if isinstance(raw, dict):
             return {
                 "agent_id": raw.get("agent_id"),
-                "provider": raw.get("provider") or _env_provider,
+                "provider": raw.get("provider"),
                 "model": raw.get("model"),
                 "source": source,
             }
@@ -206,16 +224,16 @@ class TaskOrchestrationService:
             if agent is not None and capabilities & {"coordinator", "spec_plan"}:
                 return {
                     "agent_id": agent.id,
-                    "provider": agent.provider or _env_provider,
+                    "provider": agent.provider,
                     "model": agent.model,
                     "source": source,
                 }
-            return {"agent_id": None, "provider": _env_provider, "model": None, "source": "env"}
+            return {"agent_id": None, "provider": None, "model": None, "source": "unconfigured"}
 
         if isinstance(raw, str) and raw.strip():
             return {"agent_id": None, "provider": raw.strip(), "model": None, "source": source}
 
-        return {"agent_id": None, "provider": _env_provider, "model": None, "source": "env"}
+        return {"agent_id": None, "provider": None, "model": None, "source": "unconfigured"}
 
     def request_spec_plan_model(
         self,

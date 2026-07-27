@@ -6,9 +6,7 @@ import pytest
 
 from app.db.models import LLMUsage, Session
 from app.services.coordinator import (
-    DEFAULT_PROVIDER_ROUTER,
     CoordinatorService,
-    ProviderRouter,
 )
 from app.services.llm_client import UsageCounts
 from app.services.providers import ProviderResponse
@@ -409,27 +407,15 @@ def test_context_budget_does_not_reorphan_tool_call_pairs(db_session):
     assert budgeted[-1]["content"] == "newest"
 
 
-def test_provider_router_resolves_only_openai_adapter():
-    openai = _FakeProvider("openai", [])
-    router = ProviderRouter({"openai": openai})
-
-    assert router.get("gpt-4o", "openai") is openai
-    with pytest.raises(ValueError, match="Cannot infer provider"):
-        router.get("unknown-model")
-    with pytest.raises(ValueError, match="Unsupported coordinator provider"):
-        router.get("claude-sonnet-4", "anthropic")
-
-
 def test_chat_endpoint_routes_requested_models_and_preserves_history(
     client,
     db_session,
     monkeypatch,
 ):
     openai = _FakeProvider("openai", ["first answer", "second answer"])
-    monkeypatch.setitem(
-        DEFAULT_PROVIDER_ROUTER.providers,
-        "openai",
-        openai,
+    monkeypatch.setattr(
+        "app.api.chat.CoordinatorService",
+        lambda db: CoordinatorService(db, providers={"openai": openai}),
     )
 
     first = client.post(

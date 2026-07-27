@@ -1,9 +1,10 @@
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from app.db.models import Task
+from app.services.providers import ProviderResponse
 from app.services.spec_plan_generator import (
     SPEC_PLAN_RESULT_SCHEMA_VERSION,
     SpecPlanGenerationError,
@@ -13,6 +14,14 @@ from app.services.spec_plan_generator import (
 
 def _task() -> Task:
     return Task(id="SPEC-GEN-1", project="proj", title="Build the widget")
+
+
+def _agent():
+    return SimpleNamespace(id="spec-agent", agent_type="api", provider="openai", model="gpt-4o")
+
+
+def _response(content: str) -> ProviderResponse:
+    return ProviderResponse(provider="openai", model="gpt-4o", text=content)
 
 
 def _valid_payload(**overrides) -> dict:
@@ -37,12 +46,11 @@ async def test_generate_spec_plan_marks_unconfirmed_files_and_uses_graph_flows()
     ), patch(
         "app.services.spec_plan_generator.get_affected_flows",
         new=AsyncMock(return_value=["checkout-flow"]),
-    ), patch.object(
-        __import__("app.services.llm_client", fromlist=["LLMClient"]).LLMClient,
-        "complete",
-        return_value=json.dumps(_valid_payload()),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(_valid_payload()))),
     ):
-        result, flows = await generate_spec_plan(task, "/tmp/repo")
+        result, flows = await generate_spec_plan(task, "/tmp/repo", {"agent": _agent()})
 
     assert result.acceptance_criteria == ["Widget renders", "Widget has tests"]
     assert result.files == [
@@ -54,13 +62,11 @@ async def test_generate_spec_plan_marks_unconfirmed_files_and_uses_graph_flows()
 
 @pytest.mark.asyncio
 async def test_generate_spec_plan_without_repo_root_marks_all_files_unconfirmed():
-    task = _task()
-    with patch.object(
-        __import__("app.services.llm_client", fromlist=["LLMClient"]).LLMClient,
-        "complete",
-        return_value=json.dumps(_valid_payload()),
+    with patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(_valid_payload()))),
     ):
-        result, flows = await generate_spec_plan(task, None)
+        result, flows = await generate_spec_plan(_task(), None, {"agent": _agent()})
 
     assert all(f.endswith("*(chưa xác nhận)*") for f in result.files)
     assert flows == []
@@ -68,14 +74,11 @@ async def test_generate_spec_plan_without_repo_root_marks_all_files_unconfirmed(
 
 @pytest.mark.asyncio
 async def test_generate_spec_plan_retries_once_on_invalid_json_then_succeeds():
-    task = _task()
     responses = iter(["not json at all", json.dumps(_valid_payload())])
-    with patch.object(
-        __import__("app.services.llm_client", fromlist=["LLMClient"]).LLMClient,
-        "complete",
-        side_effect=lambda *a, **k: next(responses),
-    ) as mock_complete:
-        result, _flows = await generate_spec_plan(task, None)
+
+    mock_complete = AsyncMock(side_effect=lambda *_args, **_kwargs: _response(next(responses)))
+    with patch("app.services.spec_plan_generator.LLMService.complete", new=mock_complete):
+        result, _flows = await generate_spec_plan(_task(), None, {"agent": _agent()})
 
     assert mock_complete.call_count == 2
     assert result.plan == "1. Build widget. 2. Test widget."
@@ -83,42 +86,32 @@ async def test_generate_spec_plan_retries_once_on_invalid_json_then_succeeds():
 
 @pytest.mark.asyncio
 async def test_generate_spec_plan_raises_after_repeated_schema_failures():
-    task = _task()
-    with patch.object(
-        __import__("app.services.llm_client", fromlist=["LLMClient"]).LLMClient,
-        "complete",
-        return_value="still not json",
-    ):
-        with pytest.raises(SpecPlanGenerationError):
-            await generate_spec_plan(task, None)
+    with patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response("still not json")),
+    ), pytest.raises(SpecPlanGenerationError):
+        await generate_spec_plan(_task(), None, {"agent": _agent()})
 
 
 @pytest.mark.asyncio
 async def test_generate_spec_plan_rejects_empty_acceptance_criteria():
-    task = _task()
-    with patch.object(
-        __import__("app.services.llm_client", fromlist=["LLMClient"]).LLMClient,
-        "complete",
-        return_value=json.dumps(_valid_payload(acceptance_criteria=[])),
-    ):
-        with pytest.raises(SpecPlanGenerationError):
-            await generate_spec_plan(task, None)
+    with patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(_valid_payload(acceptance_criteria=[])))),
+    ), pytest.raises(SpecPlanGenerationError):
+        await generate_spec_plan(_task(), None, {"agent": _agent()})
 
 
 @pytest.mark.asyncio
 async def test_generate_spec_plan_forwards_resolved_model_config():
-    task = _task()
-    llm_client_cls = __import__("app.services.llm_client", fromlist=["LLMClient"]).LLMClient
     with patch(
-        "app.services.spec_plan_generator.LLMClient", wraps=llm_client_cls
-    ) as mock_client_cls, patch.object(
-        llm_client_cls,
-        "complete",
-        return_value=json.dumps(_valid_payload()),
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(_valid_payload()))),
     ) as mock_complete:
         await generate_spec_plan(
-            task, None, model_config={"provider": "anthropic", "model": "claude-3-5-sonnet-latest"}
+            _task(),
+            None,
+            {"agent": _agent(), "model": "claude-3-5-sonnet-latest"},
         )
 
-    mock_client_cls.assert_called_once_with(provider="anthropic")
     assert mock_complete.call_args.kwargs["model"] == "claude-3-5-sonnet-latest"

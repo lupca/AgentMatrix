@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 
 from app.db.models import Project, Task
-from app.services.coordinator import DEFAULT_PROVIDER_ROUTER
+from app.services.coordinator import CoordinatorService
 from app.services.llm_client import UsageCounts
 from app.services.providers import ProviderResponse
 
@@ -39,7 +39,10 @@ def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
     db_session.commit()
 
     provider = _ContextProvider()
-    monkeypatch.setitem(DEFAULT_PROVIDER_ROUTER.providers, "openai", provider)
+    monkeypatch.setattr(
+        "app.api.chat.CoordinatorService",
+        lambda db: CoordinatorService(db, providers={"openai": provider}),
+    )
     session = client.post(
         "/api/sessions",
         json={

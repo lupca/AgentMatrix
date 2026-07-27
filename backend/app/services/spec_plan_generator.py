@@ -8,7 +8,6 @@ exclusively from `get_affected_flows` (the LLM never invents flow names).
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 from pydantic import ValidationError
@@ -16,7 +15,7 @@ from pydantic import ValidationError
 from app.db.models import Task
 from app.schemas.task import SPEC_PLAN_RESULT_SCHEMA_VERSION, SpecPlanResult
 from app.services.graph_client import get_affected_flows, semantic_search
-from app.services.llm_client import LLMClient
+from app.services.llm_service import ConfigurationError, LLMService
 
 UNCONFIRMED_SUFFIX = " *(chưa xác nhận)*"
 _MAX_ATTEMPTS = 2
@@ -68,9 +67,8 @@ async def generate_spec_plan(
     file claims and flows in the code graph. Returns (result, flows).
 
     ``model_config`` (as returned by
-    ``TaskOrchestrationService.resolve_spec_plan_model``) selects the
-    provider/model; when omitted, ``LLMClient`` falls back to the env-var
-    default provider.
+    ``TaskOrchestrationService.resolve_spec_plan_model``) must include the
+    resolved ``Agent`` object. There is deliberately no environment fallback.
     """
 
     graph_candidates: list[str] = []
@@ -89,7 +87,12 @@ async def generate_spec_plan(
             graph_candidates = []
 
     model_config = model_config or {}
-    llm = LLMClient(provider=model_config.get("provider"))
+    agent = model_config.get("agent")
+    if agent is None:
+        raise ConfigurationError(
+            "Spec/plan generation requires an explicitly configured agent."
+        )
+    llm = LLMService()
     selected_model = model_config.get("model")
     retry_reason: str | None = None
     result: SpecPlanResult | None = None
@@ -97,15 +100,14 @@ async def generate_spec_plan(
 
     for _ in range(_MAX_ATTEMPTS):
         prompt = _build_prompt(task, graph_candidates, retry_reason=retry_reason)
-        content = await asyncio.to_thread(
-            llm.complete,
-            messages=[{"role": "user", "content": prompt}],
+        response = await llm.complete(
+            agent,
+            [{"role": "user", "content": prompt}],
             model=selected_model,
             max_tokens=1200,
             temperature=0.3,
-            operation="spec_plan",
-            task_id=task.id,
         )
+        content = response.text
         try:
             parsed = _parse_json(content)
             result = SpecPlanResult.model_validate(parsed)
