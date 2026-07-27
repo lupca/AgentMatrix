@@ -655,12 +655,10 @@ class CommandRouter:
 
         reviewer = parts[1] if len(parts) > 1 else None
         if not reviewer:
-            suggestions = AgentMatcher(self.db).suggest_agents(task, top_n=5)
-            independent = [
-                s for s in suggestions
-                if (task.executor or '').strip().casefold() != s.agent_id.strip().casefold()
-            ]
-            if not independent:
+            suggestions = AgentMatcher(self.db).suggest_agents(
+                task, top_n=1, exclude_agent_id=task.executor
+            )
+            if not suggestions:
                 return {
                     'error': (
                         f'No independent reviewer available for task {task_id} '
@@ -669,7 +667,7 @@ class CommandRouter:
                     ),
                     'reason': 'no_independent_reviewer',
                 }
-            reviewer = independent[0].agent_id
+            reviewer = suggestions[0].agent_id
 
         service = TaskOrchestrationService(self.db)
         try:

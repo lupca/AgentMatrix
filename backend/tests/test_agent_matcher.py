@@ -1,6 +1,7 @@
 import pytest
 
 from app.db.models import Agent, AgentRun, Task
+from app.services.agent_matcher import AgentMatcher
 from app.services.agent_suggester import AgentSuggester
 
 
@@ -171,3 +172,99 @@ def test_agent_suggester_rejects_unknown_role(db_session):
 
     with pytest.raises(ValueError):
         AgentSuggester(db_session).suggest(task, role="bogus")
+
+
+def test_work_type_routing_research(db_session):
+    researcher = Agent(
+        id="@researcher",
+        name="Researcher",
+        role="executor",
+        capabilities=["research"],
+        effort="medium",
+        status="idle",
+    )
+    generalist = Agent(
+        id="@generalist",
+        name="Generalist",
+        role="executor",
+        capabilities=["backend"],
+        effort="medium",
+        status="idle",
+    )
+    task = Task(
+        id="WORK-001",
+        project="backend",
+        title="Investigate payment failures",
+        tags=["research"],
+    )
+    db_session.add_all([researcher, generalist, task])
+    db_session.commit()
+
+    suggestions = AgentMatcher(db_session).suggest_agents(task, top_n=2)
+
+    assert [s.agent_id for s in suggestions] == ["@researcher", "@generalist"]
+
+
+def test_risk_escalation_high_risk(db_session):
+    strong = Agent(
+        id="@opus-agent",
+        name="Opus Agent",
+        role="executor",
+        capabilities=["backend"],
+        effort="high",
+        status="idle",
+    )
+    weak = Agent(
+        id="@flash-agent",
+        name="Flash Agent",
+        role="executor",
+        capabilities=["backend"],
+        effort="low",
+        status="idle",
+    )
+    task = Task(
+        id="WORK-002",
+        project="backend",
+        title="Rework payment settlement",
+        risk="high",
+        tags=["backend"],
+    )
+    db_session.add_all([strong, weak, task])
+    db_session.commit()
+
+    suggestions = AgentMatcher(db_session).suggest_agents(task, top_n=2)
+
+    assert [s.agent_id for s in suggestions] == ["@opus-agent", "@flash-agent"]
+    assert suggestions[0].score > suggestions[1].score
+
+
+def test_four_eyes_exclusion(db_session):
+    executor = Agent(
+        id="@executor-agent",
+        name="Executor Agent",
+        role="executor",
+        capabilities=["backend"],
+        status="idle",
+    )
+    other = Agent(
+        id="@other-agent",
+        name="Other Agent",
+        role="executor",
+        capabilities=["backend"],
+        status="idle",
+    )
+    task = Task(
+        id="WORK-003",
+        project="backend",
+        title="Backend task",
+        executor="@executor-agent",
+        tags=["backend"],
+    )
+    db_session.add_all([executor, other, task])
+    db_session.commit()
+
+    suggestions = AgentSuggester(db_session).suggest(
+        task, role="reviewer", top_n=5, exclude_agent_id=task.executor
+    )
+
+    assert [s.agent_id for s in suggestions] == ["@other-agent"]

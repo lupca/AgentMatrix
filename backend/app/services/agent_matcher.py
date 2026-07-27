@@ -25,6 +25,15 @@ _STOP_WORDS = {
 _ACTIVE_RUN_STATUSES = ("queued", "running")
 _UNAVAILABLE_STATUSES = {"offline", "deprecated", "disabled"}
 
+# CT v1 lesson: research/review work should route to agents who advertise
+# that strength explicitly, not just whoever scores highest on generic
+# skill overlap. "execute" is the default and falls back to task domain tags.
+_ROUTED_WORK_TYPES = ("research", "review")
+_HIGH_EFFORT = {"high", "extra-high", "max", "ultra"}
+# CT v1 lesson: large blast radius or explicit high risk should escalate to
+# a stronger model, since a cheap agent guessing wrong is expensive to undo.
+_RISK_FILE_THRESHOLD = 8
+
 
 def _tokens(value: Any) -> set[str]:
     if value is None:
@@ -62,6 +71,7 @@ class AgentMatcher:
         top_n: int = 3,
         *,
         required_capabilities: set[str] | None = None,
+        exclude_agent_id: str | None = None,
     ) -> list[AgentSuggestion]:
         if top_n <= 0:
             return []
@@ -77,10 +87,17 @@ class AgentMatcher:
                 for agent in agents
                 if set(agent.capabilities or []) & required_capabilities
             ]
+        if exclude_agent_id:
+            excluded = exclude_agent_id.strip().casefold()
+            agents = [
+                agent for agent in agents if agent.id.strip().casefold() != excluded
+            ]
         if not agents:
             return []
 
         task_terms = self._task_terms(task)
+        work_type = self._work_type(task)
+        risk_escalated = self._is_risk_escalated(task)
         load_by_agent = self._active_loads()
         suggestions: list[tuple[float, AgentSuggestion]] = []
 
@@ -89,11 +106,15 @@ class AgentMatcher:
             performance = self._performance(agent, task, task_terms)
             load = self._load_score(load_by_agent.get(agent.id, 0))
             cost = self._cost_score(agent)
+            work_type_fit = self._work_type_boost(agent, work_type, task_terms)
+            risk_fit = self._risk_escalation(agent, risk_escalated)
             score = (
-                skill_match * 0.45
-                + performance * 0.30
-                + load * 0.15
+                skill_match * 0.30
+                + performance * 0.25
+                + load * 0.10
                 + cost * 0.10
+                + work_type_fit * 0.15
+                + risk_fit * 0.10
             )
             reason = self._reason(
                 agent,
@@ -177,6 +198,51 @@ class AgentMatcher:
         # Agent rows created before performance data is imported use 0.0 as the
         # column default. Treat that value as unknown unless runs establish it.
         return 0.5 if configured_rate == 0.0 and not runs else max(0.0, min(configured_rate, 1.0))
+
+    @staticmethod
+    def _work_type(task: Task) -> str:
+        """Infer research/review/execute routing from the task's tags.
+
+        Tasks have no dedicated ``type`` column, so the work type is read
+        from ``tags`` (falling back to an explicit ``type`` attribute if one
+        is ever added) and defaults to "execute".
+        """
+        explicit = getattr(task, "type", None)
+        if explicit in _ROUTED_WORK_TYPES:
+            return explicit
+        tags = {str(tag).lower() for tag in (getattr(task, "tags", None) or [])}
+        for work_type in _ROUTED_WORK_TYPES:
+            if work_type in tags:
+                return work_type
+        return "execute"
+
+    @staticmethod
+    def _work_type_boost(agent: Agent, work_type: str, task_terms: set[str]) -> float:
+        capabilities = {str(c).lower() for c in (agent.capabilities or [])}
+        if work_type in _ROUTED_WORK_TYPES:
+            return 1.0 if work_type in capabilities else 0.3
+        domain_terms = task_terms - set(_ROUTED_WORK_TYPES)
+        if not domain_terms or not capabilities:
+            return 0.5
+        return 1.0 if capabilities & domain_terms else 0.3
+
+    @staticmethod
+    def _is_risk_escalated(task: Task) -> bool:
+        risk = (getattr(task, "risk", None) or "").lower()
+        files = getattr(task, "files", None) or []
+        return risk == "high" or len(files) > _RISK_FILE_THRESHOLD
+
+    @staticmethod
+    def _risk_escalation(agent: Agent, risk_escalated: bool) -> float:
+        if not risk_escalated:
+            # Neutral for every agent so low-risk tasks aren't skewed by effort.
+            return 0.5
+        effort = (agent.effort or "").lower()
+        if effort in _HIGH_EFFORT:
+            return 1.0
+        if effort == "medium":
+            return 0.5
+        return 0.1
 
     def _active_loads(self) -> dict[str, int]:
         rows = (

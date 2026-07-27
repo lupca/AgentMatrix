@@ -38,6 +38,7 @@ class AgentSuggester:
         *,
         role: str = "executor",
         top_n: int = 3,
+        exclude_agent_id: str | None = None,
     ) -> list[AgentSuggestion]:
         if role not in _ROLE_CAPABILITIES:
             raise ValueError(
@@ -46,5 +47,8 @@ class AgentSuggester:
             )
         required_capabilities = _ROLE_CAPABILITIES[role]
         return self._matcher.suggest_agents(
-            task, top_n=top_n, required_capabilities=required_capabilities
+            task,
+            top_n=top_n,
+            required_capabilities=required_capabilities,
+            exclude_agent_id=exclude_agent_id,
         )
