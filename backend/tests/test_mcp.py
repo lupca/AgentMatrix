@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app.services.mcp import MCPClient, MCPClientError
 from app.services.graph_client import (
+    GraphClientError,
     TTLCache,
     clear_graph_cache,
     get_affected_flows,
@@ -138,6 +139,61 @@ async def test_graph_client_caching():
         res3 = await get_impact_radius("/fake/repo", "main.py", use_cache=False)
         assert res3 == ["a.py", "b.py"]
         assert mock_call.call_count == 2
+
+
+# raise_on_error path (used by the coordinator's research tools so a
+# graph-not-built / MCP-down condition surfaces as a structured error
+# instead of silently looking like "no impact / no matches").
+@pytest.mark.asyncio
+async def test_graph_client_get_impact_radius_raises_when_no_response():
+    with patch("app.services.graph_client.MCPClient.call_tool", return_value=None):
+        with pytest.raises(GraphClientError, match="graph may not be built"):
+            await get_impact_radius(
+                "/fake/repo", "src/index.ts", use_cache=False, raise_on_error=True
+            )
+
+
+@pytest.mark.asyncio
+async def test_graph_client_get_impact_radius_raises_on_connection_error():
+    with patch(
+        "app.services.graph_client.MCPClient.call_tool",
+        side_effect=Exception("Connection error"),
+    ):
+        with pytest.raises(GraphClientError, match="Connection error"):
+            await get_impact_radius(
+                "/fake/repo", "src/index.ts", use_cache=False, raise_on_error=True
+            )
+
+
+@pytest.mark.asyncio
+async def test_graph_client_semantic_search_raises_when_no_response():
+    with patch("app.services.graph_client.MCPClient.call_tool", return_value=None):
+        with pytest.raises(GraphClientError, match="graph may not be built"):
+            await semantic_search(
+                "/fake/repo", "search_term", use_cache=False, raise_on_error=True
+            )
+
+
+@pytest.mark.asyncio
+async def test_graph_client_semantic_search_raises_on_connection_error():
+    with patch(
+        "app.services.graph_client.MCPClient.call_tool",
+        side_effect=Exception("Timeout"),
+    ):
+        with pytest.raises(GraphClientError, match="Timeout"):
+            await semantic_search(
+                "/fake/repo", "search_term", use_cache=False, raise_on_error=True
+            )
+
+
+@pytest.mark.asyncio
+async def test_graph_client_get_impact_radius_succeeds_with_raise_on_error_set():
+    mock_response = {"impacted_files": ["a.py", "b.py"]}
+    with patch("app.services.graph_client.MCPClient.call_tool", return_value=mock_response):
+        result = await get_impact_radius(
+            "/fake/repo", "main.py", use_cache=False, raise_on_error=True
+        )
+        assert result == ["a.py", "b.py"]
 
 
 # Integration Test with real code-review-graph if installed

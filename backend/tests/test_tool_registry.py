@@ -25,8 +25,8 @@ def db_session():
     session.close()
 
 
-def test_registry_has_fourteen_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 14
+def test_registry_has_sixteen_tools_with_unique_names():
+    assert len(TOOL_REGISTRY) == 16
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
@@ -41,6 +41,8 @@ def test_registry_has_fourteen_tools_with_unique_names():
         'manage_knowledge',
         'update_settings',
         'update_task',
+        'get_minimal_context',
+        'get_impact_radius',
         'load_tools',
     ]
     for name, spec in TOOL_REGISTRY.items():
@@ -114,7 +116,26 @@ def test_get_group_tool_definitions_returns_deferred_tools_by_group():
         'update_settings',
     }
 
+    research = get_group_tool_definitions('research')
+    assert {t['name'] for t in research} == {
+        'get_minimal_context',
+        'get_impact_radius',
+    }
+
     assert get_group_tool_definitions('nonexistent') is None
+
+
+def test_research_tools_are_read_only_deferred():
+    for name in ('get_minimal_context', 'get_impact_radius'):
+        spec = TOOL_REGISTRY[name]
+        assert spec.tier == 'deferred'
+        assert spec.permission == 'read'
+        assert spec.group == 'research'
+
+
+def test_load_tools_schema_lists_research_group():
+    load_tools_spec = TOOL_REGISTRY['load_tools']
+    assert 'research' in load_tools_spec.parameters['properties']['group']['enum']
 
 
 def test_command_router_commands_derived_from_registry():

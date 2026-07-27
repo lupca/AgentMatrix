@@ -1,9 +1,10 @@
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from app.db.base import Base
 from app.services.command_router import COMMANDS, HELP_COMMAND, CommandRouter
+from app.services.graph_client import GraphClientError
 from app.services.tool_registry import dump_registry
 
 @pytest.fixture
@@ -752,3 +753,149 @@ async def test_update_task_edits_plan_and_rejects_status(db_session):
         "session-1",
     )
     assert "error" in rejected
+
+
+@pytest.mark.asyncio
+async def test_get_impact_radius_requires_project_scope(db_session):
+    router = CommandRouter(db_session)
+    result = await router.execute_tool(
+        "get_impact_radius", {"file": "src/index.ts"}, "session-unscoped"
+    )
+    assert result["status"] == "error"
+    assert result["reason"] == "research_requires_project_scope"
+
+
+@pytest.mark.asyncio
+async def test_get_impact_radius_project_without_repo_root_returns_structured_error(db_session):
+    from app.db.models import Project, Session as SessionModel
+
+    db_session.add(Project(id="proj-no-root", name="No Root Project"))
+    db_session.add(SessionModel(id="session-1", project_id="proj-no-root", context_level="project"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    result = await router.execute_tool(
+        "get_impact_radius", {"file": "src/index.ts"}, "session-1"
+    )
+    assert result["status"] == "error"
+    assert result["reason"] == "project_repo_root_not_configured"
+    assert result["project_id"] == "proj-no-root"
+
+
+@pytest.mark.asyncio
+async def test_get_impact_radius_resolves_repo_root_from_task_project(db_session, tmp_path):
+    from app.db.models import Project, Task, Session as SessionModel
+
+    repo_root = str(tmp_path)
+    db_session.add(Project(id="proj-graph", name="Graph Project", repo_root=repo_root))
+    db_session.add(Task(id="TASK-500", project="proj-graph", title="Touches graph", status="todo"))
+    db_session.add(SessionModel(id="session-1", task_id="TASK-500", project_id="proj-graph", context_level="task"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    with patch(
+        "app.services.command_router.graph_get_impact_radius",
+        new=AsyncMock(return_value=["a.py", "b.py"]),
+    ) as mock_impact:
+        result = await router.execute_tool(
+            "get_impact_radius", {"file": "src/index.ts"}, "session-1"
+        )
+
+    assert result == {"status": "success", "repo_root": repo_root, "files": ["a.py", "b.py"]}
+    mock_impact.assert_awaited_once_with(
+        repo_root, "src/index.ts", raise_on_error=True, compress_output=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_impact_radius_graph_unavailable_returns_structured_error(db_session, tmp_path):
+    from app.db.models import Project, Session as SessionModel
+
+    repo_root = str(tmp_path)
+    db_session.add(Project(id="proj-graph", name="Graph Project", repo_root=repo_root))
+    db_session.add(SessionModel(id="session-1", project_id="proj-graph", context_level="project"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    with patch(
+        "app.services.command_router.graph_get_impact_radius",
+        new=AsyncMock(side_effect=GraphClientError("graph may not be built")),
+    ):
+        result = await router.execute_tool(
+            "get_impact_radius", {"file": "src/index.ts"}, "session-1"
+        )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "graph_unavailable"
+    assert "graph may not be built" in result["detail"]
+    assert result != []
+
+
+@pytest.mark.asyncio
+async def test_get_minimal_context_requires_project_scope(db_session):
+    router = CommandRouter(db_session)
+    result = await router.execute_tool(
+        "get_minimal_context", {"query": "how does dispatch work"}, "session-unscoped"
+    )
+    assert result["status"] == "error"
+    assert result["reason"] == "research_requires_project_scope"
+
+
+@pytest.mark.asyncio
+async def test_get_minimal_context_missing_query_returns_clear_error(db_session):
+    router = CommandRouter(db_session)
+    result = await router.execute_tool("get_minimal_context", {}, "session-1")
+    assert result == {"error": "query is required"}
+
+
+@pytest.mark.asyncio
+async def test_get_minimal_context_resolves_repo_root_and_compresses(db_session, tmp_path):
+    from app.db.models import Project, Session as SessionModel
+
+    repo_root = str(tmp_path)
+    db_session.add(Project(id="proj-graph", name="Graph Project", repo_root=repo_root))
+    db_session.add(SessionModel(id="session-1", project_id="proj-graph", context_level="project"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    with patch(
+        "app.services.command_router.semantic_search",
+        new=AsyncMock(return_value="[compressed context]"),
+    ) as mock_search:
+        result = await router.execute_tool(
+            "get_minimal_context",
+            {"query": "how does dispatch work", "limit": 5},
+            "session-1",
+        )
+
+    assert result == {
+        "status": "success",
+        "repo_root": repo_root,
+        "context": "[compressed context]",
+    }
+    mock_search.assert_awaited_once_with(
+        repo_root, "how does dispatch work", 5, raise_on_error=True, compress_output=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_minimal_context_graph_unavailable_returns_structured_error(db_session, tmp_path):
+    from app.db.models import Project, Session as SessionModel
+
+    repo_root = str(tmp_path)
+    db_session.add(Project(id="proj-graph", name="Graph Project", repo_root=repo_root))
+    db_session.add(SessionModel(id="session-1", project_id="proj-graph", context_level="project"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    with patch(
+        "app.services.command_router.semantic_search",
+        new=AsyncMock(side_effect=GraphClientError("MCP timed out")),
+    ):
+        result = await router.execute_tool(
+            "get_minimal_context", {"query": "how does dispatch work"}, "session-1"
+        )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "graph_unavailable"
+    assert "MCP timed out" in result["detail"]
