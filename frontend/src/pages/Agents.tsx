@@ -11,11 +11,8 @@ import {
   RefreshCw,
   Filter,
   AlertCircle,
-  ChevronLeft,
-  ChevronRight,
 } from 'lucide-react';
-
-const PAGE_SIZE = 12;
+import Pagination from '../components/common/Pagination';
 
 export const AgentsPage: React.FC = () => {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -29,6 +26,7 @@ export const AgentsPage: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [page, setPage] = useState<number>(1);
+  const [pageSize] = useState<number>(12);
 
   const [showModal, setShowModal] = useState<boolean>(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
@@ -137,8 +135,8 @@ export const AgentsPage: React.FC = () => {
   });
 
   // Pagination
-  const totalPages = Math.ceil(filteredAgents.length / PAGE_SIZE);
-  const paginatedAgents = filteredAgents.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const totalPages = Math.ceil(filteredAgents.length / pageSize);
+  const paginatedAgents = filteredAgents.slice((page - 1) * pageSize, page * pageSize);
 
   // Reset page when filters change
   useEffect(() => {
@@ -285,27 +283,14 @@ export const AgentsPage: React.FC = () => {
             ))}
           </div>
 
-          {/* Pagination */}
           {totalPages > 1 && (
-            <div className="flex items-center justify-center gap-2 pt-4">
-              <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page === 1}
-                className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              <span className="text-xs text-gray-400 px-3">
-                Page {page} of {totalPages} ({filteredAgents.length} agents)
-              </span>
-              <button
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page === totalPages}
-                className="p-2 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
+            <Pagination
+              currentPage={page}
+              totalPages={totalPages}
+              totalItems={filteredAgents.length}
+              pageSize={pageSize}
+              onPageChange={setPage}
+            />
           )}
         </>
       )}

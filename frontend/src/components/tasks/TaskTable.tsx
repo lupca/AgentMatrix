@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Task } from '../../types/task';
+import Pagination from '../common/Pagination';
 import {
   ChevronDown,
   ChevronUp,
@@ -33,6 +34,8 @@ export const TaskTable: React.FC<TaskTableProps> = ({
   const [sortField, setSortField] = useState<SortField>('id');
   const [sortDirection, setSortDirection] = useState<SortDirection>('asc');
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -54,6 +57,9 @@ export const TaskTable: React.FC<TaskTableProps> = ({
     if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
     return 0;
   });
+
+  const totalPages = Math.max(1, Math.ceil(sortedTasks.length / pageSize));
+  const paginatedTasks = sortedTasks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   const toggleExpandRow = (taskId: string) => {
     setExpandedTaskId(expandedTaskId === taskId ? null : taskId);
@@ -154,63 +160,39 @@ export const TaskTable: React.FC<TaskTableProps> = ({
 
   return (
     <div className="bg-gray-900/80 border border-gray-800 rounded-xl overflow-hidden shadow-lg backdrop-blur">
-      <div className="overflow-x-auto">
-        <table className="w-full text-left text-sm text-gray-300">
-          <thead className="bg-gray-950/80 text-xs uppercase tracking-wider text-gray-400 border-b border-gray-800 select-none">
+      <div className="w-full overflow-x-auto">
+        <table className="w-full text-left text-sm text-gray-300 table-auto border-collapse">
+          <thead className="bg-gray-950/90 text-[11px] uppercase tracking-wider text-gray-400 border-b border-gray-800 select-none">
             <tr>
-              <th className="py-3.5 px-4 w-10"></th>
-              <th
-                onClick={() => handleSort('id')}
-                className="py-3.5 px-4 font-semibold cursor-pointer group hover:text-gray-200"
-              >
-                <div className="flex items-center">
-                  <span>Task ID</span>
-                  {renderSortIcon('id')}
-                </div>
-              </th>
+              <th className="py-3 px-3 w-8"></th>
               <th
                 onClick={() => handleSort('title')}
-                className="py-3.5 px-4 font-semibold cursor-pointer group hover:text-gray-200"
+                className="py-3 px-4 font-semibold cursor-pointer group hover:text-gray-200"
               >
-                <div className="flex items-center">
-                  <span>Title</span>
+                <div className="flex items-center space-x-1">
+                  <span>Task & Details</span>
                   {renderSortIcon('title')}
                 </div>
               </th>
               <th
-                onClick={() => handleSort('project')}
-                className="py-3.5 px-4 font-semibold cursor-pointer group hover:text-gray-200"
-              >
-                <div className="flex items-center">
-                  <span>Project</span>
-                  {renderSortIcon('project')}
-                </div>
-              </th>
-              <th
                 onClick={() => handleSort('status')}
-                className="py-3.5 px-4 font-semibold cursor-pointer group hover:text-gray-200"
+                className="py-3 px-4 font-semibold cursor-pointer group hover:text-gray-200 w-36"
               >
-                <div className="flex items-center">
+                <div className="flex items-center space-x-1">
                   <span>Status</span>
                   {renderSortIcon('status')}
                 </div>
               </th>
-              <th
-                onClick={() => handleSort('current_gate')}
-                className="py-3.5 px-4 font-semibold cursor-pointer group hover:text-gray-200"
-              >
-                <div className="flex items-center">
-                  <span>Gate</span>
-                  {renderSortIcon('current_gate')}
-                </div>
+              <th className="py-3 px-4 font-semibold w-44">
+                <span>Assignees</span>
               </th>
-              <th className="py-3.5 px-4 font-semibold">Priority</th>
-              <th className="py-3.5 px-4 font-semibold">Executor / Reviewer</th>
-              <th className="py-3.5 px-4 font-semibold text-right">Actions</th>
+              <th className="py-3 px-4 font-semibold text-right w-36">
+                <span>Actions</span>
+              </th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-800/60">
-            {sortedTasks.map((task) => {
+            {paginatedTasks.map((task) => {
               const isExpanded = expandedTaskId === task.id;
               return (
                 <React.Fragment key={task.id}>
@@ -219,7 +201,7 @@ export const TaskTable: React.FC<TaskTableProps> = ({
                       isExpanded ? 'bg-gray-800/30' : ''
                     }`}
                   >
-                    <td className="py-3.5 px-4 text-center">
+                    <td className="py-3.5 px-3 text-center align-top pt-4">
                       <button
                         onClick={() => toggleExpandRow(task.id)}
                         className="text-gray-500 hover:text-gray-300 p-1 rounded hover:bg-gray-800 transition-colors"
@@ -232,63 +214,72 @@ export const TaskTable: React.FC<TaskTableProps> = ({
                         )}
                       </button>
                     </td>
-                    <td className="py-3.5 px-4 font-mono font-bold text-indigo-400 whitespace-nowrap">
-                      <Link to={`/tasks/${task.id}`} className="hover:underline hover:text-indigo-300">
-                        {task.id}
-                      </Link>
-                    </td>
-                    <td className="py-3.5 px-4 font-medium text-gray-100 max-w-xs truncate">
-                      <Link
-                        to={`/tasks/${task.id}`}
-                        onClick={() => onSelectTask?.(task)}
-                        className="hover:underline hover:text-indigo-300 text-left truncate block w-full"
-                      >
-                        {task.title}
-                      </Link>
-                    </td>
-                    <td className="py-3.5 px-4 whitespace-nowrap">
-                      <span className="px-2 py-0.5 rounded text-xs font-medium bg-gray-800 text-gray-300 border border-gray-700">
-                        {task.project}
-                      </span>
-                    </td>
-                    <td className="py-3.5 px-4 whitespace-nowrap">
-                      {getStatusBadge(task.status)}
-                    </td>
-                    <td className="py-3.5 px-4 whitespace-nowrap text-xs text-gray-400">
-                      {task.current_gate ? (
-                        <span className="px-2 py-0.5 rounded bg-indigo-950/60 text-indigo-300 border border-indigo-800/40">
-                          {task.current_gate}
-                        </span>
-                      ) : (
-                        '-'
-                      )}
-                    </td>
-                    <td className="py-3.5 px-4 whitespace-nowrap">
-                      {getPriorityBadge(task.priority)}
-                    </td>
-                    <td className="py-3.5 px-4 whitespace-nowrap text-xs text-gray-400">
-                      <div className="flex items-center space-x-2">
-                        {task.executor && (
-                          <span className="flex items-center space-x-1 text-gray-300" title="Executor">
-                            <Bot className="w-3.5 h-3.5 text-indigo-400" />
-                            <span>{task.executor}</span>
-                          </span>
-                        )}
-                        {task.reviewer && (
-                          <span className="flex items-center space-x-1 text-purple-300" title="Reviewer">
-                            <UserCheck className="w-3.5 h-3.5 text-purple-400" />
-                            <span>{task.reviewer}</span>
-                          </span>
-                        )}
-                        {!task.executor && !task.reviewer && <span className="text-gray-600">-</span>}
+
+                    {/* Compact Task & Details Column */}
+                    <td className="py-3.5 px-4 align-top">
+                      <div className="space-y-1.5 max-w-2xl">
+                        <div className="flex items-start flex-wrap gap-2">
+                          <Link
+                            to={`/tasks/${task.id}`}
+                            className="inline-flex items-center font-mono font-bold text-xs px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors shrink-0"
+                          >
+                            {task.id}
+                          </Link>
+                          <Link
+                            to={`/tasks/${task.id}`}
+                            onClick={() => onSelectTask?.(task)}
+                            className="font-medium text-gray-100 hover:text-indigo-300 transition-colors text-sm leading-snug break-words"
+                          >
+                            {task.title}
+                          </Link>
+                        </div>
+
+                        {/* Subline Meta Pills */}
+                        <div className="flex items-center flex-wrap gap-2 text-xs">
+                          {task.project && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-medium bg-gray-800 text-gray-300 border border-gray-700/70">
+                              {task.project}
+                            </span>
+                          )}
+                          {task.current_gate && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono bg-indigo-950/60 text-indigo-300 border border-indigo-800/40 uppercase">
+                              gate: {task.current_gate}
+                            </span>
+                          )}
+                          {task.priority && getPriorityBadge(task.priority)}
+                        </div>
                       </div>
                     </td>
-                    <td className="py-3.5 px-4 whitespace-nowrap text-right text-xs">
+
+                    {/* Status Column */}
+                    <td className="py-3.5 px-4 align-top pt-4">
+                      {getStatusBadge(task.status)}
+                    </td>
+
+                    {/* Assignees Column */}
+                    <td className="py-3.5 px-4 align-top text-xs text-gray-400 space-y-1">
+                      {task.executor ? (
+                        <div className="flex items-center space-x-1.5 text-gray-200" title="Executor">
+                          <Bot className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                          <span className="font-mono text-xs truncate max-w-[120px]">{task.executor}</span>
+                        </div>
+                      ) : null}
+                      {task.reviewer ? (
+                        <div className="flex items-center space-x-1.5 text-purple-300" title="Reviewer">
+                          <UserCheck className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                          <span className="font-mono text-xs truncate max-w-[120px]">{task.reviewer}</span>
+                        </div>
+                      ) : null}
+                      {!task.executor && !task.reviewer && <span className="text-gray-600">-</span>}
+                    </td>
+
+                    {/* Actions Column */}
+                    <td className="py-3.5 px-4 align-top text-right text-xs">
                       {onStatusChange ? (
                         <select
                           value={task.status}
                           onChange={(e) => onStatusChange(task.id, e.target.value)}
-                          className="bg-gray-950 border border-gray-800 rounded px-2 py-1 text-xs text-gray-300 focus:outline-none focus:border-indigo-500 cursor-pointer"
+                          className="bg-gray-950 border border-gray-800 rounded px-2 py-1.5 text-xs text-gray-300 focus:outline-none focus:border-indigo-500 cursor-pointer hover:border-gray-700 transition-colors"
                         >
                           <option value="todo">To Do</option>
                           <option value="dispatched">Dispatched</option>
@@ -296,7 +287,12 @@ export const TaskTable: React.FC<TaskTableProps> = ({
                           <option value="done">Done</option>
                         </select>
                       ) : (
-                        <span className="text-gray-500">View</span>
+                        <Link
+                          to={`/tasks/${task.id}`}
+                          className="inline-flex items-center px-2.5 py-1 rounded bg-gray-800 text-indigo-400 hover:text-indigo-300 text-xs font-medium"
+                        >
+                          View
+                        </Link>
                       )}
                     </td>
                   </tr>
@@ -304,7 +300,7 @@ export const TaskTable: React.FC<TaskTableProps> = ({
                   {/* Expanded Detail Drawer */}
                   {isExpanded && (
                     <tr className="bg-gray-950/60 border-t border-b border-gray-800/80">
-                      <td colSpan={9} className="p-4 pl-14">
+                      <td colSpan={5} className="p-4 pl-12">
                         <div className="space-y-3 text-xs text-gray-300">
                           {task.raw_input && (
                             <div>
@@ -375,6 +371,19 @@ export const TaskTable: React.FC<TaskTableProps> = ({
             })}
           </tbody>
         </table>
+      </div>
+      <div className="px-4 pb-4">
+        <Pagination
+          currentPage={currentPage}
+          totalPages={totalPages}
+          totalItems={tasks.length}
+          pageSize={pageSize}
+          onPageChange={setCurrentPage}
+          onPageSizeChange={(size) => {
+            setPageSize(size);
+            setCurrentPage(1);
+          }}
+        />
       </div>
     </div>
   );
