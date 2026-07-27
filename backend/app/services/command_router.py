@@ -831,10 +831,15 @@ class CommandRouter:
 
     @staticmethod
     def _command_key(session_id: str, action: str, args: str, attempt: int = 1) -> str:
+        # The attempt discriminator must survive truncation, so the 100-char
+        # cap is applied to the session-id prefix *before* the fixed suffix
+        # (action/digest/attempt) is appended — never after, or a long
+        # session_id could push the attempt number off the end and collide
+        # two different attempts onto the same key.
         digest = hashlib.sha256(args.strip().encode("utf-8")).hexdigest()[:24]
-        return (
-            f"chat:{session_id or 'anonymous'}:{action}:{digest}:{attempt}"[:100]
-        )
+        suffix = f":{action}:{digest}:{attempt}"
+        prefix = f"chat:{session_id or 'anonymous'}"[: max(0, 100 - len(suffix))]
+        return f"{prefix}{suffix}"[:100]
 
     def _dispatch_attempt(self, task_id: str) -> int:
         """Number of times this task has already had a run created for it.

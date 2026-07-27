@@ -28,6 +28,23 @@ def test_command_router_parse():
     assert cmd == "create_task"
     assert args == "create new task"
 
+
+def test_command_key_truncation_preserves_attempt_discriminator():
+    """Regression for CTV2-088 round 2: the 100-char cap used to be applied
+    *after* appending `:{attempt}`, so a long session_id could chop off the
+    attempt digit(s) and collide two different attempts onto the same key."""
+    router = CommandRouter(None)
+    long_session = "s" * 200
+
+    key_attempt_1 = router._command_key(long_session, "dispatch", "args", attempt=1)
+    key_attempt_2 = router._command_key(long_session, "dispatch", "args", attempt=2)
+
+    assert len(key_attempt_1) <= 100
+    assert len(key_attempt_2) <= 100
+    assert key_attempt_1 != key_attempt_2
+    assert key_attempt_1.endswith(":1")
+    assert key_attempt_2.endswith(":2")
+
     # Slash command without arguments
     cmd, args = router.parse("/help")
     assert cmd == "show_help"

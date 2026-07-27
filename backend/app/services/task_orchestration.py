@@ -69,9 +69,12 @@ class TaskOrchestrationService:
     MODES = {"supervised", "plan-only", "bypass"}
     GATED_ACTIONS = {"dispatch", "review_order", "verdict"}
     PATCHABLE_FIELDS = {"plan", "acceptance_criteria", "priority", "tags"}
-    # A run in any of these statuses is no longer "in flight" — queued/running
-    # are the only statuses a dispatch caller may safely be told are active.
-    _DEAD_RUN_STATUSES = {"success", "failed", "timeout", "cancelled"}
+    # A run in any of these statuses is unconditionally no longer "in flight".
+    # "failed" is deliberately excluded here: the worker retries a failed run
+    # in place (status goes back to "queued") until its attempts are
+    # exhausted, so a persisted "failed" status only means dead once
+    # ``attempt >= max_attempts`` — see `_reject_if_stale_dispatch_record`.
+    _DEAD_RUN_STATUSES = {"success", "timeout", "cancelled"}
 
     def __init__(self, db: Session):
         self.db = db
@@ -217,7 +220,16 @@ class TaskOrchestrationService:
         input_hash = self._input_hash(decision_payload)
         existing = self._idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
-            self._reject_if_stale_dispatch_record(existing)
+            # No staleness guard here (unlike `_request_gate`): this key is
+            # keyed off the decision itself (gate_record_id + decision), not
+            # off a dispatch attempt, so it has no attempt/nonce component to
+            # roll forward. The cached record is an immutable historical
+            # fact — "this decision was made and it created run X" — which
+            # stays true and safely replayable no matter how run X later
+            # finishes. Rejecting it as "stale" here previously turned any
+            # replay of an already-decided gate (e.g. a duplicate
+            # POST /gates/{id}/decision) into a permanent, unrecoverable
+            # error once the created run went terminal (CTV2-088 round 2).
             return self._result_for_record(task, existing)
 
         prior_decision = (
@@ -506,6 +518,23 @@ class TaskOrchestrationService:
         input_hash = self._input_hash(request_payload)
         existing = self._idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
+            # Note on CTV2-088 round 2 / AC2 ("status check before returning
+            # an idempotent record"): `_assert_status(task, expected_status)`
+            # is deliberately NOT run unconditionally ahead of this branch.
+            # `expected_status` is the task's *pre*-transition state; once a
+            # cached record has already applied (bypass mode, or an approved
+            # supervised decision), the task has by design moved past it, so
+            # asserting it here would turn every legitimate idempotent replay
+            # into a hard error — verified against
+            # `test_bypass_dispatch_is_audited_and_idempotent`, which relies
+            # on a same-key replay after the first call already advanced
+            # task.status. The state check AC2 actually calls for — never
+            # returning `applied=True` when the current state doesn't back
+            # that claim — is enforced here via
+            # `_reject_if_stale_dispatch_record`, which inspects the
+            # referenced AgentRun rather than the task's pre-transition
+            # status; see its docstring for why that is the correct
+            # substitute rather than a literal statement reorder.
             self._reject_if_stale_dispatch_record(existing)
             return self._result_for_record(task, existing)
         self._assert_status(task, expected_status)
@@ -741,23 +770,42 @@ class TaskOrchestrationService:
     def _reject_if_stale_dispatch_record(self, record: GateRecord) -> None:
         """Guard against handing back a dispatch "success" for a dead run.
 
+        Only called from `_request_gate`'s idempotent-record lookup — the
+        one place where a caller (via the command router's attempt-numbered
+        key) is expected to mint a fresh idempotency key per genuinely new
+        dispatch attempt. In normal operation that attempt bump already keeps
+        a retry from ever colliding with a dead run's key, which makes this a
+        defense-in-depth check for callers that construct keys directly
+        (e.g. tests, or a future caller that reuses a key deliberately) —
+        not the primary defense. Do NOT call this from `decide_gate`: that
+        key has no attempt component and its cached record is an immutable
+        decision, not a retryable request (see the comment there).
+
         A cached dispatch-gate record whose AgentRun has already left
-        queued/running (succeeded, failed, timed out, or was cancelled) is no
-        longer "in flight". Returning it as ``applied=True`` would make a
-        caller believe a run is actively executing when none is; the caller
-        must obtain a fresh idempotency key (e.g. a new attempt number) and
-        retry instead.
+        queued/running (succeeded, timed out, cancelled, or failed with all
+        attempts exhausted) is no longer "in flight". Returning it as
+        ``applied=True`` would make a caller believe a run is actively
+        executing when none is; the caller must obtain a fresh idempotency
+        key (e.g. a new attempt number) and retry instead. A "failed" run
+        that hasn't exhausted its attempts is excluded: the worker retries it
+        in place (status goes back to "queued"), so it is still in flight.
         """
         if record.gate_type != "dispatch" or record.status != "approved":
             return
         if not record.output_ref:
             return
         run = self.db.get(AgentRun, record.output_ref)
-        if run is not None and run.status in self._DEAD_RUN_STATUSES:
+        if run is None:
+            return
+        is_terminal = run.status in self._DEAD_RUN_STATUSES or (
+            run.status == "failed" and run.attempt >= run.max_attempts
+        )
+        if is_terminal:
             raise StaleIdempotencyRecordError(
                 f"Idempotency key {record.idempotency_key!r} refers to run "
-                f"{run.id!r} which is already terminal (status={run.status!r}); "
-                "retry dispatch with a new idempotency key"
+                f"{run.id!r} which is already terminal (status={run.status!r}, "
+                f"attempt={run.attempt}/{run.max_attempts}); retry dispatch "
+                "with a new idempotency key"
             )
 
     def _result_for_record(
