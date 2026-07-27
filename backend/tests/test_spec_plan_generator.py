@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from app.db.models import Task
+from app.services.llm_service import ConfigurationError
 from app.services.providers import ProviderResponse
 from app.services.spec_plan_generator import (
     SPEC_PLAN_RESULT_SCHEMA_VERSION,
@@ -50,7 +51,7 @@ async def test_generate_spec_plan_marks_unconfirmed_files_and_uses_graph_flows()
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response(json.dumps(_valid_payload()))),
     ):
-        result, flows = await generate_spec_plan(task, "/tmp/repo", {"agent": _agent()})
+        result, flows = await generate_spec_plan(task, "/tmp/repo", _agent())
 
     assert result.acceptance_criteria == ["Widget renders", "Widget has tests"]
     assert result.files == [
@@ -66,7 +67,7 @@ async def test_generate_spec_plan_without_repo_root_marks_all_files_unconfirmed(
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response(json.dumps(_valid_payload()))),
     ):
-        result, flows = await generate_spec_plan(_task(), None, {"agent": _agent()})
+        result, flows = await generate_spec_plan(_task(), None, _agent())
 
     assert all(f.endswith("*(chưa xác nhận)*") for f in result.files)
     assert flows == []
@@ -78,7 +79,7 @@ async def test_generate_spec_plan_retries_once_on_invalid_json_then_succeeds():
 
     mock_complete = AsyncMock(side_effect=lambda *_args, **_kwargs: _response(next(responses)))
     with patch("app.services.spec_plan_generator.LLMService.complete", new=mock_complete):
-        result, _flows = await generate_spec_plan(_task(), None, {"agent": _agent()})
+        result, _flows = await generate_spec_plan(_task(), None, _agent())
 
     assert mock_complete.call_count == 2
     assert result.plan == "1. Build widget. 2. Test widget."
@@ -90,7 +91,7 @@ async def test_generate_spec_plan_raises_after_repeated_schema_failures():
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response("still not json")),
     ), pytest.raises(SpecPlanGenerationError):
-        await generate_spec_plan(_task(), None, {"agent": _agent()})
+        await generate_spec_plan(_task(), None, _agent())
 
 
 @pytest.mark.asyncio
@@ -99,19 +100,22 @@ async def test_generate_spec_plan_rejects_empty_acceptance_criteria():
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response(json.dumps(_valid_payload(acceptance_criteria=[])))),
     ), pytest.raises(SpecPlanGenerationError):
-        await generate_spec_plan(_task(), None, {"agent": _agent()})
+        await generate_spec_plan(_task(), None, _agent())
 
 
 @pytest.mark.asyncio
-async def test_generate_spec_plan_forwards_resolved_model_config():
+async def test_generate_spec_plan_uses_the_passed_agent():
+    agent = _agent()
     with patch(
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response(json.dumps(_valid_payload()))),
     ) as mock_complete:
-        await generate_spec_plan(
-            _task(),
-            None,
-            {"agent": _agent(), "model": "claude-3-5-sonnet-latest"},
-        )
+        await generate_spec_plan(_task(), None, agent)
 
-    assert mock_complete.call_args.kwargs["model"] == "claude-3-5-sonnet-latest"
+    assert mock_complete.call_args.args[0] is agent
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_requires_an_agent():
+    with pytest.raises(ConfigurationError):
+        await generate_spec_plan(_task(), None, None)

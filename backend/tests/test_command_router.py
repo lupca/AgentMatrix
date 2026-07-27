@@ -986,22 +986,21 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     the result onto the task via TaskOrchestrationService, which is the only
     thing that lets a subsequent dispatch through.
 
-    CTV2-106: model selection is gated like Dispatch Gate, so the project is
-    set to auto/bypass autonomy here to exercise the immediate-write path;
-    the supervised pending-gate path is covered by
-    test_generate_spec_plan_supervised_mode_returns_pending_gate below."""
-    from app.db.models import Project, Setting, Task
+    CTV2-109: no spec_plan_model gate anymore -- generation runs immediately
+    with an explicitly passed agent_id."""
+    from app.db.models import Agent, Project, Task
     from app.schemas.task import SpecPlanResult
 
+    db_session.add(Project(id="proj-spec", name="Spec Project", repo_root="/tmp"))
     db_session.add(
-        Project(
-            id="proj-spec",
-            name="Spec Project",
-            repo_root="/tmp",
-            autonomy_policy={"autonomy": "auto"},
+        Agent(
+            id="@spec-agent",
+            name="Spec Agent",
+            role="coordinator",
+            cli="claude",
+            capabilities=["coordinator"],
         )
     )
-    db_session.add(Setting(key="auto_max_risk", value="normal"))
     db_session.add(
         Task(
             id="TASK-SPEC",
@@ -1027,7 +1026,7 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
         new=AsyncMock(return_value=(fake_result, ["thing-flow"])),
     ):
         result = await CommandRouter(db_session).execute(
-            "generate_spec_plan", "TASK-SPEC", "session-1"
+            "generate_spec_plan", "TASK-SPEC @spec-agent", "session-1"
         )
 
     assert result["action"] == "spec_plan_generated"
@@ -1040,17 +1039,85 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
 
 
 @pytest.mark.asyncio
-async def test_generate_spec_plan_supervised_mode_returns_pending_gate(db_session):
-    """CTV2-106: with no autonomy override (default supervised), /spec-plan
-    must not call the LLM directly — it opens a pending spec_plan_model gate
-    and waits for a human to confirm the suggested model/agent."""
-    from app.db.models import Project, Task
+async def test_generate_spec_plan_auto_suggests_agent_when_not_provided(db_session):
+    """CTV2-109: with no agent_id argument, /spec-plan auto-selects a
+    capable agent via AgentSuggester(role="spec_plan") instead of gating on
+    a human-approved model choice."""
+    from app.db.models import Agent, Project, Task
+    from app.schemas.task import SpecPlanResult
 
-    db_session.add(Project(id="proj-spec-supervised", name="Supervised Spec Project", repo_root="/tmp"))
+    db_session.add(Project(id="proj-spec-auto", name="Auto Spec Project", repo_root="/tmp"))
+    db_session.add(
+        Agent(
+            id="@auto-spec-agent",
+            name="Auto Spec Agent",
+            role="coordinator",
+            cli="claude",
+            capabilities=["coordinator"],
+        )
+    )
+    db_session.add(
+        Agent(
+            id="@plain-executor",
+            name="Plain Executor",
+            role="executor",
+            cli="codex",
+            capabilities=["python"],
+        )
+    )
     db_session.add(
         Task(
-            id="TASK-SPEC-SUP",
-            project="proj-spec-supervised",
+            id="TASK-SPEC-AUTO",
+            project="proj-spec-auto",
+            title="Needs a spec",
+            status="todo",
+            acceptance_criteria=[],
+        )
+    )
+    db_session.commit()
+
+    fake_result = SpecPlanResult(
+        schema_version="1.0",
+        acceptance_criteria=["Does the thing"],
+        plan="Do the thing.",
+        files=[],
+        tests=[],
+        risk="low",
+    )
+
+    with patch(
+        "app.services.spec_plan_generator.generate_spec_plan",
+        new=AsyncMock(return_value=(fake_result, [])),
+    ) as mock_generate:
+        result = await CommandRouter(db_session).execute(
+            "generate_spec_plan", "TASK-SPEC-AUTO", "session-1"
+        )
+
+    assert result["action"] == "spec_plan_generated"
+    used_agent = mock_generate.call_args.args[2]
+    assert used_agent.id == "@auto-spec-agent"
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_errors_when_no_suitable_agent_found(db_session):
+    """CTV2-109: no capable agent configured -> a clear error, no LLM call,
+    and no fallback to an unconfigured provider."""
+    from app.db.models import Agent, Project, Task
+
+    db_session.add(Project(id="proj-spec-none", name="No Agent Spec Project", repo_root="/tmp"))
+    db_session.add(
+        Agent(
+            id="@plain-executor-2",
+            name="Plain Executor",
+            role="executor",
+            cli="codex",
+            capabilities=["python"],
+        )
+    )
+    db_session.add(
+        Task(
+            id="TASK-SPEC-NONE",
+            project="proj-spec-none",
             title="Needs a spec",
             status="todo",
             acceptance_criteria=[],
@@ -1060,19 +1127,16 @@ async def test_generate_spec_plan_supervised_mode_returns_pending_gate(db_sessio
 
     with patch(
         "app.services.spec_plan_generator.generate_spec_plan",
-        new=AsyncMock(side_effect=AssertionError("LLM must not be called in supervised mode")),
+        new=AsyncMock(side_effect=AssertionError("LLM must not be called with no suitable agent")),
     ):
         result = await CommandRouter(db_session).execute(
-            "generate_spec_plan", "TASK-SPEC-SUP", "session-1"
+            "generate_spec_plan", "TASK-SPEC-NONE", "session-1"
         )
 
-    assert result["action"] == "spec_plan_model_pending"
-    assert result["status"] == "pending"
-    assert "gate_record_id" in result
+    assert "error" in result
 
-    task = db_session.get(Task, "TASK-SPEC-SUP")
+    task = db_session.get(Task, "TASK-SPEC-NONE")
     assert task.acceptance_criteria == []
-    assert task.awaiting_approval is True
 
 
 @pytest.mark.asyncio

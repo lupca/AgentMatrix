@@ -1,4 +1,7 @@
+import pytest
+
 from app.db.models import Agent, AgentRun, Task
+from app.services.agent_suggester import AgentSuggester
 
 
 def test_suggested_agents_are_ranked_by_skills_and_performance(client, db_session):
@@ -93,3 +96,78 @@ def test_suggested_agents_consider_similar_run_outcomes(client, db_session):
 
     assert response.status_code == 200
     assert response.json()[0]["agent_id"] == good.id
+
+
+def test_agent_suggester_executor_role_has_no_capability_filter(db_session):
+    db_session.add(
+        Agent(
+            id="@plain-executor",
+            name="Plain Executor",
+            role="executor",
+            capabilities=["python"],
+            status="idle",
+        )
+    )
+    task = Task(id="SUGGEST-001", project="backend", title="Python task", tags=["python"])
+    db_session.add(task)
+    db_session.commit()
+
+    suggestions = AgentSuggester(db_session).suggest(task, role="executor", top_n=3)
+
+    assert [s.agent_id for s in suggestions] == ["@plain-executor"]
+
+
+def test_agent_suggester_spec_plan_role_filters_by_capability(db_session):
+    db_session.add_all(
+        [
+            Agent(
+                id="@coordinator-agent",
+                name="Coordinator Agent",
+                role="coordinator",
+                capabilities=["coordinator"],
+                status="idle",
+            ),
+            Agent(
+                id="@plain-executor-2",
+                name="Plain Executor",
+                role="executor",
+                capabilities=["python"],
+                status="idle",
+            ),
+        ]
+    )
+    task = Task(id="SUGGEST-002", project="backend", title="Spec/plan task")
+    db_session.add(task)
+    db_session.commit()
+
+    suggestions = AgentSuggester(db_session).suggest(task, role="spec_plan", top_n=3)
+
+    assert [s.agent_id for s in suggestions] == ["@coordinator-agent"]
+
+
+def test_agent_suggester_returns_empty_when_no_capable_agent(db_session):
+    db_session.add(
+        Agent(
+            id="@plain-executor-3",
+            name="Plain Executor",
+            role="executor",
+            capabilities=["python"],
+            status="idle",
+        )
+    )
+    task = Task(id="SUGGEST-003", project="backend", title="Spec/plan task")
+    db_session.add(task)
+    db_session.commit()
+
+    suggestions = AgentSuggester(db_session).suggest(task, role="spec_plan", top_n=1)
+
+    assert suggestions == []
+
+
+def test_agent_suggester_rejects_unknown_role(db_session):
+    task = Task(id="SUGGEST-004", project="backend", title="Task")
+    db_session.add(task)
+    db_session.commit()
+
+    with pytest.raises(ValueError):
+        AgentSuggester(db_session).suggest(task, role="bogus")

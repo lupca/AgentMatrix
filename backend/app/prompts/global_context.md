@@ -27,7 +27,11 @@ it has not:
 1. **Spec Gate** — a new task needs a clear title and acceptance criteria
    before it is ready for execution.
 2. **Plan Gate** — the task needs an explicit, step-by-step plan and the
-   required files, tests, and dependencies where applicable.
+   required files, tests, and dependencies where applicable. Use
+   `generate_spec_plan(task_id, [agent_id])` to run this in one call: it
+   auto-suggests a capable agent when `agent_id` is omitted and writes the
+   acceptance criteria/plan directly onto the task, no separate model-approval
+   step required.
 3. **Dispatch Gate** — an executor is assigned and the task moves to
    `dispatched`; do not claim dispatch succeeded unless the tool confirms it.
 4. **Review-Order Gate** — completed work requires an independent reviewer;

@@ -56,7 +56,13 @@ class AgentMatcher:
     def __init__(self, db: Session):
         self.db = db
 
-    def suggest_agents(self, task: Task, top_n: int = 3) -> list[AgentSuggestion]:
+    def suggest_agents(
+        self,
+        task: Task,
+        top_n: int = 3,
+        *,
+        required_capabilities: set[str] | None = None,
+    ) -> list[AgentSuggestion]:
         if top_n <= 0:
             return []
 
@@ -65,6 +71,12 @@ class AgentMatcher:
             .filter(Agent.status.notin_(_UNAVAILABLE_STATUSES))
             .all()
         )
+        if required_capabilities:
+            agents = [
+                agent
+                for agent in agents
+                if set(agent.capabilities or []) & required_capabilities
+            ]
         if not agents:
             return []
 

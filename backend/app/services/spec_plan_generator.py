@@ -12,7 +12,7 @@ import json
 
 from pydantic import ValidationError
 
-from app.db.models import Task
+from app.db.models import Agent, Task
 from app.schemas.task import SPEC_PLAN_RESULT_SCHEMA_VERSION, SpecPlanResult
 from app.services.graph_client import get_affected_flows, semantic_search
 from app.services.llm_service import ConfigurationError, LLMService
@@ -61,15 +61,19 @@ def _parse_json(content: str) -> dict:
 
 
 async def generate_spec_plan(
-    task: Task, repo_root: str | None, model_config: dict | None = None
+    task: Task, repo_root: str | None, agent: Agent
 ) -> tuple[SpecPlanResult, list[str]]:
     """Call the LLM once (with one retry on schema mismatch) and ground its
     file claims and flows in the code graph. Returns (result, flows).
 
-    ``model_config`` (as returned by
-    ``TaskOrchestrationService.resolve_spec_plan_model``) must include the
-    resolved ``Agent`` object. There is deliberately no environment fallback.
+    ``agent`` is the resolved ``Agent`` to run generation with. There is
+    deliberately no environment fallback: callers must resolve an agent
+    (e.g. via ``AgentSuggester``) before calling this.
     """
+    if agent is None:
+        raise ConfigurationError(
+            "Spec/plan generation requires an explicitly configured agent."
+        )
 
     graph_candidates: list[str] = []
     if repo_root:
@@ -86,14 +90,7 @@ async def generate_spec_plan(
         except Exception:
             graph_candidates = []
 
-    model_config = model_config or {}
-    agent = model_config.get("agent")
-    if agent is None:
-        raise ConfigurationError(
-            "Spec/plan generation requires an explicitly configured agent."
-        )
     llm = LLMService()
-    selected_model = model_config.get("model")
     retry_reason: str | None = None
     result: SpecPlanResult | None = None
     last_error: Exception | None = None
@@ -103,7 +100,6 @@ async def generate_spec_plan(
         response = await llm.complete(
             agent,
             [{"role": "user", "content": prompt}],
-            model=selected_model,
             max_tokens=1200,
             temperature=0.3,
         )

@@ -244,7 +244,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             ),
             parameters={
                 "type": "object",
-                "properties": {"task_id": {"type": "string"}},
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "agent_id": {
+                        "type": "string",
+                        "description": (
+                            "Agent to generate the spec/plan; auto-suggested "
+                            "if omitted."
+                        ),
+                    },
+                },
                 "required": ["task_id"],
             },
             handler="generate_spec_plan",
