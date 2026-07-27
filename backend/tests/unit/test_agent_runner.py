@@ -17,7 +17,7 @@ FIXTURES = Path(__file__).parents[1] / "fixtures" / "review_results"
 
 
 @pytest.fixture
-def worker_db(monkeypatch):
+def worker_db(monkeypatch, git_repo_root):
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -26,7 +26,7 @@ def worker_db(monkeypatch):
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     db = factory()
-    db.add(Project(id="project", name="Project", repo_root="/tmp"))
+    db.add(Project(id="project", name="Project", repo_root=git_repo_root))
     db.add(
         Task(
             id="RUN-001",
@@ -98,12 +98,13 @@ def test_missing_run_is_discarded(worker_db):
     assert runner.run_agent.fn("missing", "RUN-001", "echo test", "/tmp", 5) is None
 
 
-def test_run_agent_persists_output_and_success(worker_db):
+def test_run_agent_persists_output_and_success(worker_db, git_repo_root):
     result = runner.run_agent.fn(
         "run-001",
         "RUN-001",
-        "printf 'first\\nsecond\\n'",
-        "/tmp",
+        "printf 'first\\nsecond\\n' && echo change > change.txt "
+        "&& git add change.txt && git commit -q -m change",
+        git_repo_root,
         5,
     )
 
@@ -115,18 +116,65 @@ def test_run_agent_persists_output_and_success(worker_db):
     assert run.output_lines == 2
     assert run.output_bytes == len("firstsecond")
     assert [chunk.content for chunk in run.output_chunks] == ["first\nsecond"]
-    assert db.get(Task, "RUN-001").status == "awaiting-review"
+    task = db.get(Task, "RUN-001")
+    assert task.status == "awaiting-review"
+    base, sep, head = run.result_ref.partition("..")
+    assert sep == ".."
+    assert base and head and base != head
+    assert task.result_ref == run.result_ref
     db.close()
 
 
-def test_output_rolls_over_to_multiple_chunks(worker_db, monkeypatch):
+def test_run_without_commit_marks_no_changes_and_does_not_advance(worker_db, git_repo_root):
+    result = runner.run_agent.fn(
+        "run-001",
+        "RUN-001",
+        "printf 'first\\nsecond\\n'",
+        git_repo_root,
+        5,
+    )
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    task = db.get(Task, "RUN-001")
+    assert result == 0
+    assert run.status == "failed"
+    assert "without committed changes" in run.error_message
+    assert task.status == "failed"
+    assert task.result_ref is None
+    db.close()
+
+
+def test_explicit_result_ref_outside_range_is_rejected(worker_db, git_repo_root):
+    # The executor claims a ref that isn't reachable from base..head — must
+    # not be trusted even though a real commit did land on HEAD.
+    result = runner.run_agent.fn(
+        "run-001",
+        "RUN-001",
+        "echo change > change.txt && git add change.txt && git commit -q -m change "
+        "&& echo 'result_ref: deadbeef'",
+        git_repo_root,
+        5,
+    )
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    task = db.get(Task, "RUN-001")
+    assert result == 0
+    assert run.status == "failed"
+    assert "outside the actual base..head range" in run.error_message
+    assert task.status == "failed"
+    db.close()
+
+
+def test_output_rolls_over_to_multiple_chunks(worker_db, monkeypatch, git_repo_root):
     monkeypatch.setattr(runner, "OUTPUT_CHUNK_LINES", 1)
 
     runner.run_agent.fn(
         "run-001",
         "RUN-001",
         "printf 'first\\nsecond\\n'",
-        "/tmp",
+        git_repo_root,
         5,
     )
 
@@ -138,7 +186,7 @@ def test_output_rolls_over_to_multiple_chunks(worker_db, monkeypatch):
     db.close()
 
 
-def test_failed_agent_is_queued_for_retry(worker_db, monkeypatch):
+def test_failed_agent_is_queued_for_retry(worker_db, monkeypatch, git_repo_root):
     manager = MagicMock()
     manager.pid = 123
     manager.run_with_streaming.return_value = iter(
@@ -147,7 +195,7 @@ def test_failed_agent_is_queued_for_retry(worker_db, monkeypatch):
     monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
 
     with pytest.raises(runner.AgentExecutionError):
-        runner.run_agent.fn("run-001", "RUN-001", "exit 2", "/tmp", 5)
+        runner.run_agent.fn("run-001", "RUN-001", "exit 2", git_repo_root, 5)
 
     db = worker_db()
     run = db.get(AgentRun, "run-001")
@@ -156,7 +204,7 @@ def test_failed_agent_is_queued_for_retry(worker_db, monkeypatch):
     db.close()
 
 
-def test_timeout_is_terminal_and_not_retried(worker_db, monkeypatch):
+def test_timeout_is_terminal_and_not_retried(worker_db, monkeypatch, git_repo_root):
     manager = MagicMock()
     manager.pid = 123
     manager.run_with_streaming.return_value = iter(
@@ -164,7 +212,7 @@ def test_timeout_is_terminal_and_not_retried(worker_db, monkeypatch):
     )
     monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
 
-    result = runner.run_agent.fn("run-001", "RUN-001", "sleep 60", "/tmp", 1)
+    result = runner.run_agent.fn("run-001", "RUN-001", "sleep 60", git_repo_root, 1)
 
     db = worker_db()
     run = db.get(AgentRun, "run-001")
@@ -174,29 +222,29 @@ def test_timeout_is_terminal_and_not_retried(worker_db, monkeypatch):
     db.close()
 
 
-def test_empty_process_stream_becomes_retryable_failure(worker_db, monkeypatch):
+def test_empty_process_stream_becomes_retryable_failure(worker_db, monkeypatch, git_repo_root):
     manager = MagicMock()
     manager.run_with_streaming.return_value = iter([])
     monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
 
     with pytest.raises(runner.AgentExecutionError, match="without a result"):
-        runner.run_agent.fn("run-001", "RUN-001", "test", "/tmp", 5)
+        runner.run_agent.fn("run-001", "RUN-001", "test", git_repo_root, 5)
 
 
-def test_unexpected_error_is_retried(worker_db, monkeypatch):
+def test_unexpected_error_is_retried(worker_db, monkeypatch, git_repo_root):
     manager = MagicMock()
     manager.run_with_streaming.side_effect = RuntimeError("unexpected")
     monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
 
     with pytest.raises(RuntimeError, match="unexpected"):
-        runner.run_agent.fn("run-001", "RUN-001", "test", "/tmp", 5)
+        runner.run_agent.fn("run-001", "RUN-001", "test", git_repo_root, 5)
 
     db = worker_db()
     assert db.get(AgentRun, "run-001").status == "queued"
     db.close()
 
 
-def test_unexpected_error_on_last_attempt_is_terminal(worker_db, monkeypatch):
+def test_unexpected_error_on_last_attempt_is_terminal(worker_db, monkeypatch, git_repo_root):
     db = worker_db()
     run = db.get(AgentRun, "run-001")
     run.max_attempts = 1
@@ -206,7 +254,7 @@ def test_unexpected_error_on_last_attempt_is_terminal(worker_db, monkeypatch):
     manager.run_with_streaming.side_effect = RuntimeError("terminal")
     monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
 
-    assert runner.run_agent.fn("run-001", "RUN-001", "test", "/tmp", 5) is None
+    assert runner.run_agent.fn("run-001", "RUN-001", "test", git_repo_root, 5) is None
 
     db = worker_db()
     assert db.get(AgentRun, "run-001").status == "failed"
@@ -253,6 +301,63 @@ def test_parse_result_ref_handles_spawn_error(monkeypatch):
     )
 
     assert runner._parse_result_ref("/tmp") is None
+
+
+def _commit_change(repo_root: str, message: str = "change") -> None:
+    path = Path(repo_root) / f"{message}.txt"
+    path.write_text(message)
+    subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", message], cwd=repo_root, check=True)
+
+
+def test_build_execution_result_ref_returns_base_head_range(git_repo_root):
+    base = runner._parse_result_ref(git_repo_root)
+    _commit_change(git_repo_root)
+
+    result_ref, error = runner._build_execution_result_ref(git_repo_root, base)
+
+    assert error is None
+    assert result_ref == f"{base}..{runner._parse_result_ref(git_repo_root)}"
+
+
+def test_build_execution_result_ref_flags_no_committed_changes(git_repo_root):
+    base = runner._parse_result_ref(git_repo_root)
+
+    result_ref, error = runner._build_execution_result_ref(git_repo_root, base)
+
+    assert result_ref is None
+    assert "without committed changes" in error
+
+
+def test_build_execution_result_ref_warns_on_dirty_repo(git_repo_root, monkeypatch):
+    # Assert on the logger call directly rather than via caplog: some tests in
+    # the wider suite invoke Alembic's fileConfig, which disables loggers not
+    # named in alembic.ini and would otherwise silently swallow this warning.
+    warning = MagicMock()
+    monkeypatch.setattr(runner.logger, "warning", warning)
+    base = runner._parse_result_ref(git_repo_root)
+    _commit_change(git_repo_root)
+    (Path(git_repo_root) / "untracked.txt").write_text("dirty")
+
+    result_ref, error = runner._build_execution_result_ref(git_repo_root, base)
+
+    assert error is None
+    assert result_ref is not None
+    assert warning.call_count == 1
+    assert "uncommitted changes" in warning.call_args.args[0]
+
+
+def test_run_base_ref_recovers_baseline_from_pending_range():
+    assert runner._run_base_ref("abc123..") == "abc123"
+    assert runner._run_base_ref("abc123..def456") == "abc123"
+    assert runner._run_base_ref(None) is None
+    assert runner._run_base_ref("no-range-here") is None
+
+
+def test_extract_explicit_result_ref_matches_convention():
+    assert runner._extract_explicit_result_ref("result_ref: abc123") == "abc123"
+    assert runner._extract_explicit_result_ref("Result Reference: def456") == "def456"
+    assert runner._extract_explicit_result_ref("just some output") is None
 
 
 @pytest.mark.parametrize(

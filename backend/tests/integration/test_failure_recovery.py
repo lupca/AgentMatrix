@@ -9,10 +9,11 @@ import app.workers.agent_runner as runner
 from app.db.base import Base
 from app.db.models import AgentRun, Project, Task
 from app.services.process_manager import ProcessResult, ProcessStatus
+from tests.conftest import commit_change
 
 
 @pytest.fixture
-def recovery_db(monkeypatch):
+def recovery_db(monkeypatch, git_repo_root):
     engine = create_engine(
         "sqlite://",
         connect_args={"check_same_thread": False},
@@ -21,7 +22,7 @@ def recovery_db(monkeypatch):
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     db = factory()
-    db.add(Project(id="recovery", name="Recovery", repo_root="/tmp"))
+    db.add(Project(id="recovery", name="Recovery", repo_root=git_repo_root))
     db.add(
         Task(
             id="T-RECOVERY",
@@ -58,7 +59,9 @@ def process_manager_for(result):
     return manager
 
 
-def test_failed_agent_retries_until_third_attempt_succeeds(recovery_db, monkeypatch):
+def test_failed_agent_retries_until_third_attempt_succeeds(
+    recovery_db, monkeypatch, git_repo_root
+):
     managers = [
         process_manager_for([ProcessResult(ProcessStatus.FAILED, 1, "failure 1")]),
         process_manager_for([ProcessResult(ProcessStatus.FAILED, 1, "failure 2")]),
@@ -69,10 +72,13 @@ def test_failed_agent_retries_until_third_attempt_succeeds(recovery_db, monkeypa
     monkeypatch.setattr(runner, "ProcessManager", MagicMock(side_effect=managers))
 
     with pytest.raises(runner.AgentExecutionError):
-        runner.run_agent.fn("recover-run", "T-RECOVERY", "test", "/tmp", 10)
+        runner.run_agent.fn("recover-run", "T-RECOVERY", "test", git_repo_root, 10)
     with pytest.raises(runner.AgentExecutionError):
-        runner.run_agent.fn("recover-run", "T-RECOVERY", "test", "/tmp", 10)
-    assert runner.run_agent.fn("recover-run", "T-RECOVERY", "test", "/tmp", 10) == 0
+        runner.run_agent.fn("recover-run", "T-RECOVERY", "test", git_repo_root, 10)
+    # The mocked ProcessManager never touches the filesystem, so simulate the
+    # executor having actually committed on the third, successful attempt.
+    commit_change(git_repo_root)
+    assert runner.run_agent.fn("recover-run", "T-RECOVERY", "test", git_repo_root, 10) == 0
 
     db = recovery_db()
     run = db.get(AgentRun, "recover-run")
@@ -82,13 +88,13 @@ def test_failed_agent_retries_until_third_attempt_succeeds(recovery_db, monkeypa
     db.close()
 
 
-def test_timeout_does_not_retry(recovery_db, monkeypatch):
+def test_timeout_does_not_retry(recovery_db, monkeypatch, git_repo_root):
     manager = process_manager_for(
         [ProcessResult(ProcessStatus.TIMEOUT, -1, "Timeout")]
     )
     monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
 
-    runner.run_agent.fn("recover-run", "T-RECOVERY", "sleep 999", "/tmp", 1)
+    runner.run_agent.fn("recover-run", "T-RECOVERY", "sleep 999", git_repo_root, 1)
 
     db = recovery_db()
     run = db.get(AgentRun, "recover-run")
@@ -97,7 +103,7 @@ def test_timeout_does_not_retry(recovery_db, monkeypatch):
     db.close()
 
 
-def test_redelivered_running_run_recovers_after_worker_restart(recovery_db):
+def test_redelivered_running_run_recovers_after_worker_restart(recovery_db, git_repo_root):
     db = recovery_db()
     run = db.get(AgentRun, "recover-run")
     run.status = "running"
@@ -109,8 +115,9 @@ def test_redelivered_running_run_recovers_after_worker_restart(recovery_db):
     runner.run_agent.fn(
         "recover-run",
         "T-RECOVERY",
-        "echo recovered",
-        "/tmp",
+        "echo recovered > recovered.txt && git add recovered.txt "
+        "&& git commit -q -m recovered",
+        git_repo_root,
         5,
     )
 
