@@ -673,6 +673,7 @@ class TaskOrchestrationService:
         self.db.commit()
         self.db.refresh(task)
         self.db.refresh(record)
+        self.db.refresh(run)
         return TransitionResult(task, record, True, agent_run=run)
 
     def update_task_fields(

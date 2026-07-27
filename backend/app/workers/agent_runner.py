@@ -346,6 +346,13 @@ def run_agent(
                 exec_cwd,
             )
         run.result_ref = f"{base_ref}.."
+        # Check if run was cancelled while we were preparing
+        db.refresh(run)
+        if run.status == "cancelled":
+            logger.info("Run %s was cancelled before execution started", run_id)
+            _nudge_driver(task_id, "run_agent_completed")
+            return None
+        run.status = "running"  # Re-set after refresh
         db.commit()
 
         def record_pid(pid: int) -> None:
