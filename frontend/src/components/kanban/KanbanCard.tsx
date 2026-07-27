@@ -1,5 +1,6 @@
 import React from 'react';
 import { Task, TaskStatus } from '../../types/task';
+import { Link } from 'react-router-dom';
 import { Bot, UserCheck, AlertTriangle, ChevronRight, ChevronLeft, ShieldAlert } from 'lucide-react';
 
 interface KanbanCardProps {
@@ -81,9 +82,9 @@ export const KanbanCard: React.FC<KanbanCardProps> = ({ task, onStatusChange }) 
       {/* Top Header Row */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center space-x-2">
-          <span className="font-mono text-xs font-bold text-indigo-400 bg-indigo-950/80 px-2 py-0.5 rounded border border-indigo-800/40">
+          <Link to={`/tasks/${task.id}`} className="font-mono text-xs font-bold text-indigo-400 bg-indigo-950/80 px-2 py-0.5 rounded border border-indigo-800/40 hover:bg-indigo-900/80 transition-colors">
             {task.id}
-          </span>
+          </Link>
           <span className="text-[11px] font-medium text-gray-400 bg-gray-950 px-2 py-0.5 rounded border border-gray-800">
             {task.project}
           </span>
@@ -92,9 +93,11 @@ export const KanbanCard: React.FC<KanbanCardProps> = ({ task, onStatusChange }) 
       </div>
 
       {/* Title */}
-      <h4 className="text-sm font-semibold text-gray-100 group-hover:text-indigo-200 transition-colors line-clamp-2">
-        {task.title}
-      </h4>
+      <Link to={`/tasks/${task.id}`} className="block">
+        <h4 className="text-sm font-semibold text-gray-100 group-hover:text-indigo-200 transition-colors line-clamp-2">
+          {task.title}
+        </h4>
+      </Link>
 
       {/* Approval Warning Banner */}
       {task.awaiting_approval && (

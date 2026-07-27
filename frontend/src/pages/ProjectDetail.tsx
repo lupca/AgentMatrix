@@ -17,7 +17,9 @@ import {
   Cpu,
   Calendar,
   ExternalLink,
+  Settings,
 } from 'lucide-react';
+import { ProjectSettingsModal } from '../components/projects/ProjectSettingsModal';
 
 export const ProjectDetailPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -30,6 +32,7 @@ export const ProjectDetailPage: React.FC = () => {
 
   const [search, setSearch] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const fetchProjectDetail = useCallback(async () => {
     if (!id) return;
@@ -61,6 +64,16 @@ export const ProjectDetailPage: React.FC = () => {
   useEffect(() => {
     fetchProjectDetail();
   }, [fetchProjectDetail]);
+
+  const handleSaveSettings = async (updatedProject: Partial<Project>) => {
+    if (!id) return;
+    try {
+      const result = await api.patch<Project>(`/projects/${id}`, updatedProject);
+      setProject(result);
+    } catch (err: any) {
+      throw new Error(err.message || 'Failed to update project');
+    }
+  };
 
   // Filter tasks
   const filteredTasks = tasks.filter((t) => {
@@ -177,6 +190,13 @@ export const ProjectDetailPage: React.FC = () => {
               <div className="flex items-center gap-3 text-xs text-gray-400">
                 <Calendar className="w-4 h-4 text-gray-500" />
                 <span>Created: {new Date(project?.created_at || Date.now()).toLocaleDateString()}</span>
+                <button
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="ml-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  <span>Settings</span>
+                </button>
               </div>
             </div>
 
@@ -352,7 +372,7 @@ export const ProjectDetailPage: React.FC = () => {
                     </td>
                     <td className="p-3 text-right whitespace-nowrap">
                       <Link
-                        to="/tasks"
+                        to={`/tasks/${task.id}`}
                         className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 font-medium"
                       >
                         <span>View</span>
@@ -366,6 +386,15 @@ export const ProjectDetailPage: React.FC = () => {
           </div>
         )}
       </div>
+      
+      {project && (
+        <ProjectSettingsModal
+          project={project}
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          onSave={handleSaveSettings}
+        />
+      )}
     </div>
   );
 };
