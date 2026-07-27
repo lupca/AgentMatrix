@@ -1,6 +1,7 @@
 import re
 import hashlib
 import json
+import os
 from collections.abc import Mapping
 from typing import Any, Tuple, Optional
 from app.db.models import (
@@ -26,6 +27,10 @@ from app.services.tool_registry import (
     dump_registry,
     get_group_tool_definitions,
     resolve_tool_name,
+)
+from app.services.graph_client import (
+    get_impact_radius as graph_get_impact_radius,
+    semantic_search,
 )
 
 # query_db (ADR-001 §D2): entity + filter-field whitelist, and a compact
@@ -295,6 +300,19 @@ class CommandRouter:
             if not group:
                 return {'error': 'group is required'}
             command_args = group
+        elif canonical_name == 'get_minimal_context':
+            query = str(args.get('query', '')).strip()
+            if not query:
+                return {'error': 'query is required'}
+            command_args = json.dumps({
+                'query': query,
+                'limit': args.get('limit', 10),
+            }, ensure_ascii=False)
+        elif canonical_name == 'get_impact_radius':
+            file = str(args.get('file', '')).strip()
+            if not file:
+                return {'error': 'file is required'}
+            command_args = file
         else:
             return {'error': f'Unknown tool: {tool_name}'}
 
@@ -318,6 +336,58 @@ class CommandRouter:
             'group': group,
             'loaded': [tool['name'] for tool in definitions],
         }
+
+    def _research_repo_root(self, session_id: str) -> tuple[str | None, dict | None]:
+        """Resolve the project repository from persisted session scope."""
+        session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
+        project_id = session.project_id if session else None
+        if session and session.task_id:
+            task = self.db.query(Task).filter(Task.id == session.task_id).first()
+            project_id = task.project if task else project_id
+        if not project_id:
+            return None, {'status': 'error', 'reason': 'research_requires_project_scope',
+                          'suggestion': 'Use a project- or task-scoped session.'}
+        project = self.db.query(Project).filter(Project.id == project_id).first()
+        if not project or not project.repo_root:
+            return None, {'status': 'error', 'reason': 'project_repo_root_not_configured',
+                          'project_id': project_id,
+                          'suggestion': 'Configure Project.repo_root before using research tools.'}
+        return os.path.abspath(project.repo_root), None
+
+    @staticmethod
+    def _research_error(exc: Exception) -> dict:
+        return {
+            'status': 'error',
+            'reason': 'graph_unavailable',
+            'detail': str(exc),
+            'suggestion': 'Build or refresh the code graph, then retry the research tool.',
+        }
+
+    async def _handle_get_minimal_context(self, args: str, session_id: str) -> dict:
+        repo_root, error = self._research_repo_root(session_id)
+        if error:
+            return error
+        try:
+            payload = json.loads(args)
+            result = await semantic_search(
+                repo_root, str(payload['query']), int(payload.get('limit', 10)),
+                raise_on_error=True, compress_output=True,
+            )
+        except Exception as exc:
+            return self._research_error(exc)
+        return {'status': 'success', 'repo_root': repo_root, 'context': result}
+
+    async def _handle_get_impact_radius(self, args: str, session_id: str) -> dict:
+        repo_root, error = self._research_repo_root(session_id)
+        if error:
+            return error
+        try:
+            result = await graph_get_impact_radius(
+                repo_root, args.strip(), raise_on_error=True, compress_output=True,
+            )
+        except Exception as exc:
+            return self._research_error(exc)
+        return {'status': 'success', 'repo_root': repo_root, 'files': result}
 
     async def _handle_query_db(self, args: str, session_id: str) -> dict:
         parts = args.strip().split()

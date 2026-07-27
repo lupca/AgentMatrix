@@ -10,6 +10,10 @@ DEFAULT_TTL = 300.0  # 5 minutes in seconds
 DEFAULT_TIMEOUT = 30.0
 
 
+class GraphClientError(RuntimeError):
+    """Raised when a graph query could not be completed."""
+
+
 class TTLCache:
     """In-memory TTL cache for graph queries."""
 
@@ -55,6 +59,7 @@ async def get_impact_radius(
     timeout: float = DEFAULT_TIMEOUT,
     use_cache: bool = True,
     compress_output: bool = False,
+    raise_on_error: bool = False,
 ) -> Union[List[str], str]:
     """Get files affected by changes to given file.
 
@@ -62,7 +67,7 @@ async def get_impact_radius(
         compress_output: If True, return compressed string for prompt usage.
     """
     cache_key = _make_cache_key("get_impact_radius", repo_root, file=file)
-    if use_cache:
+    if use_cache and not raise_on_error:
         cached = graph_cache.get(cache_key)
         if cached is not None:
             return compress_for_prompt(cached) if compress_output else cached
@@ -94,11 +99,17 @@ async def get_impact_radius(
         elif isinstance(raw, list):
             result = [str(item) for item in raw]
 
-        if use_cache:
+        if use_cache and raw is not None:
             graph_cache.set(cache_key, result)
+        if raise_on_error and raw is None:
+            raise GraphClientError("MCP returned no response; graph may not be built")
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("get_impact_radius failed with fallback to []: %s", e)
+        if raise_on_error:
+            if isinstance(e, GraphClientError):
+                raise
+            raise GraphClientError(str(e)) from e
         return compress_for_prompt([]) if compress_output else []
 
 
@@ -109,6 +120,7 @@ async def semantic_search(
     timeout: float = DEFAULT_TIMEOUT,
     use_cache: bool = True,
     compress_output: bool = False,
+    raise_on_error: bool = False,
 ) -> Union[List[Dict[str, Any]], str]:
     """Search nodes by semantic similarity.
 
@@ -116,7 +128,7 @@ async def semantic_search(
         compress_output: If True, return compressed string for prompt usage.
     """
     cache_key = _make_cache_key("semantic_search", repo_root, query=query, limit=limit)
-    if use_cache:
+    if use_cache and not raise_on_error:
         cached = graph_cache.get(cache_key)
         if cached is not None:
             return compress_for_prompt(cached) if compress_output else cached
@@ -140,11 +152,17 @@ async def semantic_search(
             else:
                 result = [raw]
 
-        if use_cache:
+        if use_cache and raw is not None:
             graph_cache.set(cache_key, result)
+        if raise_on_error and raw is None:
+            raise GraphClientError("MCP returned no response; graph may not be built")
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("semantic_search failed with fallback to []: %s", e)
+        if raise_on_error:
+            if isinstance(e, GraphClientError):
+                raise
+            raise GraphClientError(str(e)) from e
         return compress_for_prompt([]) if compress_output else []
 
 

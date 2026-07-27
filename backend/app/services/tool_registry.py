@@ -37,7 +37,7 @@ class ToolSpec:
 # Deferred-tool groups loadable via the ``load_tools`` meta-tool (ADR-001
 # §D3). "admin" has no members yet (Phase 2c) but is listed so the schema
 # enum and system-prompt hint stay accurate ahead of that work.
-DEFERRED_GROUPS: tuple[str, ...] = ("task_lifecycle", "admin", "session")
+DEFERRED_GROUPS: tuple[str, ...] = ("task_lifecycle", "admin", "session", "research")
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
@@ -392,13 +392,52 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="task_lifecycle",
         ),
         ToolSpec(
+            name="get_minimal_context",
+            description=(
+                "Read-only semantic search over the project's code graph and "
+                "return compact context relevant to a query."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Code or task context to find."},
+                    "limit": {"type": "integer", "default": 10, "description": "Maximum matching nodes."},
+                },
+                "required": ["query"],
+            },
+            handler="get_minimal_context",
+            tier="deferred",
+            permission="read",
+            entity="research",
+            slash_alias=None,
+            group="research",
+        ),
+        ToolSpec(
+            name="get_impact_radius",
+            description="Read-only list of files affected by changing a project file.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string", "description": "Project-relative file path."},
+                },
+                "required": ["file"],
+            },
+            handler="get_impact_radius",
+            tier="deferred",
+            permission="read",
+            entity="research",
+            slash_alias=None,
+            group="research",
+        ),
+        ToolSpec(
             name="load_tools",
             description=(
                 "Load additional tool schemas for the rest of this turn. Call "
                 "this before using a tool that isn't in the baseline set. "
                 "Groups: task_lifecycle (dispatch_task, record_verdict, "
                 "approve_gate, cancel_task), admin (project/agent/knowledge/"
-                "settings management), session (compact_context)."
+                "settings management), session (compact_context), research "
+                "(get_minimal_context, get_impact_radius)."
             ),
             parameters={
                 "type": "object",
