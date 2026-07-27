@@ -50,4 +50,34 @@ describe('parseThinkingContent', () => {
       isThinking: false,
     });
   });
+
+  it('parses closed <thinking>...</thinking> tags (DeepSeek style)', () => {
+    const input = '<thinking>Let me analyze this step by step.</thinking>\n\nThe result is 42.';
+    const result = parseThinkingContent(input);
+    expect(result).toEqual({
+      thinkingContent: 'Let me analyze this step by step.',
+      finalContent: 'The result is 42.',
+      isThinking: false,
+    });
+  });
+
+  it('handles unclosed <thinking>... tags during streaming', () => {
+    const input = '<thinking>Processing the request';
+    const result = parseThinkingContent(input);
+    expect(result).toEqual({
+      thinkingContent: 'Processing the request',
+      finalContent: '',
+      isThinking: true,
+    });
+  });
+
+  it('handles mixed <think> and <thinking> tags', () => {
+    const input = '<think>First thought</think> text <thinking>Second thought</thinking> final';
+    const result = parseThinkingContent(input);
+    expect(result).toEqual({
+      thinkingContent: 'First thoughtSecond thought',
+      finalContent: 'text  final',
+      isThinking: false,
+    });
+  });
 });

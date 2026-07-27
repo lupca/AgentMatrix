@@ -5,8 +5,9 @@ export interface ThinkingParseResult {
 }
 
 /**
- * Parses <think>...</think> tags out of assistant response content.
- * Handles both closed <think>...</think> and unclosed <think>... (streaming) cases.
+ * Parses <think>...</think> and <thinking>...</thinking> tags out of assistant response content.
+ * Handles both closed tags and unclosed tags (streaming) cases.
+ * Some models (e.g., DeepSeek) use <thinking> while others use <think>.
  */
 export function parseThinkingContent(content: string): ThinkingParseResult {
   if (!content) {
@@ -17,14 +18,15 @@ export function parseThinkingContent(content: string): ThinkingParseResult {
     };
   }
 
-  const thinkRegex = /<think>([\s\S]*?)(?:<\/think>|$)/gi;
+  // Match both <think> and <thinking> tags
+  const thinkRegex = /<think(?:ing)?>([\s\S]*?)(?:<\/think(?:ing)?>|$)/gi;
   const thinkMatches: { text: string; closed: boolean }[] = [];
   let match: RegExpExecArray | null;
 
   while ((match = thinkRegex.exec(content)) !== null) {
     const fullMatch = match[0];
     const thinkInner = match[1];
-    const isClosed = fullMatch.toLowerCase().endsWith('</think>');
+    const isClosed = /<\/think(?:ing)?>$/i.test(fullMatch);
     thinkMatches.push({ text: thinkInner, closed: isClosed });
   }
 
@@ -38,7 +40,7 @@ export function parseThinkingContent(content: string): ThinkingParseResult {
 
   const thinkingContent = thinkMatches.map((m) => m.text).join('').trim();
   const finalContent = content
-    .replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, '')
+    .replace(/<think(?:ing)?>[\s\S]*?(?:<\/think(?:ing)?>|$)/gi, '')
     .trim();
 
   const isThinking = !thinkMatches[thinkMatches.length - 1].closed;

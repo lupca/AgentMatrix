@@ -166,7 +166,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
         isExpandedFull ? 'fixed inset-4 z-50 bg-gray-950 shadow-2xl rounded-2xl' : ''
       } ${className}`}
     >
-      <div className="w-[400px] flex flex-col min-h-0 min-w-0 bg-gray-950/40">
+      <div className={`flex flex-col min-h-0 min-w-0 bg-gray-950/40 ${isExpandedFull ? 'flex-1' : 'w-[400px]'}`}>
         <div className="px-4 py-2 bg-gray-950/90 border-b border-gray-800/80 flex items-center justify-between text-xs text-gray-400 shrink-0 select-none">
           <span className="font-mono text-indigo-400 font-semibold text-[11px] uppercase tracking-wider">
             Copilot Sidecar
