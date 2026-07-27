@@ -22,6 +22,7 @@ interface ChatPanelProps {
   onTaskAction?: () => Promise<void> | void;
   onClose?: () => void;
   className?: string;
+  fullHeight?: boolean;
   /** Context breadcrumb + session-tab props (all optional, from useSessions via ChatPanelManager). */
   contextLevel?: ContextLevel;
   projectName?: string | null;
@@ -41,6 +42,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onTaskAction,
   onClose,
   className = '',
+  fullHeight = false,
   contextLevel,
   projectName,
   sessions,
@@ -390,7 +392,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   };
 
   return (
-    <div className={`flex flex-col min-h-0 h-full max-h-[calc(100vh-200px)] bg-gray-900/90 border border-gray-800 rounded-2xl overflow-hidden shadow-2xl backdrop-blur-md ${className}`}>
+    <div className={`flex flex-col min-h-0 h-full ${fullHeight ? '' : 'max-h-[calc(100vh-200px)] rounded-2xl shadow-2xl border'} bg-gray-900/90 border-gray-800 overflow-hidden backdrop-blur-md ${className}`}>
       {/* Header */}
       <div className="px-4 py-3 bg-gray-950/80 border-b border-gray-800/80 flex items-center justify-between shrink-0 select-none">
         <div className="flex items-center space-x-2.5">
