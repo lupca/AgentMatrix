@@ -99,6 +99,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                             "sessions",
                             "knowledge",
                             "usage",
+                            "settings",
                         ],
                         "description": "Entity to query.",
                     },
@@ -330,6 +331,39 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="admin",
         ),
         ToolSpec(
+            name="update_settings",
+            description=(
+                "Update a whitelisted system setting (see query_db "
+                "entity=settings for readable keys). Admin-permission: in "
+                "supervised mode this creates a pending gate awaiting "
+                "/approve; in bypass mode it applies immediately. Rejects "
+                "keys outside the whitelist."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Setting key; must be on the whitelist.",
+                    },
+                    "value": {"description": "New value for the setting (any JSON type)."},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["supervised", "bypass"],
+                        "default": "supervised",
+                        "description": "Gate mode for this mutation.",
+                    },
+                },
+                "required": ["key", "value"],
+            },
+            handler="update_settings",
+            tier="deferred",
+            permission="admin",
+            entity="settings",
+            slash_alias=None,
+            group="admin",
+        ),
+        ToolSpec(
             name="update_task",
             description=(
                 "Edit a task's plan, acceptance criteria, priority, or tags. "
@@ -363,8 +397,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "Load additional tool schemas for the rest of this turn. Call "
                 "this before using a tool that isn't in the baseline set. "
                 "Groups: task_lifecycle (dispatch_task, record_verdict, "
-                "approve_gate, cancel_task), admin (project/agent/knowledge "
-                "management), session (compact_context)."
+                "approve_gate, cancel_task), admin (project/agent/knowledge/"
+                "settings management), session (compact_context)."
             ),
             parameters={
                 "type": "object",
@@ -441,6 +475,19 @@ def get_group_tool_definitions(group: str) -> list[dict[str, Any]] | None:
         if spec.tier == "deferred" and spec.group == group
     ]
     return to_openai_tools(deferred)
+
+
+def get_mcp_tool_specs() -> list[ToolSpec]:
+    """Tools exposed over the MCP projection for the coordinator chat CLI
+    (ADR-001 §D5).
+
+    MCP-connected CLIs manage their own context budget, so the eager/deferred
+    split that exists for the OpenAI tool loop doesn't apply here: every
+    registry tool is exposed except ``load_tools``, which is a mechanism
+    specific to that loop and meaningless over MCP.
+    """
+
+    return [spec for spec in TOOL_REGISTRY.values() if spec.name != "load_tools"]
 
 
 def dump_registry() -> list[dict[str, Any]]:

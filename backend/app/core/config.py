@@ -16,6 +16,13 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     GOOGLE_API_KEY: str = ""
 
+    # MCP projection (ADR-001 §D5): scoped token the mcp_server.py handlers
+    # use to authenticate against POST /api/mcp/tools/call, and the base URL
+    # the coordinator chat CLI's MCP subprocess reaches this API on. Empty
+    # token means the endpoint stays closed (fail-closed default).
+    MCP_API_TOKEN: str = ""
+    CT_API_URL: str = "http://localhost:8000"
+
     class Config:
         env_file = ".env"
         case_sensitive = True

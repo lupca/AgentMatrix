@@ -120,3 +120,43 @@ def test_session_invalid_context_level_value_constraint(db_session):
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
+
+
+def test_setting_key_is_primary_key_and_value_is_json(db_session):
+    from app.db.models import Setting
+
+    db_session.add(Setting(key="default_mode", value="supervised", description="desc"))
+    db_session.commit()
+
+    setting = db_session.get(Setting, "default_mode")
+    assert setting.value == "supervised"
+    assert setting.updated_at is not None
+
+
+def test_admin_gate_record_accepts_settings_entity(db_session):
+    from app.db.models import AdminGateRecord
+
+    record = AdminGateRecord(
+        entity="settings",
+        action="update",
+        entity_id="default_mode",
+        status="approved",
+        actor="system",
+        mode="bypass",
+        input_payload={"value": "supervised"},
+    )
+    db_session.add(record)
+    db_session.commit()
+
+    assert db_session.get(AdminGateRecord, record.id).entity == "settings"
+
+
+def test_admin_gate_record_rejects_unknown_entity_constraint(db_session):
+    from app.db.models import AdminGateRecord
+
+    db_session.add(
+        AdminGateRecord(entity="bogus", action="update", status="pending", actor="system")
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()

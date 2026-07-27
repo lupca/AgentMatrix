@@ -1,10 +1,14 @@
 import json
+import secrets
 import uuid
 import logging
+from typing import Any
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
+from app.core.config import settings
 from app.db.base import get_db
 from app.db.models import Session as SessionModel
 from app.graph.context import invalidate_context_snapshot
@@ -15,6 +19,26 @@ from app.services.tool_registry import dump_registry
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+
+class MCPToolCallRequest(BaseModel):
+    tool: str
+    arguments: dict[str, Any] = {}
+    session_id: str | None = None
+
+
+def verify_mcp_token(authorization: str | None = Header(None)) -> None:
+    """Authenticate the MCP projection's REST calls (ADR-001 §D5).
+
+    Fails closed: an unset ``MCP_API_TOKEN`` rejects every request rather
+    than accepting an empty token as a match.
+    """
+
+    presented = (authorization or "").removeprefix("Bearer ").strip()
+    if not settings.MCP_API_TOKEN or not secrets.compare_digest(
+        presented, settings.MCP_API_TOKEN
+    ):
+        raise HTTPException(status_code=401, detail="Invalid or missing MCP token")
 
 
 class ChatRequest(BaseModel):
@@ -37,6 +61,26 @@ async def list_tools():
     chat UI tool palette and ``/help``."""
 
     return {"tools": dump_registry()}
+
+
+@router.post("/mcp/tools/call")
+async def mcp_tool_call(
+    req: MCPToolCallRequest,
+    db: DBSession = Depends(get_db),
+    _: None = Depends(verify_mcp_token),
+):
+    """Execute a tool for the MCP projection (ADR-001 §D5).
+
+    Routes through the same ``CommandRouter.execute_tool`` used by API-mode
+    tool calls, so permission/gate enforcement and DB effects are identical
+    across both paths (parity) and a CLI can never bypass four-eyes locally.
+    """
+
+    result = await CommandRouter(db).execute_tool(
+        req.tool, req.arguments, req.session_id or "mcp"
+    )
+    invalidate_context_snapshot(db, project_id=None)
+    return result
 
 
 @router.post("/chat")

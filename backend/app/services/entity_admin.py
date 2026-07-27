@@ -14,7 +14,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Agent, KnowledgeItem, Project
+from app.db.models import Agent, KnowledgeItem, Project, Setting
 from app.graph.context import invalidate_context_snapshot
 from app.services.crypto import encrypt_api_key
 
@@ -291,3 +291,31 @@ def update_knowledge(db: Session, item_id: str, data: dict[str, Any]) -> Knowled
 
 def archive_knowledge(db: Session, item_id: str) -> KnowledgeItem:
     return update_knowledge(db, item_id, {"status": "archived"})
+
+
+# --- Settings ------------------------------------------------------------
+
+# Keys `update_settings` is allowed to write. Grow this dict, not the schema,
+# when a new setting is needed — no migration required.
+SETTINGS_WHITELIST: dict[str, str] = {
+    "default_coordinator_model": "Default model used for new coordinator sessions.",
+    "default_mode": "Default gate mode (supervised/plan-only/bypass) for new tasks.",
+    "context_snapshot_top_n": "Number of recent tasks listed in the context snapshot.",
+}
+
+
+def update_setting(db: Session, key: str, value: Any) -> Setting:
+    if key not in SETTINGS_WHITELIST:
+        raise EntityValidationError(
+            f"Unknown setting key '{key}'. Allowed keys: "
+            f"{', '.join(sorted(SETTINGS_WHITELIST))}"
+        )
+
+    setting = db.get(Setting, key)
+    if setting is None:
+        setting = Setting(key=key, description=SETTINGS_WHITELIST[key])
+        db.add(setting)
+    setting.value = value
+    db.commit()
+    db.refresh(setting)
+    return setting

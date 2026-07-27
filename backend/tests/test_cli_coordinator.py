@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import os
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -7,8 +10,10 @@ import pytest
 from app.db.models import Session
 from app.services.cli_dispatcher import (
     CLIDispatcher,
+    build_mcp_config,
     format_history_as_prompt,
     build_cli_command,
+    write_mcp_config,
 )
 from app.services.coordinator import CoordinatorService
 from app.services.process_manager import ProcessResult, ProcessStatus
@@ -157,3 +162,124 @@ async def test_cli_coordinator_rehydrates_history_when_switching_models(db_sessi
     assert "USER:\nWhat is my name?" in second_command
     assert session.selected_provider == "google"
     assert session.selected_model == "gemini-2.5-pro"
+
+
+# --- MCP config wiring (ADR-001 §D5, CTV2-084) -----------------------------
+# The coordinator chat CLI path only; app/workers/agent_runner.py (executor
+# dispatch) never touches CLIDispatcher and is untouched by this feature.
+
+
+def test_build_cli_command_without_mcp_config_path_is_unchanged():
+    assert build_cli_command("claude", "claude-sonnet-4", "hi") == build_cli_command(
+        "claude", "claude-sonnet-4", "hi", None
+    )
+
+
+@pytest.mark.parametrize(
+    "cli,model,expected_prefix",
+    [
+        ("claude", "claude-sonnet-4", "claude --model claude-sonnet-4"),
+        ("agy", "gemini-2.5-pro", "agy --agent gemini-2.5-pro"),
+        ("codex", "gpt-5-codex", "codex exec -m gpt-5-codex"),
+    ],
+)
+def test_build_cli_command_places_mcp_config_before_the_prompt(cli, model, expected_prefix):
+    command = build_cli_command(cli, model, "the prompt text", "/tmp/ct-mcp-x.json")
+
+    assert command.startswith(expected_prefix)
+    assert "--mcp-config /tmp/ct-mcp-x.json" in command
+    # The prompt stays the final argument regardless of CLI.
+    assert command.endswith("'the prompt text'") or command.endswith("the prompt text")
+    assert command.index("--mcp-config") < command.rindex("the prompt text")
+
+
+def test_build_mcp_config_registers_the_control_tower_stdio_server():
+    config = build_mcp_config("http://localhost:8000", "scoped-token")
+
+    server = config["mcpServers"]["control-tower"]
+    assert server["command"] == sys.executable
+    assert server["args"] == ["-m", "app.mcp_server", "--api-url", "http://localhost:8000"]
+    assert server["env"] == {"CT_MCP_TOKEN": "scoped-token"}
+
+
+def test_write_mcp_config_writes_matching_json_to_disk():
+    path = write_mcp_config("http://localhost:8000", "scoped-token")
+    try:
+        assert os.path.exists(path)
+        with open(path) as fh:
+            on_disk = json.load(fh)
+        assert on_disk == build_mcp_config("http://localhost:8000", "scoped-token")
+    finally:
+        os.unlink(path)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_omits_mcp_config_when_no_token_configured(monkeypatch):
+    """Default/unconfigured behavior is unchanged from before this feature."""
+
+    monkeypatch.delenv("MCP_API_TOKEN", raising=False)
+    manager = MagicMock()
+    manager.run_with_streaming.return_value = iter(
+        ["ok", ProcessResult(ProcessStatus.COMPLETED, 0, None)]
+    )
+    monkeypatch.setattr(
+        "app.services.cli_dispatcher.ProcessManager",
+        MagicMock(return_value=manager),
+    )
+
+    dispatcher = CLIDispatcher(working_directory="/tmp")
+    assert dispatcher.mcp_token == ""
+    async for _ in dispatcher.spawn("claude", "claude-sonnet-4", "prompt"):
+        pass
+
+    command, _ = manager.run_with_streaming.call_args.args
+    assert "--mcp-config" not in command
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_injects_mcp_config_when_token_configured(monkeypatch):
+    manager = MagicMock()
+    manager.run_with_streaming.return_value = iter(
+        ["ok", ProcessResult(ProcessStatus.COMPLETED, 0, None)]
+    )
+    monkeypatch.setattr(
+        "app.services.cli_dispatcher.ProcessManager",
+        MagicMock(return_value=manager),
+    )
+
+    dispatcher = CLIDispatcher(
+        working_directory="/tmp",
+        api_url="http://localhost:8000",
+        mcp_token="scoped-token",
+    )
+    written_paths: list[str] = []
+    real_write_mcp_config = write_mcp_config
+
+    def spy_write_mcp_config(api_url, token):
+        path = real_write_mcp_config(api_url, token)
+        written_paths.append(path)
+        return path
+
+    monkeypatch.setattr(
+        "app.services.cli_dispatcher.write_mcp_config", spy_write_mcp_config
+    )
+
+    async for _ in dispatcher.spawn("claude", "claude-sonnet-4", "prompt"):
+        pass
+
+    command, _ = manager.run_with_streaming.call_args.args
+    assert len(written_paths) == 1
+    assert f"--mcp-config {written_paths[0]}" in command
+    # The dispatcher owns the temp file's lifecycle: gone once the CLI exits.
+    assert not os.path.exists(written_paths[0])
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_reads_mcp_env_defaults(monkeypatch):
+    monkeypatch.setenv("CT_API_URL", "http://ct-backend:9000")
+    monkeypatch.setenv("MCP_API_TOKEN", "env-token")
+
+    dispatcher = CLIDispatcher(working_directory="/tmp")
+
+    assert dispatcher.api_url == "http://ct-backend:9000"
+    assert dispatcher.mcp_token == "env-token"

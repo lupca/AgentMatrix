@@ -186,8 +186,8 @@ def _gate_records_cannot_be_deleted(*_args) -> None:
 
 class AdminGateRecord(Base):
     """Append-only ledger for admin-permission entity mutations (manage_project,
-    manage_agent). Mirrors GateRecord's pending/decide pattern but is not
-    scoped to a Task (ADR-001 §D2)."""
+    manage_agent, update_settings). Mirrors GateRecord's pending/decide
+    pattern but is not scoped to a Task (ADR-001 §D2)."""
 
     __tablename__ = "admin_gate_records"
 
@@ -207,7 +207,7 @@ class AdminGateRecord(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "entity IN ('projects', 'agents')",
+            "entity IN ('projects', 'agents', 'settings')",
             name="ck_admin_gate_records_entity",
         ),
         CheckConstraint(
@@ -469,6 +469,22 @@ class LLMUsage(Base):
         CheckConstraint("cost_usd >= 0", name="ck_llm_usage_cost_nonnegative"),
         CheckConstraint("latency_ms >= 0", name="ck_llm_usage_latency_nonnegative"),
     )
+
+
+class Setting(Base):
+    """Whitelisted system-configuration KV store (ADR-001 §D2 Phase 2d).
+
+    Only keys in ``entity_admin.SETTINGS_WHITELIST`` may be written; enforced
+    in the service layer, not here, so the whitelist can grow without a
+    migration.
+    """
+
+    __tablename__ = "settings"
+
+    key = Column(String(100), primary_key=True)
+    value = Column(JSON, nullable=True)
+    description = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class KnowledgeItem(Base):

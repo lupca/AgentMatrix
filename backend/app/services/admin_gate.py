@@ -1,11 +1,12 @@
 """Gate ledger for admin-permission entity mutations (ADR-001 §D2).
 
 Mirrors ``TaskOrchestrationService``'s pending/decide pattern but for
-mutations that are not scoped to a Task: ``manage_project`` and
-``manage_agent`` are permission=admin tools, so in ``supervised`` mode a
-request only records a pending :class:`AdminGateRecord` (no mutation yet) and
-requires ``/approve``; in ``bypass`` mode the mutation applies immediately.
-Every outcome — pending, approved, or rejected — is written to ``AuditLog``.
+mutations that are not scoped to a Task: ``manage_project``,
+``manage_agent``, and ``update_settings`` are permission=admin tools, so in
+``supervised`` mode a request only records a pending :class:`AdminGateRecord`
+(no mutation yet) and requires ``/approve``; in ``bypass`` mode the mutation
+applies immediately. Every outcome — pending, approved, or rejected — is
+written to ``AuditLog``.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ _MODES = {"supervised", "bypass"}
 _ENTITY_ACTIONS: dict[str, set[str]] = {
     "projects": {"create", "update", "archive"},
     "agents": {"create", "update", "disable"},
+    "settings": {"update"},
 }
 
 _REQUIRED_CREATE_FIELDS: dict[str, set[str]] = {
@@ -202,6 +204,10 @@ class AdminGateService:
                     "status": obj.status,
                     "has_api_key": obj.has_api_key,
                 }
+            elif entity == "settings":
+                obj = entity_admin.update_setting(self.db, entity_id, payload.get("value"))
+                output = {"key": obj.key, "value": obj.value, "description": obj.description}
+                return obj.key, output
             else:
                 raise AdminPrerequisiteError(f"Unknown admin entity: {entity}")
         except entity_admin.EntityError as exc:

@@ -90,6 +90,62 @@ curl http://localhost:18080/
 curl http://localhost:18501/_stcore/health
 ```
 
+## Coordinator Chat CLI: MCP Tool Access
+
+When a chat turn is routed to an account-backed CLI (`claude`, `codex`, or
+`agy`) instead of the OpenAI-compatible API, that CLI can reach the same
+Control Tower tools (create/dispatch tasks, `query_db`, admin actions, ...)
+through an MCP stdio server, `backend/app/mcp_server.py`. It's a thin
+projection of the tool registry (`backend/app/services/tool_registry.py`) —
+one canonical name and schema per tool, shared with API mode — whose
+handlers call the backend over `POST /api/mcp/tools/call` with a scoped
+bearer token. Permission and gate checks run server-side in that endpoint
+(the same `CommandRouter.execute_tool` path API mode uses), so a CLI can
+never bypass the four-eyes rule locally.
+
+The **executor dispatch** CLI (`agent_runner`, which runs a CLI inside a
+target repo to write code) is unrelated and unaffected: it never gets
+Control Tower tools.
+
+### Enable it
+
+1. Set a scoped token the backend and the MCP server both use:
+
+   ```bash
+   MCP_API_TOKEN=<a long random string>
+   ```
+
+2. `backend/app/services/cli_dispatcher.py` picks this up automatically
+   (via `MCP_API_TOKEN` / `CT_API_URL`) and passes a generated `--mcp-config`
+   file to the CLI on every coordinator chat turn. No token configured means
+   no `--mcp-config` flag — CLI-mode behaves exactly as before.
+
+### Config shape
+
+`build_mcp_config()` generates one file per CLI spawn in the standard
+`mcpServers` shape:
+
+```json
+{
+  "mcpServers": {
+    "control-tower": {
+      "command": "/path/to/venv/bin/python",
+      "args": ["-m", "app.mcp_server", "--api-url", "http://localhost:8000"],
+      "env": { "CT_MCP_TOKEN": "<scoped token>" }
+    }
+  }
+}
+```
+
+`claude`, `codex`, and `agy` all read this file via `--mcp-config <path>`.
+To register it manually against a running backend (for local testing
+outside the coordinator):
+
+```bash
+cd backend
+CT_MCP_TOKEN=<scoped token> python -m app.mcp_server --api-url http://localhost:8000
+```
+
 ## Shutdown & Cleanup
 
 To stop and remove all services without deleting persistent volumes:

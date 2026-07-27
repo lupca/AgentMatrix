@@ -19,3 +19,4 @@ redis>=5.0.0
 psutil>=5.9.0
 cryptography>=42.0.0
 headroom-ai>=0.5.0
+fastmcp>=3.4.4

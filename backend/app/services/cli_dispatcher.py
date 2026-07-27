@@ -11,6 +11,8 @@ import asyncio
 import json
 import os
 import shlex
+import sys
+import tempfile
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
@@ -130,8 +132,16 @@ def format_history_as_prompt(messages: list[dict[str, Any]]) -> str:
     return "\n\n".join(sections)
 
 
-def build_cli_command(cli: str, model: str, prompt: str) -> str:
-    """Build a shell-safe command for one coordinator invocation."""
+def build_cli_command(
+    cli: str, model: str, prompt: str, mcp_config_path: str | None = None
+) -> str:
+    """Build a shell-safe command for one coordinator invocation.
+
+    ``mcp_config_path``, when given, registers the Control Tower MCP
+    projection (ADR-001 §D5) with the CLI so the turn can call CT tools. It
+    is always placed before the prompt-carrying flag so the prompt — which
+    may contain arbitrary text — stays the final argument.
+    """
 
     normalized_cli = (cli or "").strip().lower()
     if normalized_cli not in SUPPORTED_CLIS:
@@ -141,12 +151,59 @@ def build_cli_command(cli: str, model: str, prompt: str) -> str:
         )
 
     if normalized_cli == "claude":
-        argv = ["claude", "--model", model, "-p", prompt]
+        argv = ["claude", "--model", model]
+        if mcp_config_path:
+            argv += ["--mcp-config", mcp_config_path]
+        argv += ["-p", prompt]
     elif normalized_cli == "agy":
-        argv = ["agy", "--agent", model, "--print", prompt]
+        argv = ["agy", "--agent", model]
+        if mcp_config_path:
+            argv += ["--mcp-config", mcp_config_path]
+        argv += ["--print", prompt]
     else:
-        argv = ["codex", "exec", "-m", model, prompt]
+        argv = ["codex", "exec", "-m", model]
+        if mcp_config_path:
+            argv += ["--mcp-config", mcp_config_path]
+        argv += [prompt]
     return shlex.join(argv)
+
+
+def build_mcp_config(api_url: str, token: str) -> dict[str, Any]:
+    """MCP config registering the Control Tower projection (ADR-001 §D5).
+
+    Uses the ``mcpServers`` shape shared by claude/codex/agy: a stdio server
+    started with ``python -m app.mcp_server``, given the API URL and scoped
+    token so its handlers can call ``POST /api/mcp/tools/call``.
+    """
+
+    return {
+        "mcpServers": {
+            "control-tower": {
+                "command": sys.executable,
+                "args": ["-m", "app.mcp_server", "--api-url", api_url],
+                "env": {"CT_MCP_TOKEN": token},
+            }
+        }
+    }
+
+
+def write_mcp_config(api_url: str, token: str) -> str:
+    """Write a one-shot MCP config file for a single CLI spawn.
+
+    Every coordinator chat turn starts a fresh CLI process (see module
+    docstring), so the config is regenerated per spawn rather than cached;
+    the caller is responsible for deleting the returned path once the
+    process exits.
+    """
+
+    fd, path = tempfile.mkstemp(prefix="ct-mcp-", suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(build_mcp_config(api_url, token), fh)
+    except BaseException:
+        os.unlink(path)
+        raise
+    return path
 
 
 class CLIDispatcher:
@@ -158,12 +215,23 @@ class CLIDispatcher:
         timeout_seconds: int = 14_400,
         working_directory: str | None = None,
         process_manager_factory: Callable[..., ProcessManager] | None = None,
+        api_url: str | None = None,
+        mcp_token: str | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
         self.timeout_seconds = timeout_seconds
         self.working_directory = working_directory or os.getcwd()
         self.process_manager_factory = process_manager_factory
+        # MCP wiring (ADR-001 §D5, coordinator chat path only — agent_runner's
+        # executor dispatch never touches CLIDispatcher). Defaults come from
+        # the environment so existing callers get MCP tool access for free
+        # once MCP_API_TOKEN is configured; an unset token disables it, which
+        # keeps today's behavior unchanged wherever it isn't.
+        self.api_url = api_url or os.environ.get("CT_API_URL", "http://localhost:8000")
+        self.mcp_token = (
+            mcp_token if mcp_token is not None else os.environ.get("MCP_API_TOKEN", "")
+        )
 
     def _new_process_manager(self) -> ProcessManager:
         factory = self.process_manager_factory or ProcessManager
@@ -182,7 +250,10 @@ class CLIDispatcher:
         async generator forwards each output item to the event loop.
         """
 
-        command = build_cli_command(cli, model, prompt)
+        mcp_config_path = (
+            write_mcp_config(self.api_url, self.mcp_token) if self.mcp_token else None
+        )
+        command = build_cli_command(cli, model, prompt, mcp_config_path)
         process_manager = self._new_process_manager()
         loop = asyncio.get_running_loop()
         events: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
@@ -245,6 +316,11 @@ class CLIDispatcher:
                 # The process error was already delivered through the queue;
                 # cleanup must not mask it or leave a task warning behind.
                 pass
+            if mcp_config_path is not None:
+                try:
+                    os.unlink(mcp_config_path)
+                except OSError:
+                    pass
 
 
 # A concise alias used by callers that prefer the verb used in the task spec.
@@ -257,7 +333,9 @@ __all__ = [
     "CLIRoute",
     "SUPPORTED_CLIS",
     "build_cli_command",
+    "build_mcp_config",
     "format_history_as_prompt",
     "format_prompt",
     "route_model",
+    "write_mcp_config",
 ]

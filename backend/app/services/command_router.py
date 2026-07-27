@@ -10,6 +10,7 @@ from app.db.models import (
     KnowledgeItem,
     LLMUsage,
     Project,
+    Setting,
     Task,
     Session as SessionModel,
 )
@@ -130,6 +131,16 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
             "input_tokens": u.input_tokens,
             "output_tokens": u.output_tokens,
             "cost_usd": float(u.cost_usd) if u.cost_usd is not None else 0.0,
+        },
+    },
+    "settings": {
+        "model": Setting,
+        "filters": {},
+        "order_by": Setting.key.asc(),
+        "serialize": lambda s: {
+            "key": s.key,
+            "value": s.value,
+            "description": s.description,
         },
     },
 }
@@ -263,6 +274,13 @@ class CommandRouter:
             action = str(args.get('action', '')).strip()
             if not action:
                 return {'error': 'action is required'}
+            command_args = json.dumps(args, ensure_ascii=False)
+        elif canonical_name == 'update_settings':
+            key = str(args.get('key', '')).strip()
+            if not key:
+                return {'error': 'key is required'}
+            if 'value' not in args:
+                return {'error': 'value is required'}
             command_args = json.dumps(args, ensure_ascii=False)
         elif canonical_name == 'update_task':
             task_id = str(args.get('task_id', '')).strip()
@@ -678,6 +696,51 @@ class CommandRouter:
             }
         return {
             'action': f'{entity}_{action}d',
+            **(result.output or {}),
+        }
+
+    async def _handle_update_settings(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {'error': 'Invalid update_settings payload'}
+        if not isinstance(payload, Mapping):
+            return {'error': 'Payload must be a JSON object'}
+
+        key = str(payload.get('key', '')).strip()
+        if not key:
+            return {'error': 'key is required'}
+        if 'value' not in payload:
+            return {'error': 'value is required'}
+        if key not in entity_admin.SETTINGS_WHITELIST:
+            return {
+                'error': (
+                    f"Unknown setting key '{key}'. Allowed keys: "
+                    f"{', '.join(sorted(entity_admin.SETTINGS_WHITELIST))}"
+                )
+            }
+        mode = str(payload.get('mode') or 'supervised').strip()
+
+        try:
+            result = AdminGateService(self.db).request(
+                entity='settings',
+                action='update',
+                entity_id=key,
+                payload={'value': payload['value']},
+                actor=f"chat:{session_id or 'anonymous'}",
+                mode=mode,
+            )
+        except (AdminOrchestrationError, entity_admin.EntityError) as exc:
+            return {'error': str(exc)}
+
+        if not result.applied:
+            return {
+                'action': 'settings_pending',
+                'admin_gate_record_id': f'admin:{result.record.id}',
+                'status': 'pending',
+            }
+        return {
+            'action': 'settings_updated',
             **(result.output or {}),
         }
 
