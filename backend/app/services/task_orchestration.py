@@ -783,15 +783,18 @@ class TaskOrchestrationService:
                 )
                 decision = BrakeDecision(False, reason, "cost_limit", cost_usd=cost)
             elif for_spawn:
-                active = (
-                    self.db.query(func.count(AgentRun.id))
-                    .filter(
-                        AgentRun.status.in_(["queued", "running"]),
-                        AgentRun.id != run_id if run_id else True,
-                    )
-                    .with_for_update()
-                    .scalar()
-                    or 0
+                # PostgreSQL rejects `SELECT ... FOR UPDATE` on an aggregate
+                # (func.count), so lock the individual candidate rows instead
+                # and count them in Python. Ordering by id gives every caller
+                # the same lock-acquisition order, which is what prevents
+                # concurrent dispatches from deadlocking on this row set.
+                active_query = self.db.query(AgentRun.id).filter(
+                    AgentRun.status.in_(["queued", "running"])
+                )
+                if run_id:
+                    active_query = active_query.filter(AgentRun.id != run_id)
+                active = len(
+                    active_query.order_by(AgentRun.id).with_for_update().all()
                 )
                 if active >= self.max_concurrent_runs:
                     decision = BrakeDecision(

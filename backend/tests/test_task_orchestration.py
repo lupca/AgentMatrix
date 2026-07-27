@@ -1,8 +1,9 @@
 import pytest
 from sqlalchemy.exc import StatementError
 
-from app.db.models import Agent, AgentRun, GateRecord, Project, Task
+from app.db.models import Agent, AgentRun, AuditLog, GateRecord, LLMUsage, Project, Setting, Task
 from app.services.task_orchestration import (
+    BrakeViolationError,
     IdempotencyConflictError,
     StaleIdempotencyRecordError,
     TaskOrchestrationService,
@@ -118,6 +119,62 @@ def test_bypass_dispatch_is_audited_and_idempotent(orchestration, db_session):
         .count()
         == 1
     )
+
+
+def test_autonomy_disabled_blocks_dispatch_and_is_audited(orchestration, db_session):
+    task = _task(db_session, "GATE-BRAKE-1", mode="bypass")
+    db_session.add(Setting(key="autonomy_enabled", value=False))
+    db_session.commit()
+
+    with pytest.raises(BrakeViolationError):
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="dispatch-killed",
+        )
+
+    assert db_session.query(AgentRun).count() == 0
+    audit = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.action == "brake:autonomy_disabled")
+        .one()
+    )
+    assert audit.task_id == task.id
+
+
+def test_cost_cap_exceeded_stops_task_and_escalates(orchestration, db_session):
+    task = _task(db_session, "GATE-BRAKE-2", mode="bypass")
+    db_session.add(Setting(key="max_cost_usd_per_task", value="1.0"))
+    db_session.add(
+        LLMUsage(
+            task_id=task.id,
+            model="test-model",
+            provider="test",
+            operation="chat",
+            cost_usd="5.0",
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(BrakeViolationError):
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="dispatch-over-budget",
+        )
+
+    assert db_session.query(AgentRun).count() == 0
+    db_session.refresh(task)
+    assert task.status == "failed"
+    assert task.awaiting_approval is True
+    audit = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.action == "brake:cost_limit")
+        .one()
+    )
+    assert audit.task_id == task.id
 
 
 def test_idempotency_key_cannot_be_reused_with_new_input(

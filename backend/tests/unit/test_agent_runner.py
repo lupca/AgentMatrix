@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.workers.agent_runner as runner
 from app.db.base import Base
-from app.db.models import AgentOutputChunk, AgentRun, Project, Task
+from app.db.models import AgentOutputChunk, AgentRun, Project, Setting, Task
 from app.services.process_manager import ProcessResult, ProcessStatus
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "review_results"
@@ -122,6 +122,75 @@ def test_run_agent_persists_output_and_success(worker_db, git_repo_root):
     assert sep == ".."
     assert base and head and base != head
     assert task.result_ref == run.result_ref
+    db.close()
+
+
+def test_concurrency_brake_queues_run_without_spawning_process(
+    worker_db, monkeypatch, git_repo_root
+):
+    manager = MagicMock()
+    monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
+
+    db = worker_db()
+    db.add_all(
+        [
+            Task(id="RUN-002", project="project", title="Other", status="dispatched"),
+            Task(id="RUN-003", project="project", title="Other 2", status="dispatched"),
+        ]
+    )
+    db.add_all(
+        [
+            AgentRun(
+                id="run-002",
+                task_id="RUN-002",
+                agent_id="@test",
+                cli="agy",
+                command="echo",
+                status="running",
+            ),
+            AgentRun(
+                id="run-003",
+                task_id="RUN-003",
+                agent_id="@test",
+                cli="agy",
+                command="echo",
+                status="running",
+            ),
+        ]
+    )
+    db.commit()
+    db.close()
+
+    with pytest.raises(runner.AgentExecutionError):
+        runner.run_agent.fn("run-001", "RUN-001", "echo test", git_repo_root, 5)
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    assert run.status == "queued"
+    assert run.error_message and "Concurrent run limit" in run.error_message
+    manager.run_with_streaming.assert_not_called()
+    db.close()
+
+
+def test_terminal_run_is_not_reevaluated_by_brakes(worker_db, monkeypatch, git_repo_root):
+    manager = MagicMock()
+    monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    run.status = "success"
+    run.exit_code = 0
+    db.add(Setting(key="autonomy_enabled", value=False))
+    db.commit()
+    db.close()
+
+    result = runner.run_agent.fn("run-001", "RUN-001", "echo test", git_repo_root, 5)
+
+    assert result == 0
+    manager.run_with_streaming.assert_not_called()
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    assert run.status == "success"
     db.close()
 
 

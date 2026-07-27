@@ -191,6 +191,16 @@ def run_agent(
             logger.error("AgentRun %s does not exist; discarding message", run_id)
             return None
 
+        # Duplicate delivery after a completed attempt is safe and does no work.
+        # This must run before the brake check below: a terminal run is no
+        # longer a spawn candidate, and brake-tripping it here would
+        # overwrite an already-successful run's status with "cancelled".
+        if run.status in {"success", "timeout", "cancelled"} or (
+            run.status == "failed" and run.attempt >= run.max_attempts
+        ):
+            logger.info("Ignoring duplicate delivery for terminal run %s", run_id)
+            return run.exit_code
+
         # The service normally performs this check before enqueueing.  Repeat
         # it immediately before creating a process because queued messages can
         # outlive a setting change or race another worker.  A concurrency trip
@@ -210,13 +220,6 @@ def run_agent(
             run.error_message = brake.reason
             db.commit()
             return None
-
-        # Duplicate delivery after a completed attempt is safe and does no work.
-        if run.status in {"success", "timeout", "cancelled"} or (
-            run.status == "failed" and run.attempt >= run.max_attempts
-        ):
-            logger.info("Ignoring duplicate delivery for terminal run %s", run_id)
-            return run.exit_code
 
         _cleanup_stale_process(run)
         task = run.task
