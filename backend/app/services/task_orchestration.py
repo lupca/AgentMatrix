@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.models import Agent, AgentRun, AuditLog, GateRecord, LLMUsage, Project, Setting, Task
-from app.services.command_builder import build_dispatch_command
+from app.services.command_builder import build_dispatch_command, build_review_command
 
 GateDecision = Literal["approved", "rejected"]
 
@@ -178,6 +178,7 @@ class TaskOrchestrationService:
         reviewer: str,
         actor: str,
         idempotency_key: str,
+        timeout_seconds: int | None = None,
         expected_status: str = "awaiting-review",
     ) -> TransitionResult:
         task = self._task(task_id)
@@ -187,6 +188,22 @@ class TaskOrchestrationService:
             raise PrerequisiteError("reviewer is required")
         self._require_independent(task.executor, reviewer)
         base_ref, head_ref = _split_result_range(task.result_ref)
+        if not base_ref or not head_ref:
+            raise PrerequisiteError(
+                "result_ref must be a recorded base..head range before review "
+                "(the review boundary is never inferred)"
+            )
+        agent = self.db.get(Agent, reviewer)
+        if agent is None:
+            raise PrerequisiteError(f"Agent {reviewer} not found")
+        project = self.db.get(Project, task.project)
+        try:
+            command, repo_root, cli = build_review_command(
+                task, agent, project, base_ref, head_ref
+            )
+        except ValueError as exc:
+            raise PrerequisiteError(str(exc)) from exc
+
         return self._request_gate(
             task=task,
             gate_type="review_order",
@@ -198,6 +215,10 @@ class TaskOrchestrationService:
                 "result_ref": task.result_ref,
                 "base_ref": base_ref,
                 "head_ref": head_ref,
+                "command": command,
+                "repo_root": repo_root,
+                "cli": cli,
+                "timeout_seconds": timeout_seconds or self.run_timeout_seconds,
             },
         )
 
@@ -420,6 +441,57 @@ class TaskOrchestrationService:
         self.db.refresh(record)
         return TransitionResult(task, record, True)
 
+    def record_review_failure(
+        self,
+        *,
+        task_id: str,
+        error: str,
+        actor: str,
+        idempotency_key: str,
+        expected_status: str = "in-review",
+        run_id: str | None = None,
+    ) -> TransitionResult:
+        """Escalate a review run that produced no usable, schema-valid result.
+
+        A missing or malformed review artifact must never be treated as an
+        implicit pass — it is routed to the same human-escalation shape as a
+        safety-brake trip (``status="failed"`` + ``awaiting_approval``)
+        rather than left stuck in ``in-review`` or silently advanced.
+        """
+        task = self._task(task_id)
+        payload = {
+            "expected_status": expected_status,
+            "error": error,
+            "run_id": run_id,
+        }
+        input_hash = self._input_hash(payload)
+        existing = self._idempotent_record(task_id, idempotency_key, input_hash)
+        if existing is not None:
+            return self._result_for_record(task, existing)
+        self._assert_status(task, expected_status)
+        now = datetime.now(timezone.utc)
+        task.status = "failed"
+        task.error = error
+        task.awaiting_approval = True
+        task.approval_prompt = f"Review result invalid or missing: {error}"
+        task.updated_at = now
+        record = self._ledger_record(
+            task=task,
+            gate_type="review_result",
+            status="rejected",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=payload,
+            output_ref=run_id,
+            error_message=error,
+        )
+        self._audit(task, record, reason=error)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        return TransitionResult(task, record, True)
+
     def record_dispatch_queue_failure(
         self,
         *,
@@ -432,17 +504,23 @@ class TaskOrchestrationService:
         if run is None:
             raise TransitionConflictError(f"Run {run_id} not found")
         task = self._task(run.task_id)
+        # A review-kind run reaches this from "in-review" (set by the
+        # review_order gate), not "dispatched" like an execute run; failure
+        # rolls the task back to "awaiting-review" so review can be
+        # re-requested, rather than all the way to "todo".
+        expected_status = "in-review" if run.kind == "review" else "dispatched"
+        reset_status = "awaiting-review" if run.kind == "review" else "todo"
         payload = {"run_id": run_id, "error": error}
         input_hash = self._input_hash(payload)
         existing = self._idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
             return self._result_for_record(task, existing)
-        self._assert_status(task, "dispatched")
+        self._assert_status(task, expected_status)
         now = datetime.now(timezone.utc)
         run.status = "failed"
         run.error_message = error
         run.completed_at = now
-        task.status = "todo"
+        task.status = reset_status
         task.error = error
         task.updated_at = now
         record = self._ledger_record(
@@ -711,12 +789,25 @@ class TaskOrchestrationService:
             if not task.result_ref or not task.result_ref.strip():
                 raise PrerequisiteError("result_ref is required before review")
             self._require_independent(task.executor, reviewer)
+            run_id = str(uuid.uuid4())
+            run = AgentRun(
+                id=run_id,
+                task_id=task.id,
+                agent_id=reviewer,
+                cli=str(payload["cli"]),
+                command=str(payload["command"]),
+                kind="review",
+                agent_role="reviewer",
+                status="queued",
+                timeout_seconds=int(payload["timeout_seconds"]),
+            )
+            self.db.add(run)
             task.reviewer = reviewer
             task.status = "in-review"
             task.current_gate = "verdict"
             task.awaiting_approval = False
             task.approval_prompt = None
-            return None, task.result_ref
+            return run, run_id
         if gate_type == "verdict":
             verdict = str(payload["verdict"])
             self._validate_verdict_prerequisites(
@@ -873,8 +964,21 @@ class TaskOrchestrationService:
         if not task.reviewer or not task.reviewer.strip():
             raise PrerequisiteError("reviewer is required for verdict")
         self._require_independent(task.executor, task.reviewer)
-        if self._principal(actor) != self._principal(task.reviewer):
-            raise PrerequisiteError("Only the assigned reviewer may submit a verdict")
+        # The reviewer identity that authorizes a verdict is never taken from
+        # the caller-supplied `actor` (a coordinator/LLM tool call could claim
+        # to *be* task.reviewer). It must instead come from a terminal
+        # AgentRun(kind="review") this service itself created and completed —
+        # that is the only proof an independent review actually ran.
+        review_run = self._terminal_review_run(task.id)
+        if review_run is None:
+            raise PrerequisiteError(
+                "verdict requires a completed review run for this task"
+            )
+        if self._principal(review_run.agent_id) != self._principal(task.reviewer):
+            raise PrerequisiteError(
+                "The completed review run's agent does not match the task's "
+                "assigned reviewer"
+            )
         if not task.result_ref or not task.result_ref.strip():
             raise PrerequisiteError("result_ref is required for verdict")
         evaluations = self._evaluation_results(ac_results)
@@ -1135,6 +1239,18 @@ class TaskOrchestrationService:
                 f"Task {task.id} expected status {expected_status!r}, "
                 f"found {task.status!r}"
             )
+
+    def _terminal_review_run(self, task_id: str) -> AgentRun | None:
+        return (
+            self.db.query(AgentRun)
+            .filter(
+                AgentRun.task_id == task_id,
+                AgentRun.kind == "review",
+                AgentRun.status == "success",
+            )
+            .order_by(AgentRun.queued_at.desc())
+            .first()
+        )
 
     @classmethod
     def _require_independent(

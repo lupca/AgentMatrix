@@ -33,6 +33,22 @@ def service(db_session):
     return TaskOrchestrationService(db_session)
 
 
+def _add_terminal_review_run(db, task: Task, agent_id: str = "@reviewer") -> AgentRun:
+    run = AgentRun(
+        id=f"{task.id}-review-run",
+        task_id=task.id,
+        agent_id=agent_id,
+        cli="codex",
+        command="codex exec /code-review",
+        kind="review",
+        agent_role="reviewer",
+        status="success",
+    )
+    db.add(run)
+    db.commit()
+    return run
+
+
 def _add_task(db, task_id: str, **overrides) -> Task:
     values = {
         "id": task_id,
@@ -108,6 +124,8 @@ def test_verdict_rejects_missing_prerequisites(
     }
     values.update(changes)
     task = _add_task(db_session, f"VER-{len(db_session.new)}{message[:2]}", **values)
+    if task.reviewer:
+        _add_terminal_review_run(db_session, task, agent_id=task.reviewer)
 
     with pytest.raises((PrerequisiteError, TransitionConflictError), match=message):
         service.request_verdict(
@@ -129,6 +147,7 @@ def test_passing_verdict_requires_complete_passing_ac_results(service, db_sessio
         result_ref="abc123",
         acceptance_criteria=["AC 1", "AC 2"],
     )
+    _add_terminal_review_run(db_session, task)
 
     with pytest.raises(PrerequisiteError, match="incomplete"):
         service.request_verdict(
@@ -160,6 +179,7 @@ def test_only_passing_verdict_service_transition_reaches_done(
         reviewer="@reviewer",
         result_ref="abc123",
     )
+    _add_terminal_review_run(db_session, task)
 
     result = service.request_verdict(
         task_id=task.id,
@@ -247,4 +267,111 @@ def test_review_dispatch_rejects_reviewer_equal_to_executor(service, db_session)
             actor="@operator",
             idempotency_key="review-dispatch-four-eyes",
             kind="review",
+        )
+
+
+def test_request_review_creates_review_run_and_moves_task_in_review(
+    service, db_session
+):
+    task = _add_task(
+        db_session,
+        "REQREV-001",
+        status="awaiting-review",
+        executor="@executor",
+        result_ref="base-sha..head-sha",
+    )
+
+    result = service.request_review(
+        task_id=task.id,
+        reviewer="@reviewer",
+        actor="@operator",
+        idempotency_key="request-review-1",
+    )
+
+    assert result.task.status == "in-review"
+    assert result.task.reviewer == "@reviewer"
+    run = db_session.query(AgentRun).filter(AgentRun.task_id == task.id).one()
+    assert run.kind == "review"
+    assert run.agent_role == "reviewer"
+    assert run.status == "queued"
+    assert "/code-review --from base-sha --to head-sha" in run.command
+
+
+def test_request_review_rejects_reviewer_equal_to_executor(service, db_session):
+    task = _add_task(
+        db_session,
+        "REQREV-002",
+        status="awaiting-review",
+        executor="@executor",
+        result_ref="base-sha..head-sha",
+    )
+
+    with pytest.raises(PrerequisiteError, match="differ from executor"):
+        service.request_review(
+            task_id=task.id,
+            reviewer="@executor",
+            actor="@operator",
+            idempotency_key="request-review-four-eyes",
+        )
+
+
+def test_request_review_requires_base_head_range_not_inferred(service, db_session):
+    task = _add_task(
+        db_session,
+        "REQREV-003",
+        status="awaiting-review",
+        executor="@executor",
+        result_ref="single-ref-no-range",
+    )
+
+    with pytest.raises(PrerequisiteError, match="base..head range"):
+        service.request_review(
+            task_id=task.id,
+            reviewer="@reviewer",
+            actor="@operator",
+            idempotency_key="request-review-no-range",
+        )
+
+
+def test_verdict_rejects_when_no_review_run_exists(service, db_session):
+    task = _add_task(
+        db_session,
+        "VERDICT-NORUN",
+        status="in-review",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="base-sha..head-sha",
+    )
+
+    with pytest.raises(PrerequisiteError, match="completed review run"):
+        service.request_verdict(
+            task_id=task.id,
+            verdict="pass",
+            ac_results=[{"passed": True}],
+            actor="@reviewer",
+            idempotency_key="verdict-no-review-run",
+        )
+
+
+def test_verdict_actor_cannot_impersonate_reviewer_without_a_review_run(
+    service, db_session
+):
+    """CTV2-087: a caller cannot self-sign a verdict merely by claiming to be
+    task.reviewer — a terminal AgentRun(kind="review") must actually exist."""
+    task = _add_task(
+        db_session,
+        "VERDICT-SPOOF",
+        status="in-review",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="base-sha..head-sha",
+    )
+
+    with pytest.raises(PrerequisiteError, match="completed review run"):
+        service.request_verdict(
+            task_id=task.id,
+            verdict="pass",
+            ac_results=[{"passed": True}],
+            actor="@reviewer",
+            idempotency_key="verdict-spoofed-actor",
         )

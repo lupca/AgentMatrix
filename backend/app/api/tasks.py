@@ -11,7 +11,7 @@ from app.db.models import (
     Session as SessionModel,
     Task as TaskModel,
 )
-from app.api.dispatch import AgentRunResponse, _raise_orchestration_http
+from app.api.dispatch import AgentRunResponse, _enqueue_dispatch, _raise_orchestration_http
 from app.graph.context import invalidate_context_snapshot
 from app.schemas.task import Task, TaskCreate, TaskUpdate
 from app.schemas.audit import AuditLog
@@ -188,8 +188,9 @@ def request_task_review(
     request: ReviewRequest,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    service = TaskOrchestrationService(db)
     try:
-        result = TaskOrchestrationService(db).request_review(
+        result = service.request_review(
             task_id=id,
             reviewer=request.reviewer,
             actor=request.actor,
@@ -197,6 +198,8 @@ def request_task_review(
         )
     except OrchestrationError as exc:
         _raise_orchestration_http(exc)
+    if result.agent_run is not None:
+        _enqueue_dispatch(result, service)
     return {
         "task_id": id,
         "status": result.task.status,

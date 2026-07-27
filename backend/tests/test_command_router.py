@@ -332,6 +332,82 @@ async def test_dispatch_retry_after_queue_failure_creates_new_run(db_session):
     )
 
 
+@pytest.mark.asyncio
+async def test_request_review_auto_selects_independent_reviewer_and_dispatches(
+    db_session,
+):
+    from app.db.models import Agent, AgentRun, Project, Task
+
+    db_session.add(Project(id="proj-rev", name="Review Project", repo_root="/tmp"))
+    db_session.add(
+        Agent(id="@executor-1", name="Executor", role="executor", cli="codex")
+    )
+    db_session.add(
+        Agent(id="@reviewer-1", name="Reviewer", role="reviewer", cli="codex")
+    )
+    db_session.add(
+        Task(
+            id="TASK-REV",
+            project="proj-rev",
+            title="Task under review",
+            status="awaiting-review",
+            current_gate="review_order",
+            mode="bypass",
+            executor="@executor-1",
+            result_ref="base-sha..head-sha",
+        )
+    )
+    db_session.commit()
+
+    with patch("app.workers.agent_runner.run_agent.send") as mock_send:
+        result = await CommandRouter(db_session).execute(
+            "request_review", "TASK-REV", "session-1"
+        )
+
+    assert result["action"] == "review_requested"
+    assert result["reviewer"] == "@reviewer-1"
+    mock_send.assert_called_once()
+    task = db_session.get(Task, "TASK-REV")
+    assert task.status == "in-review"
+    assert task.reviewer == "@reviewer-1"
+    run = db_session.query(AgentRun).filter(AgentRun.task_id == "TASK-REV").one()
+    assert run.kind == "review"
+    assert run.agent_id == "@reviewer-1"
+
+
+@pytest.mark.asyncio
+async def test_request_review_refuses_when_no_independent_reviewer_available(
+    db_session,
+):
+    from app.db.models import Agent, Project, Task
+
+    db_session.add(Project(id="proj-solo", name="Solo Project", repo_root="/tmp"))
+    db_session.add(
+        Agent(id="@only-agent", name="Only Agent", role="executor", cli="codex")
+    )
+    db_session.add(
+        Task(
+            id="TASK-SOLO",
+            project="proj-solo",
+            title="Task with a single available agent",
+            status="awaiting-review",
+            current_gate="review_order",
+            mode="bypass",
+            executor="@only-agent",
+            result_ref="base-sha..head-sha",
+        )
+    )
+    db_session.commit()
+
+    result = await CommandRouter(db_session).execute(
+        "request_review", "TASK-SOLO", "session-1"
+    )
+
+    assert result.get("reason") == "no_independent_reviewer"
+    task = db_session.get(Task, "TASK-SOLO")
+    assert task.status == "awaiting-review"  # never downgraded to a same-agent reviewer
+
+
 def test_concurrent_dispatch_with_same_idempotency_key_creates_one_run(tmp_path):
     """AC: two concurrent calls with identical args in the same cycle must
     only ever create a single AgentRun, relying on the existing DB

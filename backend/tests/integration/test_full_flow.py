@@ -41,6 +41,7 @@ def test_create_dispatch_stream_and_complete_flow(client, db_session):
     repo_root = str(Path(__file__).resolve().parents[3])
     db_session.add(Project(id=project_id, name='E2E Full Flow', repo_root=repo_root))
     db_session.add(Agent(id=agent_id, name='Test Agent', role='executor', capabilities=['testing'], cli='codex', status='idle'))
+    db_session.add(Agent(id='@reviewer', name='Reviewer Agent', role='reviewer', capabilities=['testing'], cli='codex', status='idle'))
     db_session.commit()
 
     created = _run_command(client, thread_id, f'/pm Complete API task flow --project {project_id}')
@@ -92,7 +93,7 @@ def test_create_dispatch_stream_and_complete_flow(client, db_session):
     db_session.add(AgentOutputChunk(run_id=run_id, chunk_index=0, content='agent started\nagent completed'))
     TaskOrchestrationService(db_session).record_execution_success(
         task_id=task_id,
-        result_ref='result-sha',
+        result_ref='base-sha..result-sha',
         actor=agent_id,
         idempotency_key='e2e-execution-success',
         run_id=run_id,
@@ -116,15 +117,29 @@ def test_create_dispatch_stream_and_complete_flow(client, db_session):
         },
     )
     assert review.json()['decision_status'] == 'pending'
-    approved_review = client.post(
-        f"/api/gates/{review.json()['gate_record_id']}/decision",
-        json={
-            'decision': 'approved',
-            'actor': '@supervisor',
-            'idempotency_key': 'e2e-review-approval',
-        },
-    )
+    with patch('app.api.dispatch.run_agent') as review_actor:
+        review_actor.send.return_value = MagicMock(message_id='e2e-review-message-001')
+        approved_review = client.post(
+            f"/api/gates/{review.json()['gate_record_id']}/decision",
+            json={
+                'decision': 'approved',
+                'actor': '@supervisor',
+                'idempotency_key': 'e2e-review-approval',
+            },
+        )
     assert approved_review.status_code == 200
+    review_run_id = approved_review.json()['run_id']
+    assert review_run_id is not None
+    review_actor.send.assert_called_once()
+
+    # Simulate the review worker completing successfully (the actual
+    # /code-review artifact-loading and verdict auto-submission is covered by
+    # agent_runner's own unit tests) so the reviewer identity check in
+    # `request_verdict` sees a terminal review run for this task.
+    review_run = db_session.get(AgentRun, review_run_id)
+    review_run.status = 'success'
+    review_run.completed_at = datetime.now(timezone.utc)
+    db_session.commit()
 
     verdict = _run_command(
         client,

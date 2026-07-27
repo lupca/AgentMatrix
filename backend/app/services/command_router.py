@@ -253,6 +253,12 @@ class CommandRouter:
                 return {'error': 'task_id and verdict are required'}
             findings = args.get('findings', [])
             command_args = f'{task_id} {verdict} {json.dumps(findings, ensure_ascii=False)}'
+        elif canonical_name == 'request_review':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            reviewer = str(args.get('reviewer', '') or '').strip()
+            command_args = ' '.join(part for part in (task_id, reviewer) if part)
         elif canonical_name == 'approve_gate':
             gate_id = args.get('gate_record_id', args.get('task_id'))
             if gate_id is None:
@@ -589,6 +595,90 @@ class CommandRouter:
         
         return {'action': 'dispatched', 'task_id': task_id, 'run_id': run.id, 'agent': agent_id}
 
+    async def _handle_request_review(self, args: str, session_id: str) -> dict:
+        from app.workers.agent_runner import run_agent
+        from app.services.agent_matcher import AgentMatcher
+
+        parts = args.strip().split()
+        if not parts:
+            return {'error': 'Usage: /request-review <task_id> [reviewer]'}
+
+        task_id = parts[0]
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return {'error': f'Task {task_id} not found'}
+
+        reviewer = parts[1] if len(parts) > 1 else None
+        if not reviewer:
+            suggestions = AgentMatcher(self.db).suggest_agents(task, top_n=5)
+            independent = [
+                s for s in suggestions
+                if (task.executor or '').strip().casefold() != s.agent_id.strip().casefold()
+            ]
+            if not independent:
+                return {
+                    'error': (
+                        f'No independent reviewer available for task {task_id} '
+                        f'(executor={task.executor!r}); refusing to lower the '
+                        'four-eyes bar.'
+                    ),
+                    'reason': 'no_independent_reviewer',
+                }
+            reviewer = independent[0].agent_id
+
+        service = TaskOrchestrationService(self.db)
+        try:
+            result = service.request_review(
+                task_id=task_id,
+                reviewer=reviewer,
+                actor=f"chat:{session_id or 'anonymous'}",
+                idempotency_key=self._command_key(
+                    session_id,
+                    "request_review",
+                    args,
+                    attempt=self._dispatch_attempt(task_id),
+                ),
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        if not result.applied:
+            return {
+                'action': 'review_pending',
+                'task_id': task_id,
+                'gate_record_id': result.gate_record.id,
+                'status': 'pending',
+            }
+
+        run = result.agent_run
+        context = result.context or {}
+        if run is None:
+            return {'error': 'Review transition did not create an agent run'}
+        try:
+            run_agent.send(
+                run.id,
+                task_id,
+                run.command,
+                context['repo_root'],
+                run.timeout_seconds,
+            )
+        except Exception as exc:
+            error = f'Could not queue review run: {exc}'
+            service.record_dispatch_queue_failure(
+                run_id=run.id,
+                error=error,
+                actor='system:dispatch-queue',
+                idempotency_key=f'{result.gate_record.idempotency_key}:queue-failure',
+            )
+            return {'error': error, 'run_id': run.id}
+
+        return {
+            'action': 'review_requested',
+            'task_id': task_id,
+            'run_id': run.id,
+            'reviewer': reviewer,
+        }
+
     async def _handle_cancel_task(self, args: str, session_id: str) -> dict:
         from datetime import datetime, timezone
         from app.db.models import AgentRun
@@ -656,7 +746,11 @@ class CommandRouter:
                 task_id=task_id,
                 verdict=verdict,
                 ac_results=ac_results,
-                actor=task.reviewer or f"chat:{session_id or 'anonymous'}",
+                # The verdict's authorized reviewer identity is established by
+                # TaskOrchestrationService itself (from the completed review
+                # AgentRun), never by trusting a caller-supplied actor here —
+                # see CTV2-087.
+                actor=f"chat:{session_id or 'anonymous'}",
                 idempotency_key=self._command_key(session_id, "verdict", args),
             )
         except OrchestrationError as exc:

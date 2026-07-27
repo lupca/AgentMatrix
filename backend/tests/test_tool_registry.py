@@ -25,8 +25,8 @@ def db_session():
     session.close()
 
 
-def test_registry_has_sixteen_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 16
+def test_registry_has_seventeen_tools_with_unique_names():
+    assert len(TOOL_REGISTRY) == 17
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
@@ -35,6 +35,7 @@ def test_registry_has_sixteen_tools_with_unique_names():
         'record_verdict',
         'approve_gate',
         'cancel_task',
+        'request_review',
         'compact_context',
         'manage_project',
         'manage_agent',
@@ -103,6 +104,7 @@ def test_get_group_tool_definitions_returns_deferred_tools_by_group():
         'approve_gate',
         'cancel_task',
         'update_task',
+        'request_review',
     }
 
     session = get_group_tool_definitions('session')

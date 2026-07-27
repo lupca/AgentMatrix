@@ -198,6 +198,34 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="task_lifecycle",
         ),
         ToolSpec(
+            name="request_review",
+            description=(
+                "Move a task from awaiting-review to in-review by dispatching "
+                "a real /code-review run against its committed base..head "
+                "range. If reviewer is omitted, one is auto-selected and is "
+                "always independent from the executor (four-eyes); if no "
+                "independent reviewer is available this fails rather than "
+                "lowering the bar."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "reviewer": {
+                        "type": "string",
+                        "description": "Agent id to review; auto-selected if omitted.",
+                    },
+                },
+                "required": ["task_id"],
+            },
+            handler="request_review",
+            tier="deferred",
+            permission="write",
+            entity="tasks",
+            slash_alias="/request-review",
+            group="task_lifecycle",
+        ),
+        ToolSpec(
             name="compact_context",
             description="Summarize older session messages to reduce context size.",
             parameters={"type": "object", "properties": {}},
@@ -435,7 +463,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "Load additional tool schemas for the rest of this turn. Call "
                 "this before using a tool that isn't in the baseline set. "
                 "Groups: task_lifecycle (dispatch_task, record_verdict, "
-                "approve_gate, cancel_task), admin (project/agent/knowledge/"
+                "approve_gate, cancel_task, request_review), admin (project/agent/knowledge/"
                 "settings management), session (compact_context), research "
                 "(get_minimal_context, get_impact_radius)."
             ),

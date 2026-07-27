@@ -63,6 +63,89 @@ def build_dispatch_command(
     return shlex.join(argv), repo_root, cli
 
 
+def build_review_command(
+    task: Task,
+    agent: Agent,
+    project: Optional[Project],
+    base_ref: str,
+    head_ref: str,
+) -> tuple[str, str, str]:
+    """Build the CLI invocation for a real ``/code-review`` run.
+
+    Unlike :func:`build_dispatch_command`, the diff range is never inferred
+    here — it must already be the committed base/head pair CTV2-099 recorded
+    on the task (``result_ref``), passed in explicitly by the caller.
+    """
+    cli = (agent.cli or _infer_cli(agent.model, agent.id)).strip().lower()
+    if cli not in SUPPORTED_CLIS:
+        raise ValueError(
+            f"Agent {agent.id} has unsupported CLI {cli!r}; "
+            f"expected one of {sorted(SUPPORTED_CLIS)}"
+        )
+    if not base_ref or not base_ref.strip():
+        raise ValueError("base_ref is required to build a review command")
+    if not head_ref or not head_ref.strip():
+        raise ValueError("head_ref is required to build a review command")
+
+    repo_root = project.repo_root if project else None
+    if not repo_root:
+        raise ValueError(f"Project {task.project} does not define repo_root")
+    repo_root = os.path.abspath(repo_root)
+    if not os.path.isdir(repo_root):
+        raise ValueError(f"Project repository does not exist: {repo_root}")
+
+    prompt = _review_prompt(
+        task, base_ref, head_ref, review_result_path(repo_root, task.id)
+    )
+    if cli == "codex":
+        argv = ["codex", "exec"]
+        if agent.model:
+            argv.extend(["-m", agent.model])
+        argv.extend(
+            [
+                "-c",
+                f"model_reasoning_effort={agent.effort or 'medium'}",
+                "--dangerously-bypass-approvals-and-sandbox",
+                prompt,
+            ]
+        )
+    elif cli == "claude":
+        argv = ["claude"]
+        if agent.model:
+            argv.extend(["--model", agent.model])
+        argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
+    else:
+        argv = ["agy"]
+        if agent.model:
+            argv.extend(["--model", agent.model])
+        argv.extend(["--print", prompt, "--dangerously-skip-permissions"])
+
+    return shlex.join(argv), repo_root, cli
+
+
+def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -> str:
+    sections = [
+        f"/code-review --from {base_ref} --to {head_ref}",
+        f"Review task {task.id}: {task.title}",
+    ]
+    if task.acceptance_criteria:
+        sections.append(
+            "Acceptance criteria:\n"
+            + "\n".join(f"- {criterion}" for criterion in task.acceptance_criteria)
+        )
+    sections.append(
+        "Code review result contract:\n"
+        f"Write the final review result as JSON to {result_path}. "
+        "Do not use stdout as the result. The JSON must contain exactly these "
+        "fields: schema_version (\"1.0\"), task_id, base, head, ac_results, "
+        "findings, tests_run, tests_passed. Each ac_results item must contain "
+        "ac_index, ac_text, verdict (only \"pass\" or \"fail\"), and "
+        "evidence (an array of strings). Ensure ac_results has one item per "
+        "acceptance criterion."
+    )
+    return "\n\n".join(sections)
+
+
 def _infer_cli(model: str | None, agent_id: str) -> str:
     lowered = (model or agent_id).lower()
     if "claude" in lowered:

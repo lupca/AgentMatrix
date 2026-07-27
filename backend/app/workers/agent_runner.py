@@ -23,7 +23,7 @@ from app.db.models import AgentOutputChunk, AgentRun
 from app.services.command_builder import _is_review_task, review_result_path
 from app.schemas.task import ReviewResult
 from app.services.process_manager import ProcessManager, ProcessResult, ProcessStatus
-from app.services.task_orchestration import TaskOrchestrationService
+from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.workers import redis_broker
 from app.workers.output_streamer import (
     clear_cancel_request,
@@ -223,7 +223,13 @@ def run_agent(
 
         _cleanup_stale_process(run)
         task = run.task
-        is_review_task = task is not None and _is_review_task(task)
+        # `run.kind == "review"` (CTV2-086) is the authoritative signal for a
+        # review run against the task it targets. The title/raw_input text
+        # heuristic is kept only for the older "review is its own Task" flow.
+        is_review_run = run.kind == "review"
+        is_review_task = task is not None and (
+            is_review_run or _is_review_task(task)
+        )
         if is_review_task:
             _prepare_review_artifact(repo_root, task_id)
         attempt = _current_attempt(run)
@@ -347,7 +353,36 @@ def run_agent(
         run.completed_at = datetime.now(timezone.utc)
         effective_status = result.status.value
         if result.status == ProcessStatus.COMPLETED:
-            if is_review_task and task is not None:
+            if is_review_run and task is not None:
+                try:
+                    review_result = load_review_result(
+                        repo_root,
+                        task_id,
+                        task.acceptance_criteria or [],
+                    )
+                except ReviewResultLoadError as exc:
+                    # Missing/malformed artifact is never treated as an
+                    # implicit pass. The task is escalated to a human rather
+                    # than silently advanced or left stuck in "in-review".
+                    run.status = ProcessStatus.FAILED.value
+                    effective_status = ProcessStatus.FAILED.value
+                    run.error_message = str(exc)
+                    TaskOrchestrationService(db).record_review_failure(
+                        task_id=task_id,
+                        error=str(exc),
+                        actor=f"agent:{run.agent_id}",
+                        idempotency_key=f"run:{run.id}:review-result-invalid",
+                        run_id=run.id,
+                    )
+                else:
+                    # The JSON artifact is the durable review result. Keep the
+                    # ref relative to repo_root so it stays portable.
+                    run.result_ref = os.path.relpath(
+                        review_result_path(repo_root, review_result.task_id),
+                        repo_root,
+                    )
+                    _submit_review_verdict(db, run, review_result)
+            elif is_review_task and task is not None:
                 review_result = load_review_result(
                     repo_root,
                     task_id,
@@ -384,6 +419,14 @@ def run_agent(
                         idempotency_key=f"run:{run.id}:execution-success",
                         run_id=run.id,
                     )
+        elif is_review_run:
+            TaskOrchestrationService(db).record_review_failure(
+                task_id=task_id,
+                error=result.error or result.status.value,
+                actor=f"agent:{run.agent_id}",
+                idempotency_key=f"run:{run.id}:review-{result.status.value}",
+                run_id=run.id,
+            )
         else:
             TaskOrchestrationService(db).record_execution_failure(
                 task_id=task_id,
@@ -628,6 +671,43 @@ def _build_execution_result_ref(
     if not _has_committed_diff(repo_root, base, selected):
         return None, "Executor result-ref points to an empty diff"
     return f"{base[:12]}..{selected[:12]}", None
+
+
+def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResult) -> None:
+    """Auto-submit the verdict derived strictly from the validated review JSON.
+
+    This is the only place a review's pass/changes verdict is decided — it
+    reads the structured ``ReviewResult`` artifact, never free-form CLI
+    output. The actor is the review run's own agent, not a value a
+    coordinator/LLM tool call could spoof.
+    """
+    ac_results = [
+        {
+            "ac_index": ac.ac_index,
+            "ac_text": ac.ac_text,
+            "passed": ac.verdict == "pass",
+            "evidence": ac.evidence,
+        }
+        for ac in review_result.ac_results
+    ]
+    verdict = "pass" if all(item["passed"] for item in ac_results) else "changes"
+    try:
+        TaskOrchestrationService(db).request_verdict(
+            task_id=run.task_id,
+            verdict=verdict,
+            ac_results=ac_results,
+            findings=review_result.findings,
+            actor=f"agent:{run.agent_id}",
+            idempotency_key=f"run:{run.id}:review-verdict",
+        )
+    except OrchestrationError as exc:
+        TaskOrchestrationService(db).record_review_failure(
+            task_id=run.task_id,
+            error=f"Could not record verdict from review result: {exc}",
+            actor=f"agent:{run.agent_id}",
+            idempotency_key=f"run:{run.id}:review-verdict-failed",
+            run_id=run.id,
+        )
 
 
 def _prepare_review_artifact(repo_root: str, task_id: str) -> None:
