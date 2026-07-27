@@ -25,8 +25,8 @@ def db_session():
     session.close()
 
 
-def test_registry_has_nine_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 9
+def test_registry_has_thirteen_tools_with_unique_names():
+    assert len(TOOL_REGISTRY) == 13
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
@@ -36,6 +36,10 @@ def test_registry_has_nine_tools_with_unique_names():
         'approve_gate',
         'cancel_task',
         'compact_context',
+        'manage_project',
+        'manage_agent',
+        'manage_knowledge',
+        'update_task',
         'load_tools',
     ]
     for name, spec in TOOL_REGISTRY.items():
@@ -95,12 +99,19 @@ def test_get_group_tool_definitions_returns_deferred_tools_by_group():
         'record_verdict',
         'approve_gate',
         'cancel_task',
+        'update_task',
     }
 
     session = get_group_tool_definitions('session')
     assert {t['name'] for t in session} == {'compact_context'}
 
-    assert get_group_tool_definitions('admin') == []
+    admin = get_group_tool_definitions('admin')
+    assert {t['name'] for t in admin} == {
+        'manage_project',
+        'manage_agent',
+        'manage_knowledge',
+    }
+
     assert get_group_tool_definitions('nonexistent') is None
 
 

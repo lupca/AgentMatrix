@@ -20,6 +20,7 @@ class KnowledgeItemUpdate(BaseModel):
     tags: list[Any] | None = None
     project: str | None = None
     author: str | None = None
+    status: str | None = None
 
 
 class KnowledgeItem(BaseModel):
@@ -30,6 +31,7 @@ class KnowledgeItem(BaseModel):
     tags: list[Any] | None = Field(default_factory=list)
     project: str | None = None
     author: str | None = None
+    status: str | None = "active"
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

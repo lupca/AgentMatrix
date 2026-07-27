@@ -184,6 +184,53 @@ def _gate_records_cannot_be_deleted(*_args) -> None:
     raise ValueError("GateRecord is immutable and cannot be deleted")
 
 
+class AdminGateRecord(Base):
+    """Append-only ledger for admin-permission entity mutations (manage_project,
+    manage_agent). Mirrors GateRecord's pending/decide pattern but is not
+    scoped to a Task (ADR-001 §D2)."""
+
+    __tablename__ = "admin_gate_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity = Column(String(20), nullable=False, index=True)
+    action = Column(String(20), nullable=False)
+    entity_id = Column(String(50), nullable=True, index=True)
+    status = Column(String(20), nullable=False, default="pending")
+    actor = Column(String(50), nullable=False, default="system")
+    mode = Column(String(20), nullable=False, default="supervised")
+    parent_id = Column(Integer, ForeignKey("admin_gate_records.id"), nullable=True, index=True)
+    input_payload = Column(JSON, nullable=True)
+    output_payload = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "entity IN ('projects', 'agents')",
+            name="ck_admin_gate_records_entity",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected')",
+            name="ck_admin_gate_records_status",
+        ),
+        CheckConstraint(
+            "mode IN ('supervised', 'bypass')",
+            name="ck_admin_gate_records_mode",
+        ),
+    )
+
+
+@event.listens_for(AdminGateRecord, "before_update")
+def _admin_gate_records_are_append_only(*_args) -> None:
+    raise ValueError("AdminGateRecord is append-only and cannot be updated")
+
+
+@event.listens_for(AdminGateRecord, "before_delete")
+def _admin_gate_records_cannot_be_deleted(*_args) -> None:
+    raise ValueError("AdminGateRecord is immutable and cannot be deleted")
+
+
 class Session(Base):
     __tablename__ = "sessions"
 
@@ -434,5 +481,6 @@ class KnowledgeItem(Base):
     tags = Column(JSON, default=list)
     project = Column(String(50), nullable=True, index=True)
     author = Column(String(50), nullable=True)
+    status = Column(String(20), nullable=False, default="active", server_default="active")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

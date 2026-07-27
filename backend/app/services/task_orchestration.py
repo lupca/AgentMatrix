@@ -59,6 +59,7 @@ class TaskOrchestrationService:
 
     MODES = {"supervised", "plan-only", "bypass"}
     GATED_ACTIONS = {"dispatch", "review_order", "verdict"}
+    PATCHABLE_FIELDS = {"plan", "acceptance_criteria", "priority", "tags"}
 
     def __init__(self, db: Session):
         self.db = db
@@ -433,6 +434,45 @@ class TaskOrchestrationService:
         self.db.refresh(task)
         self.db.refresh(record)
         return TransitionResult(task, record, True, agent_run=run)
+
+    def update_task_fields(
+        self,
+        *,
+        task_id: str,
+        patch: dict[str, Any],
+        actor: str,
+    ) -> Task:
+        """Edit plan/acceptance_criteria/priority/tags without touching status.
+
+        Status transitions stay exclusive to the gate flow (dispatch/review/
+        verdict); this is metadata-only and always writes an AuditLog row.
+        """
+        task = self._task(task_id)
+        if not actor or not actor.strip():
+            raise PrerequisiteError("actor is required")
+        if not patch:
+            raise PrerequisiteError("patch must include at least one field")
+        unknown = set(patch) - self.PATCHABLE_FIELDS
+        if unknown:
+            raise PrerequisiteError(
+                f"Cannot patch fields: {', '.join(sorted(unknown))}. "
+                f"Allowed fields: {', '.join(sorted(self.PATCHABLE_FIELDS))}"
+            )
+
+        for field, value in patch.items():
+            setattr(task, field, value)
+        task.updated_at = datetime.now(timezone.utc)
+        self.db.add(
+            AuditLog(
+                task_id=task.id,
+                action="update_task",
+                actor=actor,
+                details={"patch": patch},
+            )
+        )
+        self.db.commit()
+        self.db.refresh(task)
+        return task
 
     def _request_gate(
         self,

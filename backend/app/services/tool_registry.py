@@ -208,6 +208,156 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="session",
         ),
         ToolSpec(
+            name="manage_project",
+            description=(
+                "Create, update, or archive a project. No hard delete — "
+                "archive sets status to 'archived'. Admin-permission: in "
+                "supervised mode this creates a pending gate awaiting "
+                "/approve; in bypass mode it applies immediately."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "update", "archive"],
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Project id (required for update/archive).",
+                    },
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "context_md": {"type": "string"},
+                    "status": {"type": "string"},
+                    "repo_root": {"type": "string"},
+                    "task_prefix": {"type": "string"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["supervised", "bypass"],
+                        "default": "supervised",
+                        "description": "Gate mode for this mutation.",
+                    },
+                },
+                "required": ["action"],
+            },
+            handler="manage_project",
+            tier="deferred",
+            permission="admin",
+            entity="projects",
+            slash_alias=None,
+            group="admin",
+        ),
+        ToolSpec(
+            name="manage_agent",
+            description=(
+                "Create, update, or disable an agent. Rejects any payload "
+                "containing an api_key — configure API-agent credentials "
+                "through the REST API instead; use has_api_key to check "
+                "whether one is set. Admin-permission: in supervised mode "
+                "this creates a pending gate awaiting /approve; in bypass "
+                "mode it applies immediately."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "update", "disable"],
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Agent id (required for update/disable).",
+                    },
+                    "name": {"type": "string"},
+                    "role": {"type": "string"},
+                    "status": {"type": "string"},
+                    "capabilities": {"type": "array", "items": {"type": "string"}},
+                    "model": {"type": "string"},
+                    "effort": {"type": "string"},
+                    "cli": {"type": "string"},
+                    "agent_type": {"type": "string", "enum": ["cli", "api"]},
+                    "provider": {
+                        "type": "string",
+                        "enum": ["anthropic", "google", "openai"],
+                    },
+                    "base_url": {"type": "string"},
+                    "is_default": {"type": "boolean"},
+                    "mode": {
+                        "type": "string",
+                        "enum": ["supervised", "bypass"],
+                        "default": "supervised",
+                        "description": "Gate mode for this mutation.",
+                    },
+                },
+                "required": ["action"],
+            },
+            handler="manage_agent",
+            tier="deferred",
+            permission="admin",
+            entity="agents",
+            slash_alias=None,
+            group="admin",
+        ),
+        ToolSpec(
+            name="manage_knowledge",
+            description="Create, update, or archive a knowledge item. No hard delete.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "update", "archive"],
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Knowledge item id (required for update/archive).",
+                    },
+                    "title": {"type": "string"},
+                    "category": {"type": "string"},
+                    "content": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "project": {"type": "string"},
+                    "author": {"type": "string"},
+                },
+                "required": ["action"],
+            },
+            handler="manage_knowledge",
+            tier="deferred",
+            permission="write",
+            entity="knowledge",
+            slash_alias=None,
+            group="admin",
+        ),
+        ToolSpec(
+            name="update_task",
+            description=(
+                "Edit a task's plan, acceptance criteria, priority, or tags. "
+                "Does not change task status — use dispatch_task, "
+                "record_verdict, or approve_gate for status transitions."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "patch": {
+                        "type": "object",
+                        "description": (
+                            "Fields to update: plan, acceptance_criteria, "
+                            "priority, tags."
+                        ),
+                    },
+                },
+                "required": ["task_id", "patch"],
+            },
+            handler="update_task",
+            tier="deferred",
+            permission="write",
+            entity="tasks",
+            slash_alias=None,
+            group="task_lifecycle",
+        ),
+        ToolSpec(
             name="load_tools",
             description=(
                 "Load additional tool schemas for the rest of this turn. Call "

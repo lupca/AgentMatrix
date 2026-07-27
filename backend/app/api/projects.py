@@ -4,6 +4,7 @@ from app.db.base import get_db
 from app.db.models import ContextLevel, Project as ProjectModel, Session as SessionModel
 from app.graph.context import invalidate_context_snapshot
 from app.schemas.project import Project, ProjectCreate, ProjectUpdate
+from app.services import entity_admin
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -23,20 +24,15 @@ def get_projects(
 
 @router.post("", response_model=Project, status_code=status.HTTP_201_CREATED)
 def create_project(project_in: ProjectCreate, db: Session = Depends(get_db)):
-    existing = db.query(ProjectModel).filter(ProjectModel.id == project_in.id).first()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Project with ID '{project_in.id}' already exists."
-        )
-
     project_data = project_in.model_dump(exclude_unset=True)
-    db_project = ProjectModel(**project_data)
-    db.add(db_project)
-    db.commit()
-    db.refresh(db_project)
-    invalidate_context_snapshot(db, project_id=db_project.id)
-    return db_project
+    try:
+        return entity_admin.create_project(db, project_data)
+    except entity_admin.EntityConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except entity_admin.EntityValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        )
 
 
 @router.get("/{id}", response_model=Project)
@@ -52,21 +48,11 @@ def get_project(id: str, db: Session = Depends(get_db)):
 
 @router.patch("/{id}", response_model=Project)
 def update_project(id: str, project_in: ProjectUpdate, db: Session = Depends(get_db)):
-    db_project = db.query(ProjectModel).filter(ProjectModel.id == id).first()
-    if not db_project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project '{id}' not found."
-        )
-
     update_data = project_in.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(db_project, field, value)
-
-    db.commit()
-    db.refresh(db_project)
-    invalidate_context_snapshot(db, project_id=db_project.id)
-    return db_project
+    try:
+        return entity_admin.update_project(db, id, update_data)
+    except entity_admin.EntityNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
 
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)

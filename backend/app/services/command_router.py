@@ -6,12 +6,15 @@ from typing import Any, Tuple, Optional
 from app.db.models import (
     Agent,
     AgentRun,
+    AuditLog,
     KnowledgeItem,
     LLMUsage,
     Project,
     Task,
     Session as SessionModel,
 )
+from app.services import entity_admin
+from app.services.admin_gate import AdminGateService, AdminOrchestrationError
 from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
@@ -246,6 +249,29 @@ class CommandRouter:
             command_args = task_id
         elif canonical_name == 'compact_context':
             command_args = ''
+        elif canonical_name == 'manage_project':
+            action = str(args.get('action', '')).strip()
+            if not action:
+                return {'error': 'action is required'}
+            command_args = json.dumps(args, ensure_ascii=False)
+        elif canonical_name == 'manage_agent':
+            action = str(args.get('action', '')).strip()
+            if not action:
+                return {'error': 'action is required'}
+            command_args = json.dumps(args, ensure_ascii=False)
+        elif canonical_name == 'manage_knowledge':
+            action = str(args.get('action', '')).strip()
+            if not action:
+                return {'error': 'action is required'}
+            command_args = json.dumps(args, ensure_ascii=False)
+        elif canonical_name == 'update_task':
+            task_id = str(args.get('task_id', '')).strip()
+            patch = args.get('patch')
+            if not task_id or not isinstance(patch, Mapping):
+                return {'error': 'task_id and patch are required'}
+            command_args = json.dumps(
+                {'task_id': task_id, 'patch': dict(patch)}, ensure_ascii=False
+            )
         elif canonical_name == 'load_tools':
             group = str(args.get('group', '')).strip()
             if not group:
@@ -525,11 +551,16 @@ class CommandRouter:
         parts = args.strip().split()
         if not parts:
             return {'error': 'Usage: /approve <gate_record_id> [approved|rejected]'}
+        raw_id = parts[0]
+        decision = parts[1].lower() if len(parts) > 1 else 'approved'
+
+        if raw_id.startswith('admin:'):
+            return await self._decide_admin_gate(raw_id, decision, session_id)
+
         try:
-            gate_record_id = int(parts[0])
+            gate_record_id = int(raw_id)
         except ValueError:
             return {'error': 'gate_record_id must be an integer'}
-        decision = parts[1].lower() if len(parts) > 1 else 'approved'
         service = TaskOrchestrationService(self.db)
         try:
             result = service.decide_gate(
@@ -569,6 +600,167 @@ class CommandRouter:
             'decision': result.status,
             'new_status': result.task.status,
             'run_id': run.id if run is not None else None,
+        }
+
+    async def _decide_admin_gate(
+        self, raw_id: str, decision: str, session_id: str
+    ) -> dict:
+        try:
+            admin_gate_id = int(raw_id.split(':', 1)[1])
+        except (IndexError, ValueError):
+            return {'error': 'Invalid admin gate record id'}
+        try:
+            result = AdminGateService(self.db).decide(
+                admin_gate_id=admin_gate_id,
+                decision=decision,
+                actor=f"chat:{session_id or 'anonymous'}",
+            )
+        except AdminOrchestrationError as exc:
+            return {'error': str(exc)}
+        return {
+            'action': 'admin_gate_decision',
+            'entity': result.record.entity,
+            'entity_id': result.entity_id,
+            'decision': result.record.status,
+        }
+
+    async def _handle_manage_project(self, args: str, session_id: str) -> dict:
+        return await self._manage_admin_entity('projects', args, session_id)
+
+    async def _handle_manage_agent(self, args: str, session_id: str) -> dict:
+        return await self._manage_admin_entity('agents', args, session_id)
+
+    async def _manage_admin_entity(
+        self, entity: str, args: str, session_id: str
+    ) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {'error': f'Invalid manage_{entity[:-1]} payload'}
+        if not isinstance(payload, Mapping):
+            return {'error': 'Payload must be a JSON object'}
+        if entity == 'agents' and 'api_key' in payload:
+            return {
+                'error': (
+                    'manage_agent cannot accept an api_key value. Configure '
+                    'API-agent credentials through the REST API '
+                    '(POST/PATCH /api/agents) instead.'
+                )
+            }
+
+        action = str(payload.get('action', '')).strip()
+        if not action:
+            return {'error': 'action is required'}
+        raw_id = payload.get('id')
+        entity_id = str(raw_id).strip() if raw_id else None
+        mode = str(payload.get('mode') or 'supervised').strip()
+        # 'id' stays in the payload (create needs it as the new entity's id;
+        # update/archive/disable ignore it since it isn't a settable field).
+        mutation_fields = {k: v for k, v in payload.items() if k not in ('action', 'mode')}
+
+        try:
+            result = AdminGateService(self.db).request(
+                entity=entity,
+                action=action,
+                entity_id=entity_id,
+                payload=mutation_fields,
+                actor=f"chat:{session_id or 'anonymous'}",
+                mode=mode,
+            )
+        except (AdminOrchestrationError, entity_admin.EntityError) as exc:
+            return {'error': str(exc)}
+
+        if not result.applied:
+            return {
+                'action': f'{entity}_pending',
+                'admin_gate_record_id': f'admin:{result.record.id}',
+                'status': 'pending',
+            }
+        return {
+            'action': f'{entity}_{action}d',
+            **(result.output or {}),
+        }
+
+    async def _handle_manage_knowledge(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {'error': 'Invalid manage_knowledge payload'}
+        if not isinstance(payload, Mapping):
+            return {'error': 'Payload must be a JSON object'}
+
+        action = str(payload.get('action', '')).strip()
+        raw_id = payload.get('id')
+        item_id = str(raw_id).strip() if raw_id else None
+        fields = {k: v for k, v in payload.items() if k not in ('action', 'id')}
+        actor = f"chat:{session_id or 'anonymous'}"
+
+        try:
+            if action == 'create':
+                create_fields = dict(fields)
+                if item_id:
+                    create_fields['id'] = item_id
+                item = entity_admin.create_knowledge(self.db, create_fields)
+            elif action == 'update':
+                if not item_id:
+                    return {'error': 'id is required for update'}
+                item = entity_admin.update_knowledge(self.db, item_id, fields)
+            elif action == 'archive':
+                if not item_id:
+                    return {'error': 'id is required for archive'}
+                item = entity_admin.archive_knowledge(self.db, item_id)
+            else:
+                return {
+                    'error': (
+                        f"Unknown action '{action}'. Valid actions: "
+                        "create, update, archive"
+                    )
+                }
+        except entity_admin.EntityError as exc:
+            return {'error': str(exc)}
+
+        self.db.add(
+            AuditLog(
+                task_id=None,
+                action=f'manage_knowledge:{action}',
+                actor=actor,
+                details={'id': item.id},
+            )
+        )
+        self.db.commit()
+        return {
+            'action': f'knowledge_{action}d',
+            'id': item.id,
+            'title': item.title,
+            'status': item.status,
+        }
+
+    async def _handle_update_task(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {'error': 'Invalid update_task payload'}
+        task_id = str(payload.get('task_id', '')).strip()
+        patch = payload.get('patch')
+        if not task_id or not isinstance(patch, Mapping) or not patch:
+            return {'error': 'task_id and a non-empty patch object are required'}
+
+        try:
+            task = TaskOrchestrationService(self.db).update_task_fields(
+                task_id=task_id,
+                patch=dict(patch),
+                actor=f"chat:{session_id or 'anonymous'}",
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        return {
+            'action': 'updated',
+            'task_id': task.id,
+            'plan': task.plan,
+            'acceptance_criteria': task.acceptance_criteria,
+            'priority': task.priority,
+            'tags': task.tags,
         }
 
     @staticmethod

@@ -211,3 +211,170 @@ async def test_query_db_via_tool_call_matches_slash_command(db_session):
     assert tool_result["status"] == "success"
     assert tool_result["entity"] == "tasks"
     assert any(row["id"] == "TASK-300" for row in tool_result["rows"])
+
+
+@pytest.mark.asyncio
+async def test_manage_agent_rejects_payload_with_api_key(db_session):
+    result = await CommandRouter(db_session).execute_tool(
+        "manage_agent",
+        {"action": "create", "id": "agent-x", "name": "X", "role": "executor", "api_key": "sk-leak"},
+        "session-1",
+    )
+    assert "error" in result
+    assert "api_key" in result["error"]
+
+    from app.db.models import Agent
+
+    assert db_session.query(Agent).filter(Agent.id == "agent-x").first() is None
+
+
+@pytest.mark.asyncio
+async def test_manage_project_bypass_applies_immediately_with_audit(db_session):
+    from app.db.models import AuditLog, Project
+
+    result = await CommandRouter(db_session).execute_tool(
+        "manage_project",
+        {"action": "create", "id": "proj-bypass", "name": "Bypass Project", "mode": "bypass"},
+        "session-1",
+    )
+
+    assert result["action"] == "projects_created"
+    assert result["id"] == "proj-bypass"
+    project = db_session.query(Project).filter(Project.id == "proj-bypass").first()
+    assert project is not None
+    assert project.name == "Bypass Project"
+
+    audit_rows = db_session.query(AuditLog).filter(AuditLog.action.like("admin_gate:%")).all()
+    assert len(audit_rows) == 1
+    assert audit_rows[0].actor == "chat:session-1"
+
+
+@pytest.mark.asyncio
+async def test_manage_project_archive_supervised_pends_then_approves(db_session):
+    from app.db.models import AuditLog, Project
+
+    db_session.add(Project(id="proj-archive", name="To Archive", status="active"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    pending = await router.execute_tool(
+        "manage_project",
+        {"action": "archive", "id": "proj-archive"},
+        "session-1",
+    )
+
+    assert pending["action"] == "projects_pending"
+    assert pending["status"] == "pending"
+    gate_record_id = pending["admin_gate_record_id"]
+    assert gate_record_id.startswith("admin:")
+
+    # Not mutated yet.
+    project = db_session.query(Project).filter(Project.id == "proj-archive").first()
+    assert project.status == "active"
+
+    approval = await router.execute_tool(
+        "approve_gate",
+        {"gate_record_id": gate_record_id},
+        "session-2",
+    )
+    assert approval["action"] == "admin_gate_decision"
+    assert approval["decision"] == "approved"
+    assert approval["entity_id"] == "proj-archive"
+
+    db_session.refresh(project)
+    assert project.status == "archived"
+
+    audit_rows = db_session.query(AuditLog).filter(AuditLog.action.like("admin_gate:%")).all()
+    assert len(audit_rows) == 2
+    assert {row.actor for row in audit_rows} == {"chat:session-1", "chat:session-2"}
+
+
+@pytest.mark.asyncio
+async def test_manage_agent_create_and_disable_bypass_no_hard_delete(db_session):
+    from app.db.models import Agent
+
+    router = CommandRouter(db_session)
+    created = await router.execute_tool(
+        "manage_agent",
+        {
+            "action": "create",
+            "id": "agent-cli-1",
+            "name": "CLI Agent",
+            "role": "executor",
+            "agent_type": "cli",
+            "cli": "codex",
+            "mode": "bypass",
+        },
+        "session-1",
+    )
+    assert created["action"] == "agents_created"
+    assert "api_key" not in created
+
+    disabled = await router.execute_tool(
+        "manage_agent",
+        {"action": "disable", "id": "agent-cli-1", "mode": "bypass"},
+        "session-1",
+    )
+    assert disabled["action"] == "agents_disabled"
+    assert disabled["status"] == "disabled"
+
+    agent = db_session.query(Agent).filter(Agent.id == "agent-cli-1").first()
+    assert agent is not None
+    assert agent.status == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_manage_knowledge_create_update_archive(db_session):
+    router = CommandRouter(db_session)
+
+    created = await router.execute_tool(
+        "manage_knowledge",
+        {"action": "create", "title": "Runbook", "category": "ops"},
+        "session-1",
+    )
+    assert created["action"] == "knowledge_created"
+    item_id = created["id"]
+
+    updated = await router.execute_tool(
+        "manage_knowledge",
+        {"action": "update", "id": item_id, "category": "final"},
+        "session-1",
+    )
+    assert updated["action"] == "knowledge_updated"
+
+    archived = await router.execute_tool(
+        "manage_knowledge",
+        {"action": "archive", "id": item_id},
+        "session-1",
+    )
+    assert archived["action"] == "knowledge_archived"
+    assert archived["status"] == "archived"
+
+
+@pytest.mark.asyncio
+async def test_update_task_edits_plan_and_rejects_status(db_session):
+    from app.db.models import Project, Task
+
+    db_session.add(Project(id="proj-1", name="Test Project"))
+    db_session.add(Task(id="TASK-400", project="proj-1", title="Patchable", status="todo"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    result = await router.execute_tool(
+        "update_task",
+        {"task_id": "TASK-400", "patch": {"plan": "Do the thing", "priority": "high"}},
+        "session-1",
+    )
+    assert result["action"] == "updated"
+    assert result["plan"] == "Do the thing"
+    assert result["priority"] == "high"
+
+    task = db_session.query(Task).filter(Task.id == "TASK-400").first()
+    assert task.status == "todo"
+
+    rejected = await router.execute_tool(
+        "update_task",
+        {"task_id": "TASK-400", "patch": {"status": "done"}},
+        "session-1",
+    )
+    assert "error" in rejected

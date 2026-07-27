@@ -72,6 +72,19 @@ def test_delete_project(client):
     assert get_res.status_code == 404
 
 
+def test_archive_project_via_patch_is_a_status_change_not_a_delete(client):
+    client.post("/api/projects", json={"id": "archive-me", "name": "Archive Me"})
+
+    res = client.patch("/api/projects/archive-me", json={"status": "archived"})
+    assert res.status_code == 200
+    assert res.json()["status"] == "archived"
+
+    # Still readable — archiving never hard-deletes the row.
+    get_res = client.get("/api/projects/archive-me")
+    assert get_res.status_code == 200
+    assert get_res.json()["status"] == "archived"
+
+
 def test_build_graph(client):
     res = client.post("/api/projects/proj-graph-test/build-graph")
     assert res.status_code == 200
