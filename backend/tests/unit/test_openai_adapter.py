@@ -223,6 +223,36 @@ def test_tool_calls_extracts_dict_and_object_response_shapes():
     ) == [{"id": "call-object", "name": "status", "input": {}}]
 
 
+def test_text_combines_reasoning_and_content_with_think_tags():
+    assert OpenAIAdapter._text(
+        {"choices": [{"message": {"reasoning_content": "reason", "content": "answer"}}]}
+    ) == "<think>reason</think>answer"
+    assert OpenAIAdapter._text(
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(reasoning_content="reason", content="answer")
+                )
+            ]
+        )
+    ) == "<think>reason</think>answer"
+
+
+def test_chunk_text_combines_reasoning_and_content_with_think_tags():
+    assert OpenAIAdapter._chunk_text(
+        {"choices": [{"delta": {"reasoning_content": "reason", "content": "answer"}}]}
+    ) == "<think>reason</think>answer"
+    assert OpenAIAdapter._chunk_text(
+        SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(reasoning_content="reason", content="answer")
+                )
+            ]
+        )
+    ) == "<think>reason</think>answer"
+
+
 @pytest.mark.asyncio
 async def test_complete_propagates_openai_api_errors():
     class RateLimitError(RuntimeError):

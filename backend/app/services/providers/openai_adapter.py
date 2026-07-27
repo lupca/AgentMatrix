@@ -155,12 +155,21 @@ class OpenAIAdapter:
         choice = choices[0]
         message = choice.get("message", {}) if isinstance(choice, dict) else getattr(choice, "message", None)
         if isinstance(message, dict):
-            return str(message.get("content") or message.get("reasoning_content") or "")
-        return str(
-            getattr(message, "content", None)
-            or getattr(message, "reasoning_content", None)
-            or ""
+            return OpenAIAdapter._combine_text(
+                message.get("reasoning_content"), message.get("content")
+            )
+        return OpenAIAdapter._combine_text(
+            getattr(message, "reasoning_content", None), getattr(message, "content", None)
         )
+
+    @staticmethod
+    def _combine_text(reasoning_content: Any, content: Any) -> str:
+        """Preserve reasoning and response text in the frontend's tag format."""
+        reasoning = "" if reasoning_content is None else str(reasoning_content)
+        response = "" if content is None else str(content)
+        if reasoning:
+            return f"<think>{reasoning}</think>{response}"
+        return response
 
     @staticmethod
     def _tool_calls(response: Any) -> list[dict[str, Any]]:
@@ -329,11 +338,11 @@ class OpenAIAdapter:
         choice = choices[0]
         delta = choice.get("delta", {}) if isinstance(choice, dict) else getattr(choice, "delta", None)
         if isinstance(delta, dict):
-            return str(delta.get("content") or delta.get("reasoning_content") or "")
-        return str(
-            getattr(delta, "content", None)
-            or getattr(delta, "reasoning_content", None)
-            or ""
+            return OpenAIAdapter._combine_text(
+                delta.get("reasoning_content"), delta.get("content")
+            )
+        return OpenAIAdapter._combine_text(
+            getattr(delta, "reasoning_content", None), getattr(delta, "content", None)
         )
 
     async def close(self) -> None:
