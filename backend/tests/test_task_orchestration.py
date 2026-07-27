@@ -37,6 +37,31 @@ def _task(db, task_id: str, *, mode: str = "supervised") -> Task:
     return task
 
 
+def _dispatch_and_approve(orchestration, task, idempotency_key):
+    """Dispatch under either mode and land on an approved run.
+
+    Bypass tasks apply immediately. Supervised tasks land the dispatch as a
+    *pending* record first, so this also drives the approval — the pending
+    record (cached under `idempotency_key`) is exactly what a staleness-guard
+    regression would see on replay, since the approved run lives on a child
+    record instead (CTV2-088 round 3).
+    """
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key=idempotency_key,
+    )
+    if task.mode == "supervised":
+        result = orchestration.decide_gate(
+            gate_record_id=result.gate_record.id,
+            decision="approved",
+            actor="@supervisor",
+            idempotency_key=f"{idempotency_key}:approval",
+        )
+    return result
+
+
 def test_supervised_dispatch_commits_pending_and_resumes_separately(
     orchestration,
     db_session,
@@ -132,22 +157,25 @@ def test_gate_records_are_append_only(orchestration, db_session):
     db_session.rollback()
 
 
+@pytest.mark.parametrize("mode", ["bypass", "supervised"])
 def test_reusing_idempotency_key_after_run_goes_terminal_is_rejected(
     orchestration,
     db_session,
+    mode,
 ):
     """Regression for CTV2-088: a stale dispatch record must never be
     replayed as `applied=True` once its AgentRun has left queued/running,
     even though the task's own status has since reverted to a state that
-    would otherwise pass `_assert_status` (e.g. after a queue failure)."""
-    task = _task(db_session, "GATE-STALE", mode="bypass")
+    would otherwise pass `_assert_status` (e.g. after a queue failure).
 
-    first = orchestration.request_dispatch(
-        task_id=task.id,
-        agent_id="@executor",
-        actor="@operator",
-        idempotency_key="stale-key",
-    )
+    Parametrized over both modes (round 3): under `supervised`, the record
+    cached at the dispatch idempotency key is the *pending* parent, not the
+    approved child that holds the run — a guard that only inspects the
+    parent's status never fires, which is how this regression stayed green
+    for two rounds."""
+    task = _task(db_session, f"GATE-STALE-{mode.upper()}", mode=mode)
+
+    first = _dispatch_and_approve(orchestration, task, "stale-key")
     assert first.applied is True
     run = first.agent_run
     assert run is not None
@@ -174,21 +202,20 @@ def test_reusing_idempotency_key_after_run_goes_terminal_is_rejected(
     assert db_session.query(AgentRun).filter(AgentRun.task_id == task.id).count() == 1
 
 
+@pytest.mark.parametrize("mode", ["bypass", "supervised"])
 def test_reusing_idempotency_key_after_failed_run_with_retries_left_is_not_stale(
     orchestration,
     db_session,
+    mode,
 ):
     """AC3 nuance: a "failed" run that hasn't exhausted `max_attempts` is not
     terminal — the worker still retries it in place — so the cached record
-    must keep being replayed as `applied=True`, not rejected as stale."""
-    task = _task(db_session, "GATE-RETRYABLE", mode="bypass")
+    must keep being replayed as `applied=True`, not rejected as stale.
+    Parametrized over both modes (round 3): see the terminal-run regression
+    test above for why `supervised` needs its own coverage."""
+    task = _task(db_session, f"GATE-RETRYABLE-{mode.upper()}", mode=mode)
 
-    first = orchestration.request_dispatch(
-        task_id=task.id,
-        agent_id="@executor",
-        actor="@operator",
-        idempotency_key="retryable-key",
-    )
+    first = _dispatch_and_approve(orchestration, task, "retryable-key")
     run = first.agent_run
     run.status = "failed"
     run.attempt = 1
@@ -206,25 +233,26 @@ def test_reusing_idempotency_key_after_failed_run_with_retries_left_is_not_stale
     assert db_session.query(AgentRun).filter(AgentRun.task_id == task.id).count() == 1
 
 
+@pytest.mark.parametrize("mode", ["bypass", "supervised"])
 @pytest.mark.parametrize("terminal_status", ["success", "timeout", "cancelled"])
 def test_reusing_idempotency_key_after_run_completes_naturally_is_rejected(
     orchestration,
     db_session,
     terminal_status,
+    mode,
 ):
     """Regression for CTV2-088 round 2 (missing coverage flagged by
     reviewer): the only stale-record test before this covered a queue-failure
     style "failed" run. A dispatch idempotency key reused after the run
     finished on its own — success, timeout, or cancellation — must be
-    rejected the same way, never silently replayed as `applied=True`."""
-    task = _task(db_session, f"GATE-STALE-{terminal_status.upper()}", mode="bypass")
-
-    first = orchestration.request_dispatch(
-        task_id=task.id,
-        agent_id="@executor",
-        actor="@operator",
-        idempotency_key="stale-natural-key",
+    rejected the same way, never silently replayed as `applied=True`.
+    Parametrized over both modes (round 3): see the terminal-run regression
+    test above for why `supervised` needs its own coverage."""
+    task = _task(
+        db_session, f"GATE-STALE-{terminal_status.upper()}-{mode.upper()}", mode=mode
     )
+
+    first = _dispatch_and_approve(orchestration, task, "stale-natural-key")
     run = first.agent_run
     run.status = terminal_status
     # Whatever status the task ended up in, put it back to "todo" so only

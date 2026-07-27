@@ -17,16 +17,26 @@ def db_session():
 
 def test_command_router_parse():
     router = CommandRouter(None)
-    
+
     # Non-command message
     cmd, args = router.parse("hello world")
     assert cmd is None
     assert args == "hello world"
-    
+
     # Slash command with arguments
     cmd, args = router.parse("/pm create new task")
     assert cmd == "create_task"
     assert args == "create new task"
+
+    # Slash command without arguments
+    cmd, args = router.parse("/help")
+    assert cmd == "show_help"
+    assert args == ""
+
+    # Unknown command
+    cmd, args = router.parse("/unknown_cmd arg")
+    assert cmd is None
+    assert args == "/unknown_cmd arg"
 
 
 def test_command_key_truncation_preserves_attempt_discriminator():
@@ -44,16 +54,6 @@ def test_command_key_truncation_preserves_attempt_discriminator():
     assert key_attempt_1 != key_attempt_2
     assert key_attempt_1.endswith(":1")
     assert key_attempt_2.endswith(":2")
-
-    # Slash command without arguments
-    cmd, args = router.parse("/help")
-    assert cmd == "show_help"
-    assert args == ""
-
-    # Unknown command
-    cmd, args = router.parse("/unknown_cmd arg")
-    assert cmd is None
-    assert args == "/unknown_cmd arg"
 
 @pytest.mark.asyncio
 async def test_command_router_execute():

@@ -790,11 +790,27 @@ class TaskOrchestrationService:
         that hasn't exhausted its attempts is excluded: the worker retries it
         in place (status goes back to "queued"), so it is still in flight.
         """
-        if record.gate_type != "dispatch" or record.status != "approved":
+        effective = record
+        if effective.status == "pending":
+            # Mirror `_result_for_record`'s pending -> decision resolution:
+            # in supervised mode the record cached under the idempotency key
+            # is the pending parent, while the approve/reject decision (and
+            # the dispatched run) lives on a child record. Checking the
+            # parent's status directly always sees "pending" and never fires,
+            # which is exactly how this guard went dead in supervised mode.
+            decision = (
+                self.db.query(GateRecord)
+                .filter(GateRecord.parent_id == effective.id)
+                .order_by(GateRecord.id.desc())
+                .first()
+            )
+            if decision is not None:
+                effective = decision
+        if effective.gate_type != "dispatch" or effective.status != "approved":
             return
-        if not record.output_ref:
+        if not effective.output_ref:
             return
-        run = self.db.get(AgentRun, record.output_ref)
+        run = self.db.get(AgentRun, effective.output_ref)
         if run is None:
             return
         is_terminal = run.status in self._DEAD_RUN_STATUSES or (
@@ -802,7 +818,7 @@ class TaskOrchestrationService:
         )
         if is_terminal:
             raise StaleIdempotencyRecordError(
-                f"Idempotency key {record.idempotency_key!r} refers to run "
+                f"Idempotency key {effective.idempotency_key!r} refers to run "
                 f"{run.id!r} which is already terminal (status={run.status!r}, "
                 f"attempt={run.attempt}/{run.max_attempts}); retry dispatch "
                 "with a new idempotency key"
