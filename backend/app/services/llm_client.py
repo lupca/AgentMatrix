@@ -7,22 +7,11 @@ kept as the stable home for usage normalization and pricing utilities.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "siliconflow").lower()
-SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY")
-SILICONFLOW_BASE_URL = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.com/v1")
-SILICONFLOW_MODEL = os.getenv("SILICONFLOW_MODEL", "moonshotai/Kimi-K3")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.5-flash")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 
 @dataclass(frozen=True)
@@ -188,8 +177,6 @@ def calculate_cost(
 
 
 __all__ = [
-    "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "GOOGLE_API_KEY", "GOOGLE_MODEL",
-    "LLM_PROVIDER", "ModelPricing", "OPENAI_MODEL", "SILICONFLOW_API_KEY",
-    "SILICONFLOW_BASE_URL", "SILICONFLOW_MODEL", "UsageCounts", "calculate_cost",
+    "ModelPricing", "UsageCounts", "calculate_cost",
     "extract_usage", "get_model_pricing", "refresh_pricing_cache",
 ]
