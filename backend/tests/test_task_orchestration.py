@@ -137,6 +137,31 @@ def test_bypass_dispatch_is_audited_and_idempotent(orchestration, db_session):
     )
 
 
+def test_dispatch_re_resolves_supervised_task_after_policy_changes_to_auto(
+    orchestration,
+    db_session,
+):
+    task = _task(db_session, "GATE-003", mode="supervised")
+    task.risk = "normal"
+    db_session.add(Setting(key="autonomy", value="auto"))
+    db_session.add(Setting(key="auto_max_risk", value="normal"))
+    db_session.commit()
+    assert task.mode == "supervised"
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-after-auto-policy",
+    )
+
+    assert result.status == "approved"
+    assert result.applied is True
+    assert result.agent_run is not None
+    assert result.task.awaiting_approval is False
+    assert db_session.query(AgentRun).count() == 1
+
+
 def test_dispatch_effort_override_takes_precedence_over_agent_default(
     orchestration, db_session
 ):

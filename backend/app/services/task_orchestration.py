@@ -166,6 +166,11 @@ class TaskOrchestrationService:
         return self.AutonomyPolicy(autonomy, max_risk, max_rounds)
 
     def mode_for_task(self, task: Task, *, risk: str | None = None) -> str:
+        # Non-default modes are explicit per-task governance choices. Keep
+        # them stable while allowing the default supervised snapshot to be
+        # re-resolved when the project/global autonomy policy changes.
+        if task.mode in {"plan-only", "bypass"}:
+            return task.mode
         policy = self.resolve_autonomy(task.project)
         if policy.autonomy == "plan-only":
             return "plan-only"
@@ -1056,7 +1061,8 @@ class TaskOrchestrationService:
                     f"Task {task.id} already has active run: {active_run.id}"
                 )
 
-        if task.mode == "plan-only" and gate_type in {"dispatch", "verdict"}:
+        effective_mode = self.mode_for_task(task)
+        if effective_mode == "plan-only" and gate_type in {"dispatch", "verdict"}:
             record = self._ledger_record(
                 task=task,
                 gate_type=gate_type,
@@ -1071,7 +1077,7 @@ class TaskOrchestrationService:
             self.db.commit()
             raise ModeViolationError(record.error_message)
 
-        if task.mode == "supervised":
+        if effective_mode == "supervised":
             record = self._ledger_record(
                 task=task,
                 gate_type=gate_type,
