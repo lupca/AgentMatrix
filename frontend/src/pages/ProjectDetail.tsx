@@ -29,6 +29,7 @@ export const ProjectDetailPage: React.FC = () => {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [tasksError, setTasksError] = useState<string | null>(null);
 
   const [search, setSearch] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -38,6 +39,7 @@ export const ProjectDetailPage: React.FC = () => {
     if (!id) return;
     setLoading(true);
     setError(null);
+    setTasksError(null);
 
     try {
       // Fetch project by ID
@@ -47,8 +49,9 @@ export const ProjectDetailPage: React.FC = () => {
       let taskList: Task[] = [];
       try {
         taskList = await api.get<Task[]>(`/tasks?project=${id}`);
-      } catch (err) {
+      } catch (err: any) {
         console.warn(`Could not fetch /api/tasks?project=${id}`, err);
+        setTasksError(err?.message || 'Failed to load project tasks.');
       }
 
       setProject(projData);
@@ -159,6 +162,21 @@ export const ProjectDetailPage: React.FC = () => {
           </div>
         )}
 
+        {tasksError && (
+          <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+              <span>{tasksError}</span>
+            </div>
+            <button
+              onClick={() => fetchProjectDetail()}
+              className="underline hover:text-amber-200 font-medium flex-shrink-0"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
         {loading ? (
           <div className="h-32 bg-gray-900/60 rounded-2xl border border-gray-800 animate-pulse" />
         ) : (
@@ -189,7 +207,11 @@ export const ProjectDetailPage: React.FC = () => {
 
               <div className="flex items-center gap-3 text-xs text-gray-400">
                 <Calendar className="w-4 h-4 text-gray-500" />
-                <span>Created: {new Date(project?.created_at || Date.now()).toLocaleDateString()}</span>
+                <span>
+                  Created: {project?.created_at
+                    ? new Date(project.created_at).toLocaleDateString()
+                    : 'Unknown'}
+                </span>
                 <button
                   onClick={() => setIsSettingsOpen(true)}
                   className="ml-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-200 transition-colors"

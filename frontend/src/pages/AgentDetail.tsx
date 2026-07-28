@@ -61,7 +61,7 @@ export const AgentDetailPage: React.FC = () => {
 
       // Filter tasks assigned to this agent
       const assignedTasks = allTasks.filter(
-        (t) => t.executor === id || t.reviewer === id
+        (t) => t.id != null && (t.executor === id || t.reviewer === id)
       );
 
       setAgent(agentData);
@@ -79,8 +79,8 @@ export const AgentDetailPage: React.FC = () => {
     fetchAgentDetail();
   }, [fetchAgentDetail]);
 
-  const executorTasks = tasks.filter((t) => t.executor === id);
-  const reviewerTasks = tasks.filter((t) => t.reviewer === id);
+  const executorTasks = tasks.filter((t) => t.id != null && t.executor === id);
+  const reviewerTasks = tasks.filter((t) => t.id != null && t.reviewer === id);
 
   const displayedTasks = (activeTab === 'executor' ? executorTasks : reviewerTasks).filter(
     (t) =>
@@ -112,8 +112,10 @@ export const AgentDetailPage: React.FC = () => {
   };
 
   const capabilitiesList: string[] = Array.isArray(agent?.capabilities)
-    ? agent.capabilities.map((c) => (typeof c === 'string' ? c : JSON.stringify(c)))
-    : ['Code Implementation', 'Automated Verification', 'Unit Testing', 'Refactoring'];
+    ? agent.capabilities.filter(
+        (cap): cap is string => typeof cap === 'string' && cap.trim().length > 0,
+      )
+    : [];
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto min-h-[calc(100vh-4rem)]">
@@ -181,7 +183,9 @@ export const AgentDetailPage: React.FC = () => {
                     <span>•</span>
                     <span className="flex items-center gap-1">
                       <Calendar className="w-3.5 h-3.5 text-gray-500" />
-                      Registered: {new Date(agent?.created_at || Date.now()).toLocaleDateString()}
+                      Registered: {agent?.created_at
+                        ? new Date(agent.created_at).toLocaleDateString()
+                        : 'Unknown'}
                     </span>
                   </div>
                 </div>
