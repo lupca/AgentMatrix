@@ -7,6 +7,7 @@ from app.api import (
     audit,
     chat,
     dispatch,
+    events,
     knowledge,
     projects,
     sessions,
@@ -61,3 +62,4 @@ app.include_router(knowledge.router)
 app.include_router(stats.router)
 app.include_router(dispatch.router)
 app.include_router(stream.router)
+app.include_router(events.router)

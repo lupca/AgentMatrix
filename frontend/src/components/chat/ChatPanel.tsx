@@ -12,7 +12,6 @@ import {
 } from './ModelSelector';
 import { ChatSession, useChat } from '../../hooks/useChat';
 import { ChatSessionSummary, ContextLevel } from '../../hooks/useSessions';
-import { useWebSocket, WebSocketMessage } from '../../hooks/useWebSocket';
 import { showError, showSuccess } from '../../lib/toast';
 
 interface ChatPanelProps {
@@ -92,44 +91,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   const handleScroll = useCallback(() => {
     isNearBottomRef.current = checkIfNearBottom();
   }, [checkIfNearBottom]);
-
-  // Listen for real-time task updates via WebSocket
-  const handleWebSocketMessage = useCallback((wsMessage: WebSocketMessage) => {
-    // Handle task rollup updates (task completion notifications)
-    if (wsMessage.type === 'task_rollup' && wsMessage.message) {
-      const msg = wsMessage.message;
-      // Format as a system notification message
-      const content = `Task ${wsMessage.task_id} status: ${wsMessage.status}`;
-      const newMessage: Message = {
-        id: msg.id || `ws-${Date.now()}`,
-        role: 'system' as const,
-        content,
-        timestamp: msg.timestamp || new Date().toISOString(),
-      };
-      setMessages((prev) => {
-        // Update existing rollup or append new one
-        const existingIdx = prev.findIndex((m) => m.id === newMessage.id);
-        if (existingIdx >= 0) {
-          const updated = [...prev];
-          updated[existingIdx] = newMessage;
-          return updated;
-        }
-        return [...prev, newMessage];
-      });
-    }
-    // Handle gate pending notifications
-    if (wsMessage.type === 'gate_pending' && wsMessage.task_id) {
-      const newMessage: Message = {
-        id: `gate-${wsMessage.task_id}-${Date.now()}`,
-        role: 'system' as const,
-        content: `Task ${wsMessage.task_id} requires approval at ${wsMessage.gate} gate`,
-        timestamp: new Date().toISOString(),
-      };
-      setMessages((prev) => [...prev, newMessage]);
-    }
-  }, []);
-
-  useWebSocket(handleWebSocketMessage);
 
   // Fetch session history on mount or threadId change
   const fetchSessionHistory = useCallback(async () => {
