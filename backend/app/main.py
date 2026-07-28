@@ -23,11 +23,12 @@ Base.metadata.create_all(bind=engine)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: start Redis subscriber for WebSocket notifications
-    ws.start_redis_subscriber()
+    import os
+    if not os.getenv("TESTING"):
+        ws.start_redis_subscriber()
     yield
-    # Shutdown: stop Redis subscriber
-    ws.stop_redis_subscriber()
+    if not os.getenv("TESTING"):
+        ws.stop_redis_subscriber()
 
 
 app = FastAPI(
@@ -63,3 +64,4 @@ app.include_router(stats.router)
 app.include_router(dispatch.router)
 app.include_router(stream.router)
 app.include_router(events.router)
+

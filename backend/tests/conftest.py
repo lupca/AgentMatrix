@@ -1,4 +1,7 @@
+import os
 import subprocess
+
+os.environ["TESTING"] = "1"
 
 import pytest
 from sqlalchemy import create_engine

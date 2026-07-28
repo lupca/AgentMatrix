@@ -435,6 +435,16 @@ class TaskOrchestrationService:
         task.awaiting_approval = False
         task.approval_prompt = None
         self._audit(task, record, reason=reason)
+        emit_task_event(
+            task_id=task.id,
+            event_type="gate_passed" if effective_decision == "approved" else "gate_rejected",
+            payload={
+                "gate": pending.gate_type,
+                "gate_record_id": record.id,
+                "reason": reason,
+            },
+            db=self.db,
+        )
         self.db.commit()
         self.db.refresh(task)
         self.db.refresh(record)
@@ -1197,6 +1207,16 @@ class TaskOrchestrationService:
             task.error = None
             task.awaiting_approval = False
             task.approval_prompt = None
+            emit_task_event(
+                task_id=task.id,
+                event_type="dispatched",
+                payload={
+                    "run_id": run_id,
+                    "agent": str(payload["agent_id"]),
+                    "cli": str(payload["cli"]),
+                },
+                db=self.db,
+            )
             return run, run_id
         if gate_type == "review_order":
             reviewer = str(payload["reviewer"])
