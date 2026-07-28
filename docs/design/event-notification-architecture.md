@@ -1,6 +1,6 @@
 # Event & Notification Architecture
 
-## Status: Draft
+## Status: Draft - Issues Documented, Implementation Pending
 
 ## Context
 
@@ -9,11 +9,15 @@ Real-time notification system cần thông báo cho user khi:
 - Gate cần approval
 - Agent run status changes
 
+---
+
 ## Current Problems
 
 ### 1. Two Parallel Event Systems
 - `publish_event()` - direct WebSocket (chỉ work trong API process)
 - `publish_task_event()` - Redis pub/sub (cross-process)
+
+**Impact:** Inconsistent event delivery, khó maintain
 
 ### 2. Silent Event Drop
 ```python
@@ -24,14 +28,88 @@ def publish_event(message: dict) -> None:
         return  # SILENT DROP - worker không có event loop
 ```
 
-### 3. Session Mismatch
-- `record_task_rollup()` ghi vào **fixed global session**
-- User chat trong **session riêng** do `useSessions` tạo
-- Rollup messages không hiện trong chat user đang xem
+**Impact:** Events từ worker process bị mất hoàn toàn
+
+### 3. Session Mismatch (Critical)
+
+**Root cause:**
+```python
+def get_or_create_global_session(self):
+    # 1. Tìm BẤT KỲ active global session, sort by pinned + last_activity
+    db_session = query.filter(context_level="global", status="active").first()
+    
+    # 2. Nếu có → return nó (UUID random, không phải session user đang xem)
+    if db_session is not None:
+        return db_session
+    
+    # 3. CHỈ KHI không có session nào → tạo id="global"
+    db_session = SessionModel(id="global", ...)
+```
+
+**Flow thực tế:**
+1. User mở Global Chat → `useSessions` tạo session mới (UUID: `abc123`)
+2. User dispatch task → task runs in worker
+3. Task completes → `record_task_rollup()` gọi `get_or_create_global_session()`
+4. Function trả về session `xyz789` (session gần nhất, KHÔNG PHẢI `abc123`)
+5. Rollup ghi vào `xyz789`, user đang xem `abc123` → **không thấy gì**
+
+**Impact:** User không bao giờ thấy notification trong chat đang xem
 
 ### 4. WebSocket Not Proxied (FIXED)
 - Vite/Nginx không proxy `/ws/` endpoint
 - Frontend connect sai server
+- **Fixed in commit e7f35d2**
+
+### 5. Sync Redis in Async Context
+```python
+async def _redis_subscriber():
+    while True:
+        # BLOCKING CALL trong async function
+        message = pubsub.get_message(timeout=1.0)
+        await asyncio.sleep(0.1)  # Polling, không phải true subscription
+```
+
+**Impact:** Inefficient, có thể miss messages
+
+### 6. No Event Filtering
+- Frontend nhận TẤT CẢ events từ WebSocket
+- Không filter theo session/task/project context
+
+**Impact:** Unnecessary bandwidth, potential confusion
+
+---
+
+## Design Options for Session Mismatch
+
+### Option A: Single Dedicated Inbox
+- Mark 1 session as "inbox" (e.g., pinned=true, hoặc special flag)
+- All rollups go to inbox
+- User phải xem inbox để thấy notifications
+
+**Pros:** Simple, predictable
+**Cons:** User phải switch session để xem
+
+### Option B: Rollup to Active Session
+- Frontend gửi `session_id` khi dispatch task hoặc qua WebSocket subscription
+- Rollup ghi vào session user đang xem
+
+**Pros:** Best UX - notification hiện ngay trong chat đang xem
+**Cons:** Cần modify frontend + API
+
+### Option C: Broadcast to All Global Sessions
+- Rollup ghi vào TẤT CẢ active global sessions
+
+**Pros:** User luôn thấy notification dù ở session nào
+**Cons:** Duplicate data, complex cleanup
+
+### Option D: Separate Notification System
+- Không mix notification với chat messages
+- UI riêng: bell icon, toast, notification panel
+
+**Pros:** Clean separation of concerns
+**Cons:** Different UX pattern, more frontend work
+
+**Recommendation:** Option B hoặc D
 
 ## Target Architecture
 
