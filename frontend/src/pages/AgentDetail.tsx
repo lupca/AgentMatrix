@@ -39,27 +39,19 @@ export const AgentDetailPage: React.FC = () => {
     setError(null);
 
     try {
-      // 1. Fetch Agent info
-      const agentData = await api.get<Agent>(`/agents/${id}`);
+      const [agentData, allStats, allTasks] = await Promise.all([
+        api.get<Agent>(`/agents/${id}`),
+        api.get<AgentStatsType[]>('/stats/agents').catch((err) => {
+          console.warn('Could not fetch /api/stats/agents', err);
+          return [] as AgentStatsType[];
+        }),
+        api.get<Task[]>('/tasks').catch((err) => {
+          console.warn('Could not fetch /api/tasks', err);
+          return [] as Task[];
+        }),
+      ]);
 
-      // 2. Fetch Agent stats
-      let statsData: AgentStatsType | null = null;
-      try {
-        const allStats = await api.get<AgentStatsType[]>('/stats/agents');
-        statsData = allStats.find((s) => s.agent_id === id) || null;
-      } catch (err) {
-        console.warn('Could not fetch /api/stats/agents', err);
-      }
-
-      // 3. Fetch all tasks to filter by executor or reviewer
-      let allTasks: Task[] = [];
-      try {
-        allTasks = await api.get<Task[]>('/tasks');
-      } catch (err) {
-        console.warn('Could not fetch /api/tasks', err);
-      }
-
-      // Filter tasks assigned to this agent
+      const statsData = allStats.find((s) => s.agent_id === id) || null;
       const assignedTasks = allTasks.filter(
         (t) => t.id != null && (t.executor === id || t.reviewer === id)
       );

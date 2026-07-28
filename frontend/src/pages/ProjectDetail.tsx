@@ -42,17 +42,14 @@ export const ProjectDetailPage: React.FC = () => {
     setTasksError(null);
 
     try {
-      // Fetch project by ID
-      const projData = await api.get<Project>(`/projects/${id}`);
-
-      // Fetch tasks for this project
-      let taskList: Task[] = [];
-      try {
-        taskList = await api.get<Task[]>(`/tasks?project=${id}`);
-      } catch (err: any) {
-        console.warn(`Could not fetch /api/tasks?project=${id}`, err);
-        setTasksError(err?.message || 'Failed to load project tasks.');
-      }
+      const [projData, taskList] = await Promise.all([
+        api.get<Project>(`/projects/${id}`),
+        api.get<Task[]>(`/tasks?project=${id}`).catch((err: any) => {
+          console.warn(`Could not fetch /api/tasks?project=${id}`, err);
+          setTasksError(err?.message || 'Failed to load project tasks.');
+          return [] as Task[];
+        }),
+      ]);
 
       setProject(projData);
       setTasks(taskList || []);

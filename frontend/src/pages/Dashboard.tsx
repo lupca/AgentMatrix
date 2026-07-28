@@ -85,7 +85,7 @@ export const Dashboard: React.FC = () => {
     try {
       // Project progress is not included in /api/stats/overview. Fetch the
       // project registry separately, then combine it with task statistics.
-      const [res, projectList, usage, comparison] = await Promise.all([
+      const [res, projectList, usage, comparison, projectStats] = await Promise.all([
         api.get<OverviewApiResponse>('/stats/overview'),
         api.get<Project[]>('/projects'),
         api.get<TokenStatsApiResponse>('/stats/tokens').catch((err) => {
@@ -96,14 +96,11 @@ export const Dashboard: React.FC = () => {
           console.warn('Failed to fetch /api/stats/tokens/comparison:', err);
           return null;
         }),
+        api.get<ProjectStats[]>('/stats/projects').catch((err) => {
+          console.warn('Failed to fetch /api/stats/projects:', err);
+          return [] as ProjectStats[];
+        }),
       ]);
-
-      let projectStats: ProjectStats[] = [];
-      try {
-        projectStats = await api.get<ProjectStats[]>('/stats/projects');
-      } catch (err) {
-        console.warn('Failed to fetch /api/stats/projects:', err);
-      }
 
       const statsByProject = new Map(projectStats.map((stats) => [stats.project_id, stats]));
       const projectProgress: ProjectProgress[] = (projectList || []).map((project) => {
