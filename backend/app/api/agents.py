@@ -5,6 +5,8 @@ from app.db.models import Agent as AgentModel
 from app.graph.context import invalidate_context_snapshot
 from app.schemas.agent import Agent, AgentCreate, AgentUpdate
 from app.services import entity_admin
+from app.db.archive import with_archived
+from app.services.archive import ArchiveError, ArchiveService
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -15,9 +17,10 @@ def get_agents(
     status: str | None = None,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    include_archived: bool = Query(False),
     db: Session = Depends(get_db)
 ):
-    query = db.query(AgentModel)
+    query = with_archived(db, AgentModel, include_archived)
     if role:
         query = query.filter(AgentModel.role == role)
     if status:
@@ -39,8 +42,8 @@ def create_agent(agent_in: AgentCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/{id}", response_model=Agent)
-def get_agent(id: str, db: Session = Depends(get_db)):
-    db_agent = db.query(AgentModel).filter(AgentModel.id == id).first()
+def get_agent(id: str, include_archived: bool = Query(False), db: Session = Depends(get_db)):
+    db_agent = with_archived(db, AgentModel, include_archived).filter(AgentModel.id == id).first()
     if not db_agent:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -86,14 +89,25 @@ def set_default_agent(id: str, db: Session = Depends(get_db)):
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_agent(id: str, db: Session = Depends(get_db)):
-    db_agent = db.query(AgentModel).filter(AgentModel.id == id).first()
-    if not db_agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent '{id}' not found."
-        )
-
-    db.delete(db_agent)
-    db.commit()
+    try:
+        ArchiveService(db, "rest:agents").archive("agents", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     invalidate_context_snapshot(db)
     return None
+
+
+@router.post("/{id}/archive")
+def archive_agent(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:agents").archive("agents", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/{id}/restore")
+def restore_agent(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:agents").restore("agents", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc

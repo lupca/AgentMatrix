@@ -20,6 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import validates, relationship
 from sqlalchemy.sql import func
 from app.db.base import Base
+from app.db.mixins import ArchivableMixin
 from app.graph.state import FourEyesViolation
 
 
@@ -40,7 +41,7 @@ class AgentType(str, Enum):
     API = "api"
 
 
-class Task(Base):
+class Task(ArchivableMixin, Base):
     __tablename__ = "tasks"
 
     id = Column(String(20), primary_key=True)
@@ -272,7 +273,7 @@ def _admin_gate_records_cannot_be_deleted(*_args) -> None:
     raise ValueError("AdminGateRecord is immutable and cannot be deleted")
 
 
-class Session(Base):
+class Session(ArchivableMixin, Base):
     __tablename__ = "sessions"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -344,7 +345,7 @@ class AuditLog(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class Project(Base):
+class Project(ArchivableMixin, Base):
     __tablename__ = "projects"
 
     id = Column(String(50), primary_key=True)
@@ -361,7 +362,7 @@ class Project(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class Agent(Base):
+class Agent(ArchivableMixin, Base):
     __tablename__ = "agents"
 
     id = Column(String(50), primary_key=True)
@@ -547,7 +548,7 @@ class ModelPricing(Base):
     )
 
 
-class Setting(Base):
+class Setting(ArchivableMixin, Base):
     """Whitelisted system-configuration KV store (ADR-001 §D2 Phase 2d).
 
     Only keys in ``entity_admin.SETTINGS_WHITELIST`` may be written; enforced
@@ -563,7 +564,7 @@ class Setting(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class KnowledgeItem(Base):
+class KnowledgeItem(ArchivableMixin, Base):
     __tablename__ = "knowledge_items"
 
     id = Column(String(50), primary_key=True)

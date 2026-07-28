@@ -6,6 +6,8 @@ from app.db.models import ContextLevel, Session as SessionModel, SessionStatus, 
 from app.graph.context import invalidate_context_snapshot
 from app.schemas.session import Session as SessionSchema, SessionCreate, SessionUpdate
 from app.services.llm_service import provider_name_for_model
+from app.db.archive import with_archived
+from app.services.archive import ArchiveError, ArchiveService
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -119,9 +121,10 @@ def get_sessions(
     status_: SessionStatus | None = Query(None, alias="status"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    include_archived: bool = Query(False),
     db: Session = Depends(get_db)
 ):
-    query = db.query(SessionModel)
+    query = with_archived(db, SessionModel, include_archived)
     if task_id:
         query = query.filter(SessionModel.task_id == task_id)
     if context_level:
@@ -157,14 +160,30 @@ def create_session(session_in: SessionCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/{id}", response_model=SessionSchema)
-def get_session(id: str, db: Session = Depends(get_db)):
-    db_session = db.query(SessionModel).filter(SessionModel.id == id).first()
+def get_session(id: str, include_archived: bool = Query(False), db: Session = Depends(get_db)):
+    db_session = with_archived(db, SessionModel, include_archived).filter(SessionModel.id == id).first()
     if not db_session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session '{id}' not found."
         )
     return db_session
+
+
+@router.post("/{id}/archive")
+def archive_session(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:sessions").archive("sessions", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/{id}/restore")
+def restore_session(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:sessions").restore("sessions", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.patch("/{id}", response_model=SessionSchema)

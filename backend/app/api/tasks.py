@@ -21,6 +21,8 @@ from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
 )
+from app.db.archive import with_archived
+from app.services.archive import ArchiveError, ArchiveService
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -72,9 +74,10 @@ def get_tasks(
     project: str | None = None,
     limit: int = Query(20, ge=1, le=1000),
     offset: int = Query(0, ge=0),
+    include_archived: bool = Query(False),
     db: Session = Depends(get_db)
 ):
-    query = db.query(TaskModel)
+    query = with_archived(db, TaskModel, include_archived)
     if status:
         query = query.filter(TaskModel.status == status)
     if project:
@@ -152,8 +155,8 @@ def create_task(task_in: TaskCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/{id}", response_model=Task)
-def get_task(id: str, db: Session = Depends(get_db)):
-    db_task = db.query(TaskModel).filter(TaskModel.id == id).first()
+def get_task(id: str, include_archived: bool = Query(False), db: Session = Depends(get_db)):
+    db_task = with_archived(db, TaskModel, include_archived).filter(TaskModel.id == id).first()
     if not db_task:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -164,6 +167,22 @@ def get_task(id: str, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(db_task)
     return db_task
+
+
+@router.post("/{id}/archive")
+def archive_task(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:tasks").archive("tasks", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/{id}/restore")
+def restore_task(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:tasks").restore("tasks", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/{id}/suggested-agents", response_model=list[AgentSuggestion])

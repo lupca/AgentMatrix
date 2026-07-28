@@ -41,5 +41,6 @@ class Project(BaseModel):
     autonomy_policy: dict[str, Any] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    archived_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)

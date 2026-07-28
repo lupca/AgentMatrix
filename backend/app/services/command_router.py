@@ -18,6 +18,8 @@ from app.db.models import (
 )
 from app.services import entity_admin
 from app.services.admin_gate import AdminGateService, AdminOrchestrationError
+from app.services.archive import ArchiveError, ArchiveService
+from app.db.archive import with_archived
 from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
@@ -427,6 +429,7 @@ class CommandRouter:
         filters: dict[str, Any] = {}
         limit = 20
         offset = 0
+        include_archived = False
         for token in parts[1:]:
             if '=' not in token:
                 return {'error': f"Invalid filter token '{token}', expected field=value"}
@@ -441,6 +444,8 @@ class CommandRouter:
                     offset = int(value)
                 except ValueError:
                     return {'error': 'offset must be an integer'}
+            elif key == 'include_archived':
+                include_archived = _coerce_filter_value(value, 'bool')
             elif key in entity_spec['filters']:
                 filters[key] = _coerce_filter_value(value, entity_spec['filters'][key])
             else:
@@ -457,7 +462,7 @@ class CommandRouter:
             return {'error': 'offset must be >= 0'}
 
         model = entity_spec['model']
-        query = self.db.query(model)
+        query = with_archived(self.db, model, include_archived) if hasattr(model, 'archived_at') else self.db.query(model)
         for key, value in filters.items():
             query = query.filter(getattr(model, key) == value)
         rows = query.order_by(entity_spec['order_by']).offset(offset).limit(limit).all()
@@ -1104,15 +1109,20 @@ class CommandRouter:
                 if not item_id:
                     return {'error': 'id is required for update'}
                 item = entity_admin.update_knowledge(self.db, item_id, fields)
-            elif action == 'archive':
+            elif action in {'archive', 'restore'}:
                 if not item_id:
-                    return {'error': 'id is required for archive'}
-                item = entity_admin.archive_knowledge(self.db, item_id)
+                    return {'error': f'id is required for {action}'}
+                try:
+                    service = ArchiveService(self.db, actor)
+                    service_result = service.archive('knowledge', item_id) if action == 'archive' else service.restore('knowledge', item_id)
+                except ArchiveError as exc:
+                    return {'error': str(exc)}
+                item = self.db.get(KnowledgeItem, item_id)
             else:
                 return {
                     'error': (
                         f"Unknown action '{action}'. Valid actions: "
-                        "create, update, archive"
+                        "create, update, archive, restore"
                     )
                 }
         except entity_admin.EntityError as exc:
@@ -1123,7 +1133,7 @@ class CommandRouter:
                 task_id=None,
                 action=f'manage_knowledge:{action}',
                 actor=actor,
-                details={'id': item.id},
+                details={'id': item.id, 'archive_result': locals().get('service_result')},
             )
         )
         self.db.commit()

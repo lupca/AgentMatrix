@@ -5,6 +5,8 @@ from app.db.models import ContextLevel, Project as ProjectModel, Session as Sess
 from app.graph.context import invalidate_context_snapshot
 from app.schemas.project import Project, ProjectCreate, ProjectUpdate
 from app.services import entity_admin
+from app.db.archive import with_archived
+from app.services.archive import ArchiveError, ArchiveService
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -14,9 +16,10 @@ def get_projects(
     status: str | None = None,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    include_archived: bool = Query(False),
     db: Session = Depends(get_db)
 ):
-    query = db.query(ProjectModel)
+    query = with_archived(db, ProjectModel, include_archived)
     if status:
         query = query.filter(ProjectModel.status == status)
     return query.offset(offset).limit(limit).all()
@@ -36,8 +39,8 @@ def create_project(project_in: ProjectCreate, db: Session = Depends(get_db)):
 
 
 @router.get("/{id}", response_model=Project)
-def get_project(id: str, db: Session = Depends(get_db)):
-    db_project = db.query(ProjectModel).filter(ProjectModel.id == id).first()
+def get_project(id: str, include_archived: bool = Query(False), db: Session = Depends(get_db)):
+    db_project = with_archived(db, ProjectModel, include_archived).filter(ProjectModel.id == id).first()
     if not db_project:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -57,29 +60,27 @@ def update_project(id: str, project_in: ProjectUpdate, db: Session = Depends(get
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(id: str, db: Session = Depends(get_db)):
-    db_project = db.query(ProjectModel).filter(ProjectModel.id == id).first()
-    if not db_project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project '{id}' not found."
-        )
-
-    # Sessions scoped to this project would otherwise violate
-    # ck_sessions_context_level_consistency once project_id is nulled out by
-    # the FK's ON DELETE SET NULL, so demote them to global context first.
-    db.query(SessionModel).filter(SessionModel.project_id == id).update(
-        {
-            SessionModel.context_level: ContextLevel.GLOBAL.value,
-            SessionModel.project_id: None,
-            SessionModel.task_id: None,
-        },
-        synchronize_session=False,
-    )
-
-    db.delete(db_project)
-    db.commit()
-    invalidate_context_snapshot(db, project_id=id)
+    try:
+        ArchiveService(db, "rest:projects").archive_project(id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return None
+
+
+@router.post("/{id}/archive")
+def archive_project(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:projects").archive_project(id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/{id}/restore")
+def restore_project(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:projects").restore_project(id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.post("/{id}/build-graph")

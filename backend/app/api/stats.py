@@ -10,6 +10,7 @@ from app.db.models import (
     ModelPricing,
     Project as ProjectModel,
     Task as TaskModel,
+    AuditLog as AuditLogModel,
 )
 from app.schemas.stats import ProjectStats, AgentStats
 
@@ -129,11 +130,25 @@ def get_stats_overview(db: Session = Depends(get_db)):
     inactive_count = done_tasks + by_status.get("cancelled", 0) + by_status.get("failed", 0)
     active_tasks = max(0, total_tasks - inactive_count)
 
+    recent_audit_logs = db.query(AuditLogModel).order_by(AuditLogModel.created_at.desc()).limit(20).all()
+    recent_activity = [
+        {
+            "id": log.id,
+            "task_id": log.task_id,
+            "action": log.action,
+            "actor": log.actor,
+            "details": log.details,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+        }
+        for log in recent_audit_logs
+    ]
+
     return {
         "totalTasks": total_tasks,
         "completedTasks": done_tasks,
         "activeGates": active_tasks,
         "tasksByStatus": by_status,
+        "recentActivity": recent_activity,
     }
 
 

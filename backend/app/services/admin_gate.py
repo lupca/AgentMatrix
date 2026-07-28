@@ -16,16 +16,18 @@ from typing import Any, Literal
 
 from sqlalchemy.orm import Session
 
-from app.db.models import AdminGateRecord, AuditLog
+from app.db.models import AdminGateRecord, AuditLog, Agent, KnowledgeItem, Project
 from app.services import entity_admin
+from app.services.archive import ArchiveError, ArchiveService
 
 GateDecision = Literal["approved", "rejected"]
 
 _MODES = {"supervised", "bypass"}
 
 _ENTITY_ACTIONS: dict[str, set[str]] = {
-    "projects": {"create", "update", "archive"},
-    "agents": {"create", "update", "disable"},
+    "projects": {"create", "update", "archive", "restore"},
+    "agents": {"create", "update", "disable", "archive", "restore"},
+    "knowledge": {"create", "update", "archive", "restore"},
     "settings": {"update"},
 }
 
@@ -208,9 +210,12 @@ class AdminGateService:
                 obj = entity_admin.update_setting(self.db, entity_id, payload.get("value"))
                 output = {"key": obj.key, "value": obj.value, "description": obj.description}
                 return obj.key, output
+            elif entity == "knowledge":
+                obj = self._apply_knowledge(action, entity_id, payload)
+                output = {"id": obj.id, "title": obj.title, "status": obj.status}
             else:
                 raise AdminPrerequisiteError(f"Unknown admin entity: {entity}")
-        except entity_admin.EntityError as exc:
+        except (entity_admin.EntityError, ArchiveError) as exc:
             raise AdminPrerequisiteError(str(exc)) from exc
         return obj.id, output
 
@@ -219,14 +224,35 @@ class AdminGateService:
             return entity_admin.create_project(self.db, payload)
         if action == "update":
             return entity_admin.update_project(self.db, entity_id, payload)
-        return entity_admin.archive_project(self.db, entity_id)
+        if action == "archive":
+            ArchiveService(self.db, "admin_gate").archive_project(entity_id)
+        else:
+            ArchiveService(self.db, "admin_gate").restore_project(entity_id)
+        return self.db.get(Project, entity_id)
 
     def _apply_agent(self, action: str, entity_id: str | None, payload: dict[str, Any]):
         if action == "create":
             return entity_admin.create_agent(self.db, payload)
         if action == "update":
             return entity_admin.update_agent(self.db, entity_id, payload)
-        return entity_admin.disable_agent(self.db, entity_id)
+        if action == "disable":
+            return entity_admin.disable_agent(self.db, entity_id)
+        if action == "archive":
+            ArchiveService(self.db, "admin_gate").archive("agents", entity_id)
+        else:
+            ArchiveService(self.db, "admin_gate").restore("agents", entity_id)
+        return self.db.get(Agent, entity_id)
+
+    def _apply_knowledge(self, action: str, entity_id: str | None, payload: dict[str, Any]):
+        if action == "create":
+            return entity_admin.create_knowledge(self.db, payload)
+        if action == "update":
+            return entity_admin.update_knowledge(self.db, entity_id, payload)
+        if action == "archive":
+            ArchiveService(self.db, "admin_gate").archive("knowledge", entity_id)
+        else:
+            ArchiveService(self.db, "admin_gate").restore("knowledge", entity_id)
+        return self.db.get(KnowledgeItem, entity_id)
 
     def _audit(self, record: AdminGateRecord) -> None:
         self.db.flush()

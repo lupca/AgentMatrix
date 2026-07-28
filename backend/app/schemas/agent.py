@@ -73,6 +73,7 @@ class Agent(BaseModel):
     is_default: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    archived_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 

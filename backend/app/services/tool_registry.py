@@ -128,6 +128,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "description": "Row offset for pagination.",
                         "default": 0,
                     },
+                    "include_archived": {
+                        "type": "boolean",
+                        "description": "Include archived rows (default false).",
+                        "default": False,
+                    },
                 },
                 "required": ["entity"],
             },
@@ -285,8 +290,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="manage_project",
             description=(
-                "Create, update, or archive a project. No hard delete — "
-                "archive sets status to 'archived'. Admin-permission: in "
+                "Create, update, archive, or restore a project. No hard delete. "
+                "Admin-permission: in "
                 "supervised mode this creates a pending gate awaiting "
                 "/approve; in bypass mode it applies immediately."
             ),
@@ -295,7 +300,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["create", "update", "archive"],
+                        "enum": ["create", "update", "archive", "restore"],
                     },
                     "id": {
                         "type": "string",
@@ -338,7 +343,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["create", "update", "disable"],
+                        "enum": ["create", "update", "disable", "archive", "restore"],
                     },
                     "id": {
                         "type": "string",
@@ -376,13 +381,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="manage_knowledge",
-            description="Create, update, or archive a knowledge item. No hard delete.",
+            description="Create, update, archive, or restore a knowledge item. No hard delete.",
             parameters={
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["create", "update", "archive"],
+                        "enum": ["create", "update", "archive", "restore"],
                     },
                     "id": {
                         "type": "string",

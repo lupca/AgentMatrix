@@ -45,5 +45,6 @@ class Session(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     last_activity_at: datetime | None = None
+    archived_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)

@@ -5,6 +5,8 @@ from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.db.models import KnowledgeItem as KnowledgeItemModel
 from app.schemas.knowledge import KnowledgeItem, KnowledgeItemCreate, KnowledgeItemUpdate
+from app.db.archive import with_archived
+from app.services.archive import ArchiveError, ArchiveService
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
@@ -16,9 +18,10 @@ def get_knowledge_items(
     search: str | None = None,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    include_archived: bool = Query(False),
     db: Session = Depends(get_db)
 ):
-    query = db.query(KnowledgeItemModel)
+    query = with_archived(db, KnowledgeItemModel, include_archived)
     if category:
         query = query.filter(KnowledgeItemModel.category == category)
     if project:
@@ -55,8 +58,8 @@ def create_knowledge_item(item_in: KnowledgeItemCreate, db: Session = Depends(ge
 
 
 @router.get("/{id}", response_model=KnowledgeItem)
-def get_knowledge_item(id: str, db: Session = Depends(get_db)):
-    db_item = db.query(KnowledgeItemModel).filter(KnowledgeItemModel.id == id).first()
+def get_knowledge_item(id: str, include_archived: bool = Query(False), db: Session = Depends(get_db)):
+    db_item = with_archived(db, KnowledgeItemModel, include_archived).filter(KnowledgeItemModel.id == id).first()
     if not db_item:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -85,13 +88,24 @@ def update_knowledge_item(id: str, item_in: KnowledgeItemUpdate, db: Session = D
 
 @router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_knowledge_item(id: str, db: Session = Depends(get_db)):
-    db_item = db.query(KnowledgeItemModel).filter(KnowledgeItemModel.id == id).first()
-    if not db_item:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Knowledge item '{id}' not found."
-        )
-
-    db.delete(db_item)
-    db.commit()
+    try:
+        ArchiveService(db, "rest:knowledge").archive("knowledge", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     return None
+
+
+@router.post("/{id}/archive")
+def archive_knowledge_item(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:knowledge").archive("knowledge", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/{id}/restore")
+def restore_knowledge_item(id: str, db: Session = Depends(get_db)):
+    try:
+        return ArchiveService(db, "rest:knowledge").restore("knowledge", id)
+    except ArchiveError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
