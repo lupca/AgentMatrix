@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Agent, AgentStats as AgentStatsType } from '../types/agent';
@@ -79,15 +79,15 @@ export const AgentDetailPage: React.FC = () => {
     fetchAgentDetail();
   }, [fetchAgentDetail]);
 
-  const executorTasks = tasks.filter((t) => t.id != null && t.executor === id);
-  const reviewerTasks = tasks.filter((t) => t.id != null && t.reviewer === id);
+  const executorTasks = useMemo(() => tasks.filter((t) => t.id != null && t.executor === id), [tasks, id]);
+  const reviewerTasks = useMemo(() => tasks.filter((t) => t.id != null && t.reviewer === id), [tasks, id]);
 
-  const displayedTasks = (activeTab === 'executor' ? executorTasks : reviewerTasks).filter(
+  const displayedTasks = useMemo(() => (activeTab === 'executor' ? executorTasks : reviewerTasks).filter(
     (t) =>
       t.title.toLowerCase().includes(search.toLowerCase()) ||
       t.id.toLowerCase().includes(search.toLowerCase()) ||
       t.project.toLowerCase().includes(search.toLowerCase())
-  );
+  ), [activeTab, executorTasks, reviewerTasks, search]);
 
   const executedCount = agentStats?.tasks_executed ?? executorTasks.length;
   const reviewedCount = agentStats?.tasks_reviewed ?? reviewerTasks.length;

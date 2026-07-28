@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { Task } from '../../types/task';
 import Pagination from '../common/Pagination';
@@ -25,6 +25,69 @@ interface TaskTableProps {
 type SortField = 'id' | 'title' | 'project' | 'status' | 'priority' | 'current_gate' | 'updated_at';
 type SortDirection = 'asc' | 'desc';
 
+const StatusBadge: React.FC<{ status: string }> = React.memo(({ status }) => {
+  switch (status.toLowerCase()) {
+    case 'todo':
+      return (
+        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">
+          <Clock className="w-3 h-3 mr-1 text-gray-400" />
+          To Do
+        </span>
+      );
+    case 'dispatched':
+      return (
+        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30">
+          <PlayCircle className="w-3 h-3 mr-1 animate-pulse" />
+          Dispatched
+        </span>
+      );
+    case 'in-review':
+      return (
+        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-500/10 text-purple-400 border border-purple-500/30">
+          <UserCheck className="w-3 h-3 mr-1" />
+          In Review
+        </span>
+      );
+    case 'done':
+      return (
+        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+          <CheckCircle2 className="w-3 h-3 mr-1" />
+          Done
+        </span>
+      );
+    default:
+      return (
+        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">
+          {status}
+        </span>
+      );
+  }
+});
+
+const PriorityBadge: React.FC<{ priority?: string | null }> = React.memo(({ priority }) => {
+  if (!priority) return null;
+  const prio = priority.toLowerCase();
+  if (prio === 'high' || prio === 'critical') {
+    return (
+      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
+        High
+      </span>
+    );
+  }
+  if (prio === 'medium') {
+    return (
+      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+        Med
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
+      Low
+    </span>
+  );
+});
+
 export const TaskTable: React.FC<TaskTableProps> = ({
   tasks,
   loading = false,
@@ -46,7 +109,7 @@ export const TaskTable: React.FC<TaskTableProps> = ({
     }
   };
 
-  const sortedTasks = [...tasks].sort((a, b) => {
+  const sortedTasks = useMemo(() => [...tasks].sort((a, b) => {
     let valA = a[sortField] || '';
     let valB = b[sortField] || '';
 
@@ -56,76 +119,13 @@ export const TaskTable: React.FC<TaskTableProps> = ({
     if (valA < valB) return sortDirection === 'asc' ? -1 : 1;
     if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
     return 0;
-  });
+  }), [tasks, sortField, sortDirection]);
 
   const totalPages = Math.max(1, Math.ceil(sortedTasks.length / pageSize));
   const paginatedTasks = sortedTasks.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   const toggleExpandRow = (taskId: string) => {
     setExpandedTaskId(expandedTaskId === taskId ? null : taskId);
-  };
-
-  const getStatusBadge = (status: string) => {
-    switch (status.toLowerCase()) {
-      case 'todo':
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">
-            <Clock className="w-3 h-3 mr-1 text-gray-400" />
-            To Do
-          </span>
-        );
-      case 'dispatched':
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30">
-            <PlayCircle className="w-3 h-3 mr-1 animate-pulse" />
-            Dispatched
-          </span>
-        );
-      case 'in-review':
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-500/10 text-purple-400 border border-purple-500/30">
-            <UserCheck className="w-3 h-3 mr-1" />
-            In Review
-          </span>
-        );
-      case 'done':
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-            <CheckCircle2 className="w-3 h-3 mr-1" />
-            Done
-          </span>
-        );
-      default:
-        return (
-          <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-300 border border-gray-700">
-            {status}
-          </span>
-        );
-    }
-  };
-
-  const getPriorityBadge = (priority?: string | null) => {
-    if (!priority) return null;
-    const prio = priority.toLowerCase();
-    if (prio === 'high' || prio === 'critical') {
-      return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-500/10 text-red-400 border border-red-500/20">
-          High
-        </span>
-      );
-    }
-    if (prio === 'medium') {
-      return (
-        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
-          Med
-        </span>
-      );
-    }
-    return (
-      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20">
-        Low
-      </span>
-    );
   };
 
   const renderSortIcon = (field: SortField) => {
@@ -246,14 +246,14 @@ export const TaskTable: React.FC<TaskTableProps> = ({
                               gate: {task.current_gate}
                             </span>
                           )}
-                          {task.priority && getPriorityBadge(task.priority)}
+                          {task.priority && <PriorityBadge priority={task.priority} />}
                         </div>
                       </div>
                     </td>
 
                     {/* Status Column */}
                     <td className="py-3.5 px-4 align-top pt-4">
-                      {getStatusBadge(task.status)}
+                      <StatusBadge status={task.status} />
                     </td>
 
                     {/* Assignees Column */}

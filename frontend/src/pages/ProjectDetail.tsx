@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { api } from '../lib/api';
 import { Project } from '../types/project';
@@ -79,7 +79,7 @@ export const ProjectDetailPage: React.FC = () => {
   };
 
   // Filter tasks
-  const filteredTasks = tasks.filter((t) => {
+  const filteredTasks = useMemo(() => tasks.filter((t) => {
     const matchesSearch =
       t.title.toLowerCase().includes(search.toLowerCase()) ||
       t.id.toLowerCase().includes(search.toLowerCase()) ||
@@ -90,7 +90,7 @@ export const ProjectDetailPage: React.FC = () => {
       statusFilter === 'all' || t.status.toLowerCase() === statusFilter.toLowerCase();
 
     return matchesSearch && matchesStatus;
-  });
+  }), [tasks, search, statusFilter]);
 
   const totalTasks = tasks.length;
   const completedTasks = tasks.filter(

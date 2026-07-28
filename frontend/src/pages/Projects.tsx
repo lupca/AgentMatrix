@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '../lib/api';
 import { Project, ProjectStats } from '../types/project';
 import ProjectCard from '../components/projects/ProjectCard';
@@ -94,7 +94,7 @@ export const ProjectsPage: React.FC = () => {
 
 
   // Filter projects based on search query & status filter
-  const filteredProjects = projects.filter((p) => {
+  const filteredProjects = useMemo(() => projects.filter((p) => {
     const matchesSearch =
       p.name.toLowerCase().includes(search.toLowerCase()) ||
       p.id.toLowerCase().includes(search.toLowerCase()) ||
@@ -104,7 +104,7 @@ export const ProjectsPage: React.FC = () => {
       statusFilter === 'all' || p.status.toLowerCase() === statusFilter.toLowerCase();
 
     return matchesSearch && matchesStatus;
-  });
+  }), [projects, search, statusFilter]);
 
   // Aggregated totals
   const totalProjects = projects.length;

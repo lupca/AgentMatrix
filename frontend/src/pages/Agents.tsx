@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { api } from '../lib/api';
 import { Agent, AgentStats as AgentStatsType } from '../types/agent';
 import AgentCard from '../components/agents/AgentCard';
@@ -117,7 +117,7 @@ export const AgentsPage: React.FC = () => {
   ];
 
   // Filtered agents
-  const filteredAgents = agents.filter((a) => {
+  const filteredAgents = useMemo(() => agents.filter((a) => {
     const matchesSearch =
       a.name.toLowerCase().includes(search.toLowerCase()) ||
       a.id.toLowerCase().includes(search.toLowerCase()) ||
@@ -132,7 +132,7 @@ export const AgentsPage: React.FC = () => {
       statusFilter === 'all' || a.status.toLowerCase() === statusFilter.toLowerCase();
 
     return matchesSearch && matchesRole && matchesStatus;
-  });
+  }), [agents, search, roleFilter, statusFilter]);
 
   // Pagination
   const totalPages = Math.ceil(filteredAgents.length / pageSize);
