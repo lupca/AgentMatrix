@@ -91,6 +91,7 @@ class Task(ArchivableMixin, Base):
         foreign_keys="TaskDependency.depends_on_task_id",
         cascade="all, delete-orphan",
     )
+    task_events = relationship("TaskEvent", back_populates="task", cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint(
@@ -577,3 +578,33 @@ class KnowledgeItem(ArchivableMixin, Base):
     status = Column(String(20), nullable=False, default="active", server_default="active")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class TaskEvent(Base):
+    """Single source of truth for task state change events (CTV2-114)."""
+
+    __tablename__ = "task_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(
+        String(20),
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    event_type = Column(String(30), nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        index=True,
+    )
+    consumed_at = Column(DateTime(timezone=True), nullable=True)
+
+    task = relationship("Task", back_populates="task_events")
+
+    __table_args__ = (
+        Index("idx_task_events_type_created", "event_type", "created_at"),
+    )
+
