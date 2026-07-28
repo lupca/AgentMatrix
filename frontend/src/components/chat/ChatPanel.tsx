@@ -6,6 +6,8 @@ import { ContextIndicator } from './ContextIndicator';
 import { api } from '../../lib/api';
 import { Task } from '../../types/task';
 import { Bot, RefreshCw, Trash2, AlertCircle } from 'lucide-react';
+import { ChatHeader } from './ChatHeader';
+import { MessageList } from './MessageList';
 import {
   CoordinatorProvider,
   providerForModel,
