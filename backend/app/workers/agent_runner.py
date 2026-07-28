@@ -1082,14 +1082,15 @@ def _build_execution_result_ref(
     base_ref: str,
     explicit_ref: str | None = None,
 ) -> tuple[str | None, str | None]:
-    """Return a validated review range, or a concrete no-change error."""
-    head_ref = _parse_result_ref(repo_root)
-    if head_ref is None:
-        return None, "Could not determine repository HEAD after execution"
+    """Return a validated review range, or a concrete no-change error.
+
+    Priority: if the agent emits an explicit RESULT_REF, validate that commit
+    first (it may exist even when worktree HEAD hasn't moved). Only fall back
+    to base..HEAD when no explicit ref is provided.
+    """
     base = _git_ref(repo_root, base_ref)
-    head = _git_ref(repo_root, head_ref)
-    if base is None or head is None:
-        return None, "Could not validate repository execution range"
+    if base is None:
+        return None, "Could not validate base ref for execution range"
 
     status = subprocess.run(
         ["git", "status", "--porcelain"],
@@ -1106,18 +1107,34 @@ def _build_execution_result_ref(
             repo_root,
         )
 
+    # Priority 1: explicit RESULT_REF from agent output
+    if explicit_ref:
+        explicit = _git_ref(repo_root, explicit_ref)
+        if explicit is not None:
+            if not _is_ancestor(repo_root, base, explicit):
+                return None, "Executor result-ref is not a descendant of base"
+            if _has_committed_diff(repo_root, base, explicit):
+                return f"{base[:12]}..{explicit[:12]}", None
+            return None, "Executor result-ref points to an empty diff"
+        # explicit_ref provided but commit not found - log and continue to HEAD fallback
+        logger.warning(
+            "Executor result-ref %s not found in %s; falling back to HEAD",
+            explicit_ref,
+            repo_root,
+        )
+
+    # Priority 2: fallback to base..HEAD
+    head_ref = _parse_result_ref(repo_root)
+    if head_ref is None:
+        return None, "Could not determine repository HEAD after execution"
+    head = _git_ref(repo_root, head_ref)
+    if head is None:
+        return None, "Could not validate repository HEAD"
+
     if base == head or not _has_committed_diff(repo_root, base, head):
         return None, "Agent completed without committed changes; escalating for review"
 
-    selected = head
-    if explicit_ref:
-        explicit = _git_ref(repo_root, explicit_ref)
-        if explicit is None or not _is_ancestor(repo_root, base, explicit) or not _is_ancestor(repo_root, explicit, head):
-            return None, "Executor result-ref is outside the actual base..head range"
-        selected = explicit
-    if not _has_committed_diff(repo_root, base, selected):
-        return None, "Executor result-ref points to an empty diff"
-    return f"{base[:12]}..{selected[:12]}", None
+    return f"{base[:12]}..{head[:12]}", None
 
 
 def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResult) -> None:

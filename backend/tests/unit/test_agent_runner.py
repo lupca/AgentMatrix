@@ -660,6 +660,21 @@ def test_build_execution_result_ref_warns_on_dirty_repo(git_repo_root, monkeypat
     assert "uncommitted changes" in warning.call_args.args[0]
 
 
+def test_build_execution_result_ref_uses_explicit_ref_when_head_unchanged(git_repo_root):
+    """Explicit RESULT_REF from agent output should be used even when worktree HEAD hasn't moved."""
+    base = runner._parse_result_ref(git_repo_root)
+    _commit_change(git_repo_root, "explicit commit")
+    explicit = runner._parse_result_ref(git_repo_root)
+    # Simulate worktree scenario: reset HEAD to base but keep explicit commit reachable
+    subprocess.run(["git", "checkout", "-q", base], cwd=git_repo_root, check=True)
+    # Now HEAD == base, but explicit commit exists
+
+    result_ref, error = runner._build_execution_result_ref(git_repo_root, base, explicit)
+
+    assert error is None
+    assert result_ref == f"{base}..{explicit}"
+
+
 def test_run_base_ref_recovers_baseline_from_pending_range():
     assert runner._run_base_ref("abc123..") == "abc123"
     assert runner._run_base_ref("abc123..def456") == "abc123"
