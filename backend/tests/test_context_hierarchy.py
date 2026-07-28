@@ -632,3 +632,118 @@ async def test_compact_command_via_router(db_session, monkeypatch):
 
     db_session.refresh(session)
     assert len(session.messages) == 15
+
+
+def test_get_recent_task_events(db_session):
+    """AC1: _get_recent_task_events reads from task_events table and filters by since."""
+    from datetime import datetime, timezone, timedelta
+    from app.db.models import TaskEvent
+
+    t0 = datetime(2026, 7, 28, 10, 0, 0, tzinfo=timezone.utc)
+    t1 = t0 + timedelta(minutes=5)
+    t2 = t0 + timedelta(minutes=10)
+
+    e1 = TaskEvent(task_id="TASK-EV-1", event_type="dispatched", payload={"run_id": "run-1"}, created_at=t0)
+    e2 = TaskEvent(task_id="TASK-EV-1", event_type="running", payload={"run_id": "run-1"}, created_at=t1)
+    e3 = TaskEvent(task_id="TASK-EV-1", event_type="done", payload={"run_id": "run-1", "result_ref": "hash123"}, created_at=t2)
+    db_session.add_all([e1, e2, e3])
+    db_session.commit()
+
+    hierarchy = ContextHierarchy(db_session)
+
+    # All events
+    events = hierarchy._get_recent_task_events("TASK-EV-1")
+    assert len(events) == 3
+    assert events[0]["type"] == "dispatched"
+    assert events[1]["type"] == "running"
+    assert events[2]["type"] == "done"
+
+    # Filtered by since t0
+    events_since = hierarchy._get_recent_task_events("TASK-EV-1", since=t0)
+    assert len(events_since) == 2
+    assert events_since[0]["type"] == "running"
+    assert events_since[1]["type"] == "done"
+
+
+def test_build_messages_injects_recent_task_events(db_session):
+    """AC2: build_messages() injects recent task events into context when task_id is present."""
+    from app.db.models import TaskEvent
+
+    task = Task(id="TASK-BUILD-1", project="proj-build", title="Build Task", status="todo")
+    session = SessionModel(
+        id="sess-build-events",
+        task_id="TASK-BUILD-1",
+        project_id="proj-build",
+        context_level="task",
+        messages=[{"id": "msg-1", "role": "user", "content": "Help me", "status": "complete"}],
+    )
+    e1 = TaskEvent(task_id="TASK-BUILD-1", event_type="dispatched", payload={"agent": "@claude"})
+    e2 = TaskEvent(task_id="TASK-BUILD-1", event_type="running", payload={"pid": 1234})
+    db_session.add_all([task, session, e1, e2])
+    db_session.commit()
+
+    hierarchy = ContextHierarchy(db_session)
+    messages = hierarchy.build_messages(session)
+
+    events_msgs = [m for m in messages if m.get("role") == "system" and "Recent task events:" in m.get("content", "")]
+    assert len(events_msgs) == 1
+    assert "dispatched" in events_msgs[0]["content"]
+    assert "running" in events_msgs[0]["content"]
+    assert "@claude" in events_msgs[0]["content"]
+
+
+def test_remove_rollup_logic_from_session_messages(db_session):
+    """AC3: Legacy task_rollup messages in session.messages are excluded from replay."""
+    session = SessionModel(
+        id="sess-legacy-rollup",
+        messages=[
+            {"id": "msg-user", "role": "user", "content": "Start task", "status": "complete"},
+            {
+                "id": "task-rollup-1",
+                "role": "system",
+                "kind": "task_rollup",
+                "content": '{"task_id": "TASK-OLD", "status": "done"}',
+                "status": "complete",
+            },
+            {"id": "msg-assistant", "role": "assistant", "content": "Working on it", "status": "complete"},
+        ],
+    )
+    db_session.add(session)
+    db_session.commit()
+
+    hierarchy = ContextHierarchy(db_session)
+    replayed = hierarchy._replay_session_messages(session)
+
+    assert len(replayed) == 2
+    assert all(m.get("kind") != "task_rollup" for m in replayed)
+
+
+def test_integration_llm_receives_task_events_in_context(db_session):
+    """AC4: Integration test: LLM context receives task events emitted via TaskEventService."""
+    from app.services.task_event_service import TaskEventService
+
+    task = Task(id="TASK-INT-1", project="proj-int", title="Integration Task", status="todo")
+    session = SessionModel(
+        id="sess-int-events",
+        task_id="TASK-INT-1",
+        project_id="proj-int",
+        context_level="task",
+        messages=[],
+    )
+    db_session.add_all([task, session])
+    db_session.commit()
+
+    TaskEventService.emit("TASK-INT-1", "dispatched", {"executor": "@antigravity"}, db=db_session)
+    TaskEventService.emit("TASK-INT-1", "done", {"result_ref": "abc123def"}, db=db_session)
+
+    hierarchy = ContextHierarchy(db_session)
+    messages = hierarchy.build_messages(session)
+
+    event_system_msg = next(
+        m for m in messages if m.get("role") == "system" and "Recent task events:" in m.get("content", "")
+    )
+    assert event_system_msg is not None
+    assert "dispatched" in event_system_msg["content"]
+    assert "done" in event_system_msg["content"]
+    assert "abc123def" in event_system_msg["content"]
+

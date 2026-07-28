@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session as DBSession
 
-from app.db.models import GateRecord, Project, Session as SessionModel, Task
+from app.db.models import GateRecord, Project, Session as SessionModel, Task, TaskEvent
 from app.core.config import settings
 from app.core.compression import count_tokens, context_window_for_model
 from app.graph.context import get_context_snapshot
@@ -213,6 +214,28 @@ class ContextHierarchy:
             return None
         return "[Task Gate State] " + ", ".join(parts)
 
+    def _get_recent_task_events(
+        self,
+        task_id: str,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve recent task events from task_events table for LLM context (CTV2-117)."""
+        if not task_id:
+            return []
+        query = self.db.query(TaskEvent).filter(TaskEvent.task_id == task_id)
+        if since is not None:
+            query = query.filter(TaskEvent.created_at > since)
+        events = query.order_by(TaskEvent.created_at.asc(), TaskEvent.id.asc()).all()
+
+        return [
+            {
+                "type": e.event_type,
+                "payload": e.payload,
+                "at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in events
+        ]
+
     def _task_header(self, session: SessionModel) -> dict[str, Any] | None:
         """Return the live task header as a post-snapshot suffix block."""
         if not session.task_id:
@@ -278,6 +301,7 @@ class ContextHierarchy:
             message for message in list(session.messages or [])
             if message.get("status", "complete") == "complete"
             and message.get("role") in {"user", "assistant", "tool", "system"}
+            and message.get("kind") != "task_rollup"
         ]
         tool_turns: list[str] = []
         for message in raw:
@@ -356,6 +380,7 @@ class ContextHierarchy:
         session: SessionModel,
         project_id: str | None = None,
         current_turn_id: str | None = None,
+        since: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Compose tiers in increasing order of volatility:
 
@@ -390,6 +415,15 @@ class ContextHierarchy:
             include_task_header=False,
         )
         messages.extend(task_context)
+
+        # Inject recent task events if task_id exists
+        if session.task_id:
+            recent_events = self._get_recent_task_events(session.task_id, since=since)
+            if recent_events:
+                messages.append({
+                    "role": "system",
+                    "content": f"Recent task events:\n{json.dumps(recent_events, ensure_ascii=False)}",
+                })
 
         # Dynamic snapshot: keep this as the last prefix block.
         messages.append(
