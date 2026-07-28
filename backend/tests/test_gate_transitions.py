@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.db.models import Agent, AgentRun, GateRecord, Project, Session, Task
+from app.db.models import Agent, AgentRun, GateRecord, Project, Task, TaskEvent
 from app.services.task_orchestration import (
     ModeViolationError,
     PrerequisiteError,
@@ -81,10 +81,8 @@ def test_plan_only_blocks_dispatch_and_records_rejection(service, db_session):
     assert task.status == "todo"
 
 
-def test_supervised_gate_notifies_global_inbox_once(service, db_session, monkeypatch):
+def test_supervised_gate_emits_pending_event_once(service, db_session):
     task = _add_task(db_session, "GATE-INBOX", mode="supervised")
-    events = []
-    monkeypatch.setattr("app.api.ws.publish_event", events.append)
 
     for _ in range(2):
         service.request_dispatch(
@@ -94,16 +92,11 @@ def test_supervised_gate_notifies_global_inbox_once(service, db_session, monkeyp
             idempotency_key="gate-inbox-dispatch",
         )
 
-    global_session = db_session.query(Session).filter_by(context_level="global").one()
-    notifications = [
-        message for message in global_session.messages
-        if message.get("kind") == "gate_notification"
-    ]
-    assert len(notifications) == 1
-    assert notifications[0]["role"] == "system"
-    assert task.id in notifications[0]["content"]
+    events = db_session.query(TaskEvent).filter_by(task_id=task.id).all()
     assert len(events) == 1
-    assert events[0]["type"] == "gate_pending"
+    assert events[0].event_type == "gate_pending"
+    assert events[0].payload["gate"] == "dispatch"
+    assert events[0].payload["gate_record_id"] > 0
 
 
 def test_executor_success_stops_at_awaiting_review(service, db_session):

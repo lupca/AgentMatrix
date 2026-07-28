@@ -28,6 +28,7 @@ from app.db.models import (
 )
 from app.db.models import Session as SessionModel
 from app.services.command_builder import build_dispatch_command, build_review_command
+from app.services.task_event_service import emit_task_event
 
 logger = logging.getLogger(__name__)
 
@@ -675,6 +676,15 @@ class TaskOrchestrationService:
             output_payload={"run_status": "cancelled", "task_status": task.status},
         )
         self._audit(task, record)
+        emit_task_event(
+            task_id=task.id,
+            event_type="cancelled",
+            payload={
+                "run_id": run.id,
+                "cancelled_by": actor,
+            },
+            db=self.db,
+        )
         self.db.commit()
         self.db.refresh(task)
         self.db.refresh(record)
@@ -1102,64 +1112,15 @@ class TaskOrchestrationService:
         )
 
     def _notify_gate_pending(self, task: Task, record: GateRecord) -> None:
-        """Write one compact approval notice and fan it out to live clients."""
-        # CoordinatorService owns the global inbox mechanics (CTV2-097).  The
-        # import is local to keep the orchestration service independent from
-        # the coordinator's command-routing imports.
-        from app.services.coordinator import CoordinatorService
-
-        coordinator = CoordinatorService(self.db)
-        global_session = coordinator.get_or_create_global_session()
-        messages = list(global_session.messages or [])
-        existing = next(
-            (
-                item for item in messages
-                if item.get("kind") == "gate_notification"
-                and item.get("task_id") == task.id
-                and item.get("gate") == record.gate_type
-            ),
-            None,
-        )
-        if existing is not None and existing.get("notification_state") == "pending":
-            return
-
-        content = f"Task {task.id} requires approval: {task.approval_prompt or ''}".strip()
-        if existing is None:
-            message = coordinator.append_message(
-                global_session,
-                role="system",
-                content=content,
-                message_id=f"gate-pending-{record.id}",
-                kind="gate_notification",
-                task_id=task.id,
-                gate=record.gate_type,
-                gate_record_id=record.id,
-                notification_state="pending",
-                status="complete",
-            )
-        else:
-            existing.update(
-                content=content,
-                gate_record_id=record.id,
-                notification_state="pending",
-                timestamp=coordinator._now(),
-            )
-            global_session.messages = messages
-            global_session.message_count = len(messages)
-            global_session.last_activity_at = datetime.now(timezone.utc)
-            self.db.commit()
-            message = existing
-        from app.api.ws import publish_event
-
-        publish_event(
-            {
-                "type": "gate_pending",
-                "session_id": global_session.id,
-                "task_id": task.id,
+        """Emit a gate_pending event into task_events table (CTV2-115)."""
+        emit_task_event(
+            task_id=task.id,
+            event_type="gate_pending",
+            payload={
                 "gate": record.gate_type,
                 "gate_record_id": record.id,
-                "message": message,
-            }
+            },
+            db=self.db,
         )
 
     def _resolve_gate_notification(

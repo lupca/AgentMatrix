@@ -99,24 +99,6 @@ def request_cancel(run_id: str, *, ttl_seconds: int = 86_400) -> None:
 TASK_EVENTS_CHANNEL = "control_tower:task_events"
 
 
-def publish_task_event(event_type: str, **kwargs: Any) -> None:
-    """Publish task-related events via Redis for WebSocket broadcast."""
-    payload = {
-        "type": event_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        **kwargs,
-    }
-    encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-    for attempt in range(3):
-        try:
-            redis_client.publish(TASK_EVENTS_CHANNEL, encoded)
-            return
-        except (redis.ConnectionError, redis.TimeoutError, redis.BusyLoadingError) as exc:
-            if attempt == 2:
-                logger.warning("Unable to publish task event: %s", exc)
-            time.sleep(0.1 * (2**attempt))
-
-
 def clear_cancel_request(run_id: str) -> None:
     try:
         redis_client.delete(get_cancel_key(run_id))

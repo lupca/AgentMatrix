@@ -1,8 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import Set
-from contextlib import asynccontextmanager
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
@@ -15,7 +14,7 @@ _redis_subscriber_task: asyncio.Task | None = None
 
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
+        self.active_connections: set[WebSocket] = set()
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
@@ -41,7 +40,7 @@ ws_manager = ConnectionManager()
 
 async def _redis_subscriber():
     """Subscribe to Redis task events and broadcast to WebSocket clients."""
-    from app.workers.output_streamer import redis_client, TASK_EVENTS_CHANNEL
+    from app.workers.output_streamer import TASK_EVENTS_CHANNEL, redis_client
 
     pubsub = redis_client.pubsub()
     try:
@@ -82,21 +81,6 @@ def stop_redis_subscriber():
     if _redis_subscriber_task and not _redis_subscriber_task.done():
         _redis_subscriber_task.cancel()
         logger.info("Stopped Redis subscriber task")
-
-
-def publish_event(message: dict) -> None:
-    """Fan out an application event to WebSocket clients when available.
-
-    Gate transitions are performed by both the async API process and the
-    synchronous worker.  The latter has no event loop to await, so delivery
-    is deliberately best-effort here; the durable session message remains
-    the source of truth for reconnecting clients.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    loop.create_task(ws_manager.broadcast(message))
 
 
 @router.websocket("")

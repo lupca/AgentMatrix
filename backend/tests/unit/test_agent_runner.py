@@ -1,7 +1,7 @@
 import json
-from pathlib import Path
 import subprocess
 import threading
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -21,8 +21,13 @@ from app.db.models import (
     Setting,
     Task,
     TaskDependency,
+    TaskEvent,
 )
-from app.services.process_manager import ProcessResult, ProcessStatus, WorktreeUnsupportedError
+from app.services.process_manager import (
+    ProcessResult,
+    ProcessStatus,
+    WorktreeUnsupportedError,
+)
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "review_results"
 
@@ -133,6 +138,15 @@ def test_run_agent_persists_output_and_success(worker_db, git_repo_root):
     assert sep == ".."
     assert base and head and base != head
     assert task.result_ref == run.result_ref
+    events = db.query(TaskEvent).filter_by(task_id=task.id).order_by(TaskEvent.id).all()
+    assert [event.event_type for event in events] == ["running", "done"]
+    assert events[0].payload["run_id"] == run.id
+    assert isinstance(events[0].payload["pid"], int)
+    assert events[1].payload == {
+        "run_id": run.id,
+        "result_ref": run.result_ref,
+        "exit_code": 0,
+    }
     db.close()
 
 
@@ -245,6 +259,13 @@ def test_run_agent_cleans_up_worktree_after_a_failed_run(worker_db, git_repo_roo
     run = db.get(AgentRun, "run-001")
     assert result == 1
     assert run.status == "failed"
+    events = db.query(TaskEvent).filter_by(task_id=run.task_id).order_by(TaskEvent.id).all()
+    assert [event.event_type for event in events] == ["running", "failed"]
+    assert events[1].payload == {
+        "run_id": run.id,
+        "error": "Exit code: 1",
+        "exit_code": 1,
+    }
     db.close()
     assert _worktree_entries(git_repo_root).count("[") == 1
 

@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base, get_db
-from app.db.models import Agent, AgentRun, Project, Task
+from app.db.models import Agent, AgentRun, Project, Task, TaskEvent
 from app.main import app
 
 
@@ -182,6 +182,12 @@ def test_cancel_signals_worker_and_updates_run(dispatch_context):
     db.expire_all()
     assert response.status_code == 200
     assert db.get(AgentRun, "run-cancel").status == "cancelled"
+    event = db.query(TaskEvent).filter_by(task_id="T-INT-001").one()
+    assert event.event_type == "cancelled"
+    assert event.payload == {
+        "run_id": "run-cancel",
+        "cancelled_by": "api",
+    }
     signal_cancel.assert_called_once()
     status_event.assert_called_once()
 

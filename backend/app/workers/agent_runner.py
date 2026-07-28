@@ -20,10 +20,10 @@ from sqlalchemy.orm import Session
 
 from app.db.base import SessionLocal
 from app.db.models import AgentOutputChunk, AgentRun, AuditLog, Task, TaskDependency
-from app.services.coordinator import CoordinatorService
+from app.schemas.task import ReviewResult
 from app.services.agent_matcher import AgentMatcher
 from app.services.command_builder import _is_review_task, review_result_path
-from app.schemas.task import ReviewResult
+from app.services.coordinator import CoordinatorService
 from app.services.process_manager import (
     ProcessManager,
     ProcessResult,
@@ -31,6 +31,7 @@ from app.services.process_manager import (
     WorktreeManager,
     WorktreeUnsupportedError,
 )
+from app.services.task_event_service import emit_task_event
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.workers import redis_broker
 from app.workers.output_streamer import (
@@ -195,18 +196,6 @@ def _nudge_driver(task_id: str, trigger: str) -> None:
         )
 
 
-def _record_task_rollup(task_id: str, *, status: str | None = None) -> None:
-    """Keep the global inbox to one compact line while retaining task trace."""
-    db = SessionLocal()
-    try:
-        CoordinatorService(db).record_task_rollup(task_id, status=status)
-    except Exception:
-        db.rollback()
-        logger.warning("Could not record task rollup for %s", task_id, exc_info=True)
-    finally:
-        db.close()
-
-
 def _publish(run_id: str, payload: dict) -> None:
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     for attempt in range(3):
@@ -312,6 +301,16 @@ def run_agent(
             run.status = "failed"
             run.error_message = "Could not determine repository HEAD before execution"
             db.commit()
+            emit_task_event(
+                task_id=task_id,
+                event_type="failed",
+                payload={
+                    "run_id": run_id,
+                    "error": run.error_message,
+                    "exit_code": -1,
+                },
+                db=db,
+            )
             TaskOrchestrationService(db).record_execution_failure(
                 task_id=task_id,
                 error=run.error_message,
@@ -358,6 +357,12 @@ def run_agent(
         def record_pid(pid: int) -> None:
             run.pid = pid
             db.commit()
+            emit_task_event(
+                task_id=task_id,
+                event_type="running",
+                payload={"run_id": run_id, "pid": pid},
+                db=db,
+            )
 
         process_manager.on_start = record_pid
         publish_status(run_id, "running", attempt=attempt)
@@ -526,14 +531,31 @@ def run_agent(
                 run_id=run.id,
             )
         db.commit()
-        task_after_run = db.get(Task, task_id)
-        _record_task_rollup(
-            task_id,
-            status=task_after_run.status if task_after_run is not None else effective_status,
-        )
+        effective_error = run.error_message or result.error
+        if effective_status == ProcessStatus.COMPLETED.value:
+            emit_task_event(
+                task_id=task_id,
+                event_type="done",
+                payload={
+                    "run_id": run_id,
+                    "result_ref": run.result_ref,
+                    "exit_code": result.exit_code,
+                },
+                db=db,
+            )
+        elif effective_status != ProcessStatus.CANCELLED.value:
+            emit_task_event(
+                task_id=task_id,
+                event_type="failed",
+                payload={
+                    "run_id": run_id,
+                    "error": effective_error,
+                    "exit_code": result.exit_code,
+                },
+                db=db,
+            )
         _nudge_driver(task_id, "run_agent_completed")
 
-        effective_error = run.error_message or result.error
         publish_status(
             run_id,
             effective_status,
@@ -556,6 +578,12 @@ def run_agent(
         if should_retry:
             publish_status(run_id, "retrying", error=str(exc))
             raise
+        emit_task_event(
+            task_id=task_id,
+            event_type="failed",
+            payload={"run_id": run_id, "error": str(exc)},
+            db=db,
+        )
         publish_status(run_id, "failed", error=str(exc))
         _nudge_driver(task_id, "run_agent_completed")
         return None
