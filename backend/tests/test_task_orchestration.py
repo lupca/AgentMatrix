@@ -83,6 +83,55 @@ def _dispatch_and_approve(orchestration, task, idempotency_key):
     return result
 
 
+@pytest.mark.parametrize(
+    ("status", "awaiting_approval", "expected"),
+    [
+        ("todo", False, "executing"),
+        ("dispatched", True, "waiting_human"),
+        ("failed", False, "blocked"),
+        ("failed", True, "waiting_human"),
+        ("awaiting-review", False, "reviewing"),
+        ("in-review", False, "reviewing"),
+        ("changes-requested", False, "reviewing"),
+        ("done", False, "terminal"),
+        ("cancelled", False, "terminal"),
+    ],
+)
+def test_workflow_state_is_derived_from_task_projection(
+    status, awaiting_approval, expected
+):
+    task = Task(
+        id="STATE-001",
+        project="project",
+        title="Workflow state",
+        status=status,
+        awaiting_approval=awaiting_approval,
+    )
+
+    assert task.workflow_state == expected
+
+
+def test_escalate_task_persists_blocked_human_approval_state(orchestration, db_session):
+    task = _task(db_session, "ESCALATE-001", mode="bypass")
+    task.status = "dispatched"
+    db_session.commit()
+
+    record = orchestration.escalate_task(
+        task_id=task.id, reason="Review output was invalid", actor="system:worker"
+    )
+
+    assert task.status == "failed"
+    assert task.workflow_state == "waiting_human"
+    assert task.awaiting_approval is True
+    assert task.error == "Review output was invalid"
+    assert task.approval_prompt == "Review output was invalid"
+    assert record.gate_type == "escalation"
+    assert record.status == "rejected"
+    assert record.actor == "system:worker"
+    assert record.error_message == "Review output was invalid"
+    assert db_session.get(type(record), record.id) is not None
+
+
 def test_supervised_dispatch_commits_pending_and_resumes_separately(
     orchestration,
     db_session,

@@ -71,6 +71,13 @@ def test_alembic_migration_head():
     assert "output_payload" in gate_cols
     assert "error_message" in gate_cols
 
+    task_checks = {
+        constraint["name"]
+        for constraint in inspector.get_check_constraints("tasks")
+        if constraint.get("name")
+    }
+    assert "ck_tasks_terminal_not_awaiting_approval" in task_checks
+
     # Inspect sessions columns
     session_cols = {col["name"]: col for col in inspector.get_columns("sessions")}
     assert "checkpoint_id" in session_cols
@@ -78,6 +85,27 @@ def test_alembic_migration_head():
     assert "thread_id" in session_cols
 
     connection.close()
+
+
+@pytest.mark.parametrize("terminal_status", ["done", "changes-requested"])
+def test_terminal_task_cannot_await_approval(db_session, terminal_status):
+    task = Task(
+        id=f"TERM-{terminal_status[:3].upper()}",
+        project="project",
+        title="Terminal approval invariant",
+        status="todo",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="result-1",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    task.status = terminal_status
+    task.awaiting_approval = True
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
 
 
 # ---------------------------------------------------------------------------

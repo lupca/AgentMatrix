@@ -711,6 +711,9 @@ class TaskOrchestrationService:
             error_message=reason,
         )
         self._audit(task, record, reason=reason)
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
         return record
 
     def record_dispatch_queue_failure(
