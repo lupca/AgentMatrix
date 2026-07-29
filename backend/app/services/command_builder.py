@@ -151,9 +151,14 @@ def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -
         "Do not use stdout as the result. The JSON must contain exactly these "
         "fields: schema_version (\"1.0\"), task_id, base, head, ac_results, "
         "findings, tests_run, tests_passed. Each ac_results item must contain "
-        "ac_index, ac_text, verdict (only \"pass\" or \"fail\"), and "
-        "evidence (an array of strings). Ensure ac_results has one item per "
-        "acceptance criterion."
+        "criterion_id, status (only \"pass\" or \"fail\"), verdict (only "
+        "\"pass\" or \"fail\") as legacy alias, evidence (an "
+        "array of strings), and finding_ids (an array of strings). Legacy "
+        "ac_index/ac_text metadata is optional; verdict is the legacy name "
+        "for status. Each finding must contain id, "
+        "severity, category, file, line, and description. Ensure ac_results "
+        "has one item per acceptance criterion. Reviewer execution is "
+        "read-only: do not create commits or alter refs."
     )
     return "\n\n".join(sections)
 
@@ -190,9 +195,14 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
             "Do not use stdout as the result. The JSON must contain exactly these "
             "fields: schema_version (\"1.0\"), task_id, base, head, ac_results, "
             "findings, tests_run, tests_passed. Each ac_results item must contain "
-            "ac_index, ac_text, verdict (only \"pass\" or \"fail\"), and "
-            "evidence (an array of strings). Ensure ac_results has one item per "
-            "acceptance criterion."
+            "criterion_id, status (only \"pass\" or \"fail\"), verdict (only "
+            "\"pass\" or \"fail\") as legacy alias, evidence (an "
+            "array of strings), and finding_ids (an array of strings). Legacy "
+            "ac_index/ac_text metadata is optional; verdict is the legacy name "
+            "for status. Each finding must contain id, "
+            "severity, category, file, line, and description. Ensure ac_results "
+            "has one item per acceptance criterion. Reviewer execution is "
+            "read-only: do not create commits or alter refs."
         )
     sections.append(
         "Complete every acceptance criterion, run the relevant tests, and commit the changes. "

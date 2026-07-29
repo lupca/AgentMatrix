@@ -6,8 +6,11 @@ import json
 import logging
 import os
 import re
+import shlex
 import signal
+import shutil
 import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -419,6 +422,7 @@ def run_agent(
     )
     worktree_manager: WorktreeManager | None = None
     worktree_path: str | None = None
+    review_git_dir: str | None = None
     exec_cwd = repo_root
 
     try:
@@ -507,10 +511,32 @@ def run_agent(
             _nudge_driver(task_id, "run_agent_completed")
             return None
 
+        # A reviewer must inspect the executor's committed head, never the
+        # shared checkout's moving HEAD (which may belong to another run).
+        # The task result_ref is the durable base..head boundary recorded by
+        # the executor gate.
+        worktree_ref = base_ref
+        if is_review_run:
+            review_base, separator, review_head = (task.result_ref or "").partition("..")
+            if not separator or not review_base or not review_head:
+                raise ReviewResultLoadError(
+                    "invalid_review_range",
+                    review_result_path(repo_root, task_id),
+                    "Review task has no valid committed base..head range",
+                )
+            if _git_ref(repo_root, review_head) is None:
+                raise ReviewResultLoadError(
+                    "invalid_review_head",
+                    review_result_path(repo_root, task_id),
+                    "Review head is not a valid commit",
+                    head=review_head,
+                )
+            worktree_ref = review_head
+
         if _use_worktree():
             worktree_manager = WorktreeManager(repo_root)
             try:
-                worktree_path = worktree_manager.create(run.id, base_ref)
+                worktree_path = worktree_manager.create(run.id, worktree_ref)
                 exec_cwd = worktree_path
             except WorktreeUnsupportedError as exc:
                 logger.warning(
@@ -579,7 +605,13 @@ def run_agent(
         event_seq += 1
         db.commit()
 
-        for output in process_manager.run_with_streaming(command, exec_cwd):
+        if is_review_run:
+            process_env, review_git_dir = _review_read_only_git_env()
+        else:
+            process_env = None
+        for output in process_manager.run_with_streaming(
+            command, exec_cwd, env=process_env
+        ):
             if isinstance(output, ProcessResult):
                 result = output
                 break
@@ -802,6 +834,8 @@ def run_agent(
         process_manager.terminate()
         if worktree_manager is not None and worktree_path is not None:
             worktree_manager.remove(worktree_path)
+        if review_git_dir is not None:
+            shutil.rmtree(review_git_dir, ignore_errors=True)
         db.close()
 
 
@@ -1377,6 +1411,9 @@ def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResu
             "ac_text": ac.ac_text,
             "passed": ac.verdict == "pass",
             "evidence": ac.evidence,
+            "criterion_id": ac.criterion_id,
+            "status": ac.status,
+            "finding_ids": ac.finding_ids,
         }
         for ac in review_result.ac_results
     ]
@@ -1386,7 +1423,7 @@ def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResu
             task_id=run.task_id,
             verdict=verdict,
             ac_results=ac_results,
-            findings=review_result.findings,
+            findings=[finding.model_dump() for finding in review_result.findings],
             actor=f"agent:{run.agent_id}",
             idempotency_key=f"run:{run.id}:review-verdict",
         )
@@ -1413,6 +1450,36 @@ def _prepare_review_artifact(repo_root: str, task_id: str) -> None:
         os.unlink(path)
     except FileNotFoundError:
         pass
+
+
+def _review_read_only_git_env() -> tuple[dict[str, str], str]:
+    """Prevent common ref-mutating Git commands inside a reviewer process.
+
+    A temporary git wrapper is placed first on PATH, so the reviewer can
+    still inspect history and run tests while commit/merge/cherry-pick/
+    rebase/reset/checkout/push operations fail closed. The separate reviewer
+    worktree and wrapper are removed after the run regardless.
+    """
+    blocked = (
+        "commit", "merge", "cherry-pick", "rebase", "reset", "checkout", "push"
+    )
+    wrapper_dir = tempfile.mkdtemp(prefix="control-tower-review-git-")
+    real_git = shutil.which("git") or "/usr/bin/git"
+    wrapper = os.path.join(wrapper_dir, "git")
+    with open(wrapper, "w", encoding="utf-8") as wrapper_file:
+        wrapper_file.write(
+            "#!/bin/sh\n"
+            "for arg in \"$@\"; do case \"$arg\" in "
+            + "|".join(blocked)
+            + ") echo \"reviewer git command blocked: $arg\" >&2; exit 128;; esac; done\n"
+            + f"exec {shlex.quote(real_git)} \"$@\"\n"
+        )
+    os.chmod(wrapper, 0o755)
+    env = {
+        "PATH": f"{wrapper_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    return env, wrapper_dir
 
 
 def _update_task_status(

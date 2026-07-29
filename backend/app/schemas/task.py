@@ -25,10 +25,18 @@ class ReviewACResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    ac_index: StrictInt
-    ac_text: StrictStr
-    verdict: Literal["pass", "fail"]
+    criterion_id: StrictStr
+    status: Literal["pass", "fail"]
     evidence: list[StrictStr]
+    finding_ids: list[StrictStr]
+    # Kept as optional compatibility metadata for older consumers.  The
+    # criterion_id/status pair is the required v1 contract.
+    ac_index: StrictInt | None = None
+    ac_text: StrictStr | None = None
+
+    @property
+    def verdict(self) -> str:
+        return self.status
 
 
 class ReviewResult(BaseModel):
@@ -41,9 +49,22 @@ class ReviewResult(BaseModel):
     base: StrictStr
     head: StrictStr
     ac_results: list[ReviewACResult]
-    findings: list[dict[str, Any]]
+    findings: list["ReviewFinding"]
     tests_run: list[StrictStr]
     tests_passed: list[StrictStr]
+
+
+class ReviewFinding(BaseModel):
+    """A structured, location-specific finding from a reviewer."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    id: StrictStr
+    severity: StrictStr
+    category: StrictStr
+    file: StrictStr
+    line: StrictInt
+    description: StrictStr
 
 
 class GateRecordCreate(BaseModel):

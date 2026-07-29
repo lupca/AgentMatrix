@@ -5,15 +5,19 @@
   "head": "def456",
   "ac_results": [
     {
+      "criterion_id": "0",
+      "status": "pass",
+      "finding_ids": [],
       "ac_index": 0,
       "ac_text": "Schema is versioned",
-      "verdict": "pass",
       "evidence": ["ReviewResult declares schema_version"]
     },
     {
+      "criterion_id": "1",
+      "status": "pass",
+      "finding_ids": [],
       "ac_index": 1,
       "ac_text": "Loader validates strictly",
-      "verdict": "pass",
       "evidence": ["Pydantic validation rejects missing fields"]
     }
   ],
