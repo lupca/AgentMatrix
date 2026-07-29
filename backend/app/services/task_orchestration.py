@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
@@ -18,12 +18,14 @@ from app.core.config import settings
 from app.db.models import (
     Agent,
     AgentRun,
+    AgentAccount,
     AuditLog,
     DispatchCandidate,
     DispatchDecision,
     GateRecord,
     LLMUsage,
     Project,
+    RunResourceUsage,
     Setting,
     Task,
     TaskDependency,
@@ -88,6 +90,8 @@ class BrakeDecision:
     code: str | None = None
     queue: bool = False
     cost_usd: Decimal = Decimal("0")
+    retry_after_seconds: int | None = None
+    observations: dict[str, Any] | None = None
 
 
 def _split_result_range(result_ref: str) -> tuple[str | None, str | None]:
@@ -277,6 +281,7 @@ class TaskOrchestrationService:
                 "kind": kind,
                 "agent_role": "reviewer" if kind == "review" else "executor",
                 "effort": resolved_effort,
+                "brake_agent_id": agent_id,
                 "dispatch_decision_id": dispatch_decision_id,
             },
         )
@@ -1140,15 +1145,6 @@ class TaskOrchestrationService:
         payload: dict[str, Any],
     ) -> TransitionResult:
         self._validate_common(task, actor, idempotency_key)
-        if gate_type == "dispatch":
-            decision = self.check_brakes(task, for_spawn=True, audit=True)
-            if not decision.allowed:
-                if decision.queue:
-                    # A queued AgentRun is the durable queue representation;
-                    # the worker repeats this check before process creation.
-                    pass
-                else:
-                    raise BrakeViolationError(decision.reason or "Autonomy brake engaged")
         request_payload = {
             **payload,
             "expected_status": expected_status,
@@ -1176,6 +1172,15 @@ class TaskOrchestrationService:
             # substitute rather than a literal statement reorder.
             self._reject_if_stale_dispatch_record(existing)
             return self._result_for_record(task, existing)
+        if gate_type == "dispatch":
+            decision = self.check_brakes(
+                task,
+                for_spawn=True,
+                audit=True,
+                agent_id=payload.get("brake_agent_id"),
+            )
+            if not decision.allowed and (not decision.queue or decision.code != "concurrency_limit"):
+                raise BrakeViolationError(decision.reason or "Safety brake engaged")
         self._assert_status(task, expected_status)
         if gate_type == "dispatch":
             active_run = (
@@ -1510,6 +1515,18 @@ class TaskOrchestrationService:
     def run_timeout_seconds(self) -> int:
         return max(1, self._setting("run_timeout_seconds", settings.RUN_TIMEOUT_SECONDS, int))
 
+    @property
+    def max_active_seconds_per_run(self) -> int:
+        return max(1, self._setting("max_active_seconds_per_run", settings.MAX_ACTIVE_SECONDS_PER_RUN, int))
+
+    @property
+    def max_tool_calls_per_run(self) -> int:
+        return max(1, self._setting("max_tool_calls_per_run", settings.MAX_TOOL_CALLS_PER_RUN, int))
+
+    @property
+    def max_no_progress_seconds(self) -> int:
+        return max(1, self._setting("max_no_progress_seconds", settings.MAX_NO_PROGRESS_SECONDS, int))
+
     def check_brakes(
         self,
         task: Task,
@@ -1517,51 +1534,75 @@ class TaskOrchestrationService:
         for_spawn: bool = False,
         audit: bool = False,
         run_id: str | None = None,
+        agent_id: str | None = None,
     ) -> BrakeDecision:
-        """Return the current safety decision using runtime DB settings.
-
-        ``for_spawn`` checks the global active-run limit.  It is deliberately
-        separate from the kill switch and budget checks: concurrency queues a
-        run, while the other two brakes stop and escalate the task.
-        """
-        if not self.autonomy_enabled:
-            decision = BrakeDecision(False, "Autonomy is disabled", "autonomy_disabled")
+        """Evaluate brakes in a stable order and return debugging context."""
+        cost = self._task_cost(task)
+        active_query = self.db.query(AgentRun.id).filter(AgentRun.status.in_(["queued", "running"]))
+        if run_id:
+            active_query = active_query.filter(AgentRun.id != run_id)
+        active = len(active_query.order_by(AgentRun.id).with_for_update().all()) if for_spawn else int(
+            self.db.query(AgentRun.id).filter(AgentRun.status.in_(["queued", "running"])).count()
+        )
+        observations: dict[str, Any] = {
+            "active_runs": active,
+            "max_concurrent": self.max_concurrent_runs,
+            "task_cost": str(cost),
+            "cost_limit": str(self.max_cost_usd_per_task),
+            "agent_id": agent_id,
+            "max_active_seconds_per_run": self.max_active_seconds_per_run,
+            "max_tool_calls_per_run": self.max_tool_calls_per_run,
+            "max_no_progress_seconds": self.max_no_progress_seconds,
+        }
+        if task.status in {"done", "cancelled"}:
+            decision = BrakeDecision(False, f"Task is terminal: {task.status}", "terminal", observations=observations)
+        elif task.awaiting_approval:
+            decision = BrakeDecision(False, "Task has a pending gate", "pending_gate", observations=observations)
+        elif any(dep.status != "done" for dep in self.db.query(Task).filter(Task.id.in_(self._dependency_ids(task.id))).all()):
+            decision = BrakeDecision(False, "Task is waiting for dependencies", "dependency_pending", queue=True, retry_after_seconds=30, observations=observations)
+        elif not self.autonomy_enabled:
+            decision = BrakeDecision(False, "Autonomy is disabled", "autonomy_disabled", observations=observations)
+        elif cost >= self.max_cost_usd_per_task:
+            reason = f"Task cost limit reached: ${cost:.8f} >= ${self.max_cost_usd_per_task:.8f}"
+            decision = BrakeDecision(False, reason, "cost_limit", cost_usd=cost, observations=observations)
         else:
-            cost = self._task_cost(task)
-            if cost >= self.max_cost_usd_per_task:
-                reason = (
-                    f"Task cost limit reached: ${cost:.8f} >= "
-                    f"${self.max_cost_usd_per_task:.8f}"
-                )
-                decision = BrakeDecision(False, reason, "cost_limit", cost_usd=cost)
-            elif for_spawn:
-                # PostgreSQL rejects `SELECT ... FOR UPDATE` on an aggregate
-                # (func.count), so lock the individual candidate rows instead
-                # and count them in Python. Ordering by id gives every caller
-                # the same lock-acquisition order, which is what prevents
-                # concurrent dispatches from deadlocking on this row set.
-                active_query = self.db.query(AgentRun.id).filter(
-                    AgentRun.status.in_(["queued", "running"])
-                )
-                if run_id:
-                    active_query = active_query.filter(AgentRun.id != run_id)
-                active = len(
-                    active_query.order_by(AgentRun.id).with_for_update().all()
-                )
-                if active >= self.max_concurrent_runs:
-                    decision = BrakeDecision(
-                        False,
-                        f"Concurrent run limit reached: {active} >= {self.max_concurrent_runs}",
-                        "concurrency_limit",
-                        queue=True,
-                        cost_usd=cost,
-                    )
-                else:
-                    decision = BrakeDecision(True, cost_usd=cost)
+            agent = self.db.get(Agent, agent_id) if agent_id else None
+            if agent_id and agent is None:
+                decision = BrakeDecision(False, f"Agent {agent_id} not found", "agent_capability", observations=observations)
+            elif agent is not None and agent.status not in {"idle", "active"}:
+                decision = BrakeDecision(False, f"Agent {agent.id} is unavailable: {agent.status}", "agent_capability", retry_after_seconds=60, observations=observations)
             else:
-                decision = BrakeDecision(True, cost_usd=cost)
+                account = self.db.query(AgentAccount).filter(AgentAccount.agent_id == agent_id).first() if agent_id else None
+                if account is not None and (account.status not in {"healthy", "active"} or account.health_score <= 0):
+                    decision = BrakeDecision(False, f"Agent account is unhealthy: {account.status}", "account_health", queue=True, retry_after_seconds=60, observations=observations)
+                elif run_id and (run := self.db.get(AgentRun, run_id)) is not None:
+                    usage = self.db.get(RunResourceUsage, run_id)
+                    active_seconds = float(usage.active_seconds if usage else 0)
+                    tool_calls = int(usage.tool_calls if usage else 0)
+                    last_activity = run.updated_at or run.started_at
+                    if last_activity is None:
+                        no_progress_seconds = 0
+                    else:
+                        if last_activity.tzinfo is None:
+                            last_activity = last_activity.replace(tzinfo=timezone.utc)
+                        no_progress_seconds = max(0, int((datetime.now(timezone.utc) - last_activity).total_seconds()))
+                    observations.update({"active_seconds": active_seconds, "tool_calls": tool_calls, "no_progress_seconds": no_progress_seconds})
+                    if active_seconds >= self.max_active_seconds_per_run:
+                        decision = BrakeDecision(False, "Run active-time limit reached", "active_time_limit", observations=observations)
+                    elif tool_calls >= self.max_tool_calls_per_run:
+                        decision = BrakeDecision(False, "Run tool-call limit reached", "tool_calls_limit", observations=observations)
+                    elif no_progress_seconds >= self.max_no_progress_seconds:
+                        decision = BrakeDecision(False, "Run made no progress within the allowed interval", "no_progress_limit", retry_after_seconds=60, observations=observations)
+                    elif for_spawn and active >= self.max_concurrent_runs:
+                        decision = BrakeDecision(False, f"Concurrent run limit reached: {active} >= {self.max_concurrent_runs}", "concurrency_limit", queue=True, retry_after_seconds=30, cost_usd=cost, observations=observations)
+                    else:
+                        decision = BrakeDecision(True, cost_usd=cost, observations=observations)
+                elif for_spawn and active >= self.max_concurrent_runs:
+                    decision = BrakeDecision(False, f"Concurrent run limit reached: {active} >= {self.max_concurrent_runs}", "concurrency_limit", queue=True, retry_after_seconds=30, cost_usd=cost, observations=observations)
+                else:
+                    decision = BrakeDecision(True, cost_usd=cost, observations=observations)
 
-        if audit and not decision.allowed:
+        if audit:
             self._record_brake(task, decision)
         return decision
 
@@ -1594,12 +1635,23 @@ class TaskOrchestrationService:
                     "cost_usd": str(decision.cost_usd),
                     "max_cost_usd_per_task": str(self.max_cost_usd_per_task),
                     "max_concurrent_runs": self.max_concurrent_runs,
+                    "decision": self._json_safe(asdict(decision)),
                 },
             )
         )
         self.db.commit()
         if decision.code in {"autonomy_disabled", "cost_limit"}:
             self.wake_dependents(task.id)
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: TaskOrchestrationService._json_safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [TaskOrchestrationService._json_safe(item) for item in value]
+        return value
 
     def _task_cost(self, task: Task) -> Decimal:
         value = (

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     MAX_COST_USD_PER_TASK: float = 10.0
     MAX_CONCURRENT_RUNS: int = 2
     RUN_TIMEOUT_SECONDS: int = 900
+    MAX_ACTIVE_SECONDS_PER_RUN: int = 3600
+    MAX_TOOL_CALLS_PER_RUN: int = 200
+    MAX_NO_PROGRESS_SECONDS: int = 300
 
     # MCP projection (ADR-001 §D5): scoped token the mcp_server.py handlers
     # use to authenticate against POST /api/mcp/tools/call, and the base URL
