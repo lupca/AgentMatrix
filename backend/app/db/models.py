@@ -632,6 +632,18 @@ class AgentRun(Base):
         cascade="all, delete-orphan",
         order_by="AgentOutputChunk.chunk_index",
     )
+    agent_events = relationship(
+        "AgentEvent",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="AgentEvent.seq",
+    )
+    vendor_raw_events = relationship(
+        "VendorRawEvent",
+        back_populates="run",
+        cascade="all, delete-orphan",
+        order_by="VendorRawEvent.seq",
+    )
     llm_usages = relationship("LLMUsage", back_populates="agent_run")
 
     __table_args__ = (
@@ -675,6 +687,60 @@ class AgentOutputChunk(Base):
     __table_args__ = (
         CheckConstraint("chunk_index >= 0", name="ck_output_chunks_index_nonnegative"),
         UniqueConstraint("run_id", "chunk_index", name="uq_output_chunks_run_index"),
+    )
+
+
+AGENT_EVENT_TYPES = (
+    "run.started", "llm.requested", "llm.completed", "tool.started",
+    "tool.completed", "gate.requested", "workspace.changed",
+    "run.heartbeat", "run.completed",
+)
+
+
+class AgentEvent(Base):
+    """Vendor-independent event emitted by an agent execution (CTV2-209)."""
+
+    __tablename__ = "agent_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    seq = Column(Integer, nullable=False)
+    event_type = Column(String(30), nullable=False, index=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    payload = Column(JSON, nullable=False, default=dict)
+
+    run = relationship("AgentRun", back_populates="agent_events")
+
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('run.started', 'llm.requested', 'llm.completed', "
+            "'tool.started', 'tool.completed', 'gate.requested', "
+            "'workspace.changed', 'run.heartbeat', 'run.completed')",
+            name="ck_agent_events_type",
+        ),
+        CheckConstraint("seq >= 0", name="ck_agent_events_seq_nonnegative"),
+        UniqueConstraint("run_id", "seq", name="uq_agent_events_run_seq"),
+        Index("idx_agent_events_run_type", "run_id", "event_type"),
+    )
+
+
+class VendorRawEvent(Base):
+    """Original CLI output retained alongside its normalized interpretation."""
+
+    __tablename__ = "vendor_raw_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    seq = Column(Integer, nullable=False)
+    cli = Column(String(20), nullable=False)
+    raw_output = Column(Text, nullable=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    run = relationship("AgentRun", back_populates="vendor_raw_events")
+
+    __table_args__ = (
+        CheckConstraint("seq >= 0", name="ck_vendor_raw_events_seq_nonnegative"),
+        UniqueConstraint("run_id", "seq", name="uq_vendor_raw_events_run_seq"),
     )
 
 

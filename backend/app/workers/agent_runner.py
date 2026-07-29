@@ -10,6 +10,7 @@ import signal
 import subprocess
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 import dramatiq
 import psutil
@@ -19,7 +20,16 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.db.base import SessionLocal
-from app.db.models import AgentOutputChunk, AgentRun, AuditLog, Task, TaskDependency
+from app.db.models import (
+    AGENT_EVENT_TYPES,
+    AgentEvent,
+    AgentOutputChunk,
+    AgentRun,
+    AuditLog,
+    Task,
+    TaskDependency,
+    VendorRawEvent,
+)
 from app.schemas.task import ReviewResult
 from app.services.agent_matcher import AgentMatcher
 from app.services.command_builder import _is_review_task, review_result_path
@@ -176,6 +186,137 @@ def publish_status(run_id: str, status: str, **kwargs) -> None:
             **kwargs,
         },
     )
+
+
+def _json_line(line: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(line)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _vendor_event(event_type: str, payload: dict[str, Any], timestamp: datetime | None = None) -> dict:
+    if event_type not in AGENT_EVENT_TYPES:
+        return {}
+    return {
+        "event_type": event_type,
+        "timestamp": timestamp or datetime.now(timezone.utc),
+        "payload": payload,
+    }
+
+
+def parse_vendor_event(cli: str, line: str) -> list[dict]:
+    """Translate one line from claude, agy, or codex into common events.
+
+    CLIs may emit JSONL or human-readable text. Unknown JSON and plain text
+    are retained as a completed LLM payload, so normalization never loses
+    useful output while vendor-specific fields remain in the payload.
+    """
+    vendor = (cli or "").strip().lower()
+    raw = _json_line(line)
+    if raw is None:
+        return [_vendor_event("llm.completed", {"text": line, "stream": "stdout"})]
+
+    raw_timestamp = raw.get("timestamp") or raw.get("created_at")
+    timestamp = None
+    if isinstance(raw_timestamp, str):
+        try:
+            timestamp = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    kind = str(raw.get("type") or raw.get("event") or raw.get("status") or "").lower()
+    item = raw.get("item") if isinstance(raw.get("item"), dict) else raw
+    item_kind = str(item.get("type") or "").lower()
+
+    if vendor == "codex":
+        mapping = {
+            "thread.started": "run.started",
+            "turn.started": "llm.requested",
+            "turn.completed": "llm.completed",
+            "turn.failed": "run.completed",
+            "item.started": "tool.started",
+            "item.completed": "tool.completed",
+        }
+    elif vendor == "claude":
+        mapping = {
+            "system": "run.started",
+            "assistant": "llm.completed",
+            "result": "run.completed",
+            "tool_use": "tool.started",
+            "tool_result": "tool.completed",
+        }
+    else:  # agy / Gemini-style JSONL
+        mapping = {
+            "start": "run.started",
+            "started": "run.started",
+            "request": "llm.requested",
+            "response": "llm.completed",
+            "complete": "run.completed",
+            "completed": "run.completed",
+            "tool_call": "tool.started",
+            "tool_result": "tool.completed",
+        }
+
+    normalized_type = mapping.get(kind) or mapping.get(item_kind)
+    if normalized_type is None and any(key in raw for key in ("tool", "tool_name", "tool_use")):
+        normalized_type = "tool.completed" if "result" in kind else "tool.started"
+    if normalized_type is None:
+        normalized_type = "llm.completed"
+    return [_vendor_event(normalized_type, raw, timestamp)]
+
+
+# Descriptive aliases for callers that use the adapter terminology.
+normalize_cli_event = parse_vendor_event
+parse_cli_output = parse_vendor_event
+
+
+def _record_agent_event(
+    db: Session,
+    run_id: str,
+    seq: int,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+    timestamp: datetime | None = None,
+) -> None:
+    db.add(
+        AgentEvent(
+            run_id=run_id,
+            seq=seq,
+            event_type=event_type,
+            timestamp=timestamp or datetime.now(timezone.utc),
+            payload=payload or {},
+        )
+    )
+
+
+def _record_vendor_output(
+    db: Session, run_id: str, cli: str, raw_seq: int, event_seq: int, line: str
+) -> int:
+    """Persist the raw line and its normalized events; return next event seq."""
+    db.add(VendorRawEvent(run_id=run_id, seq=raw_seq, cli=cli or "unknown", raw_output=line))
+    next_seq = event_seq
+    for event in parse_vendor_event(cli, line):
+        _record_agent_event(
+            db,
+            run_id,
+            next_seq,
+            event["event_type"],
+            event["payload"],
+            event["timestamp"],
+        )
+        next_seq += 1
+    return next_seq
+
+
+def _next_agent_event_seq(db: Session, run_id: str) -> int:
+    latest = (
+        db.query(AgentEvent.seq)
+        .filter(AgentEvent.run_id == run_id)
+        .order_by(AgentEvent.seq.desc())
+        .first()
+    )
+    return (latest[0] + 1) if latest else 0
 
 
 def _nudge_driver(task_id: str, trigger: str) -> None:
@@ -382,7 +523,16 @@ def run_agent(
         explicit_result_ref: str | None = None
         active_chunk: AgentOutputChunk | None = None
         next_chunk_index = _next_chunk_index(db, run_id)
+        event_seq = _next_agent_event_seq(db, run_id)
         result: ProcessResult | None = None
+
+        _record_agent_event(
+            db, run_id, event_seq, "run.started", {"cli": run.cli, "attempt": attempt}
+        )
+        event_seq += 1
+        _record_agent_event(db, run_id, event_seq, "llm.requested", {"command": command})
+        event_seq += 1
+        db.commit()
 
         for output in process_manager.run_with_streaming(command, exec_cwd):
             if isinstance(output, ProcessResult):
@@ -394,6 +544,9 @@ def run_agent(
             chunk_buffer.append(output)
             explicit_result_ref = (
                 _extract_explicit_result_ref(output) or explicit_result_ref
+            )
+            event_seq = _record_vendor_output(
+                db, run_id, run.cli, line_count - 1, event_seq, output
             )
 
             if active_chunk is None:
@@ -429,6 +582,18 @@ def run_agent(
         run.exit_code = result.exit_code
         run.pid = None
         run.error_message = result.error
+
+        _record_agent_event(
+            db,
+            run_id,
+            event_seq,
+            "run.completed",
+            {
+                "status": result.status.value,
+                "exit_code": result.exit_code,
+                "error": result.error,
+            },
+        )
 
         if result.status == ProcessStatus.FAILED and attempt < run.max_attempts:
             run.status = "queued"
