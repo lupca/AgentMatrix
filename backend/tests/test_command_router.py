@@ -524,6 +524,92 @@ def test_concurrent_dispatch_with_same_idempotency_key_creates_one_run(tmp_path)
         verify.close()
 
 
+def test_concurrent_dispatch(tmp_path):
+    """AC (CTV2-204): two concurrent dispatch attempts with *different*
+    idempotency keys -- the GateRecord idempotency-key uniqueness that
+    protects same-key races doesn't apply here -- must still land exactly
+    one AgentRun, guarded by Task.version compare-and-set."""
+    import threading
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.db.base import Base
+    from app.db.models import Agent, AgentRun, Project, Task
+    from app.services.task_orchestration import TaskOrchestrationService
+
+    db_path = tmp_path / "race2.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}", connect_args={"timeout": 30, "check_same_thread": False}
+    )
+    Base.metadata.create_all(engine)
+    SessionFactory = sessionmaker(bind=engine)
+
+    setup = SessionFactory()
+    setup.add(Project(id="proj-race2", name="Race Project 2", repo_root="/tmp"))
+    setup.add(Agent(id="@agent-race2", name="Agent Race 2", role="executor", cli="codex"))
+    setup.add(
+        Task(
+            id="TASK-RACE2",
+            project="proj-race2",
+            title="Race task 2",
+            status="todo",
+            mode="bypass",
+            acceptance_criteria=["Tests pass"],
+        )
+    )
+    setup.commit()
+    setup.close()
+
+    barrier = threading.Barrier(2)
+    results = []
+    results_lock = threading.Lock()
+
+    def attempt(idempotency_key):
+        session = SessionFactory()
+        try:
+            barrier.wait(timeout=5)
+            result = TaskOrchestrationService(session).request_dispatch(
+                task_id="TASK-RACE2",
+                agent_id="@agent-race2",
+                actor="@operator",
+                idempotency_key=idempotency_key,
+            )
+            run_id = result.agent_run.id if result.agent_run else None
+            with results_lock:
+                results.append(("ok", run_id))
+        except Exception as exc:  # noqa: BLE001 - any failure is recorded, not raised
+            with results_lock:
+                results.append(("error", type(exc).__name__))
+        finally:
+            session.close()
+
+    threads = [
+        threading.Thread(target=attempt, args=(f"race2-key-{i}",)) for i in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert len(results) == 2
+    successful_run_ids = {run_id for kind, run_id in results if kind == "ok"}
+    assert len(successful_run_ids) == 1
+    errors = [kind for kind, _ in results if kind == "error"]
+    assert len(errors) == 1
+
+    verify = SessionFactory()
+    try:
+        assert (
+            verify.query(AgentRun).filter(AgentRun.task_id == "TASK-RACE2").count() == 1
+        )
+        task = verify.get(Task, "TASK-RACE2")
+        assert task.status == "dispatched"
+        assert task.version == 1
+    finally:
+        verify.close()
+
+
 @pytest.mark.asyncio
 async def test_query_db_agents_never_includes_api_key(db_session):
     from app.db.models import Agent

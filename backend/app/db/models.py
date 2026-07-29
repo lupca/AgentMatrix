@@ -50,6 +50,7 @@ class Task(ArchivableMixin, Base):
     raw_input = Column(Text, nullable=True)
     tags = Column(JSON, default=list)
     status = Column(String(20), nullable=False, default="todo", index=True)
+    version = Column(Integer, nullable=False, default=0, server_default="0")
     current_gate = Column(String(20), nullable=False, default="spec", index=True)
     mode = Column(String(20), nullable=False, default="supervised")
     priority = Column(String(10), nullable=True)
@@ -458,9 +459,25 @@ class AgentRun(Base):
         nullable=False,
         index=True,
     )
+    # Which TaskRound (CTV2-201) this run belongs to. Nullable: only runs
+    # created through the gate flow after CTV2-204 populate it -- older rows
+    # and ad-hoc test fixtures leave it NULL, which never collides under the
+    # uq_agent_runs_round_kind_attempt constraint below (NULLs are distinct).
+    task_round_id = Column(
+        String(36),
+        ForeignKey("task_rounds.id", use_alter=True, name="fk_agent_runs_task_round_id"),
+        nullable=True,
+        index=True,
+    )
     agent_id = Column(String(50), nullable=False)
     cli = Column(String(20), nullable=False)
     command = Column(Text, nullable=False)
+
+    # The idempotency key of the request (dispatch/review) that created this
+    # run -- lets two concurrent requests for the same task race down to a
+    # single row via uq_agent_runs_task_idempotency, independent of any
+    # in-process locking.
+    idempotency_key = Column(String(100), nullable=True)
 
     kind = Column(String(20), nullable=False, default="execute", server_default="execute")
     agent_role = Column(
@@ -510,6 +527,17 @@ class AgentRun(Base):
         CheckConstraint("kind IN ('execute', 'review')", name="ck_agent_runs_kind"),
         CheckConstraint(
             "agent_role IN ('executor', 'reviewer')", name="ck_agent_runs_agent_role"
+        ),
+        UniqueConstraint(
+            "task_round_id",
+            "kind",
+            "attempt",
+            name="uq_agent_runs_round_kind_attempt",
+        ),
+        UniqueConstraint(
+            "task_id",
+            "idempotency_key",
+            name="uq_agent_runs_task_idempotency",
         ),
     )
 

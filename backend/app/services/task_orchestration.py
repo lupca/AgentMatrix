@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -423,6 +423,7 @@ class TaskOrchestrationService:
                 task,
                 pending.gate_type,
                 pending.input_payload or {},
+                idempotency_key=pending.idempotency_key,
             )
 
         record = self._ledger_record(
@@ -489,7 +490,7 @@ class TaskOrchestrationService:
             return self._result_for_record(task, existing)
         self._assert_status(task, expected_status)
         now = datetime.now(timezone.utc)
-        task.status = "awaiting-review"
+        self._cas_status(task, "awaiting-review")
         task.current_gate = "review_order"
         task.result_ref = result_ref
         task.error = None
@@ -532,7 +533,7 @@ class TaskOrchestrationService:
         if existing is not None:
             return self._result_for_record(task, existing)
         self._assert_status(task, expected_status)
-        task.status = "failed"
+        self._cas_status(task, "failed")
         task.error = error
         task.updated_at = datetime.now(timezone.utc)
         record = self._ledger_record(
@@ -582,7 +583,7 @@ class TaskOrchestrationService:
             return self._result_for_record(task, existing)
         self._assert_status(task, expected_status)
         now = datetime.now(timezone.utc)
-        task.status = "failed"
+        self._cas_status(task, "failed")
         task.error = error
         task.awaiting_approval = True
         task.approval_prompt = f"Review result invalid or missing: {error}"
@@ -633,7 +634,7 @@ class TaskOrchestrationService:
         run.status = "failed"
         run.error_message = error
         run.completed_at = now
-        task.status = reset_status
+        self._cas_status(task, reset_status)
         task.error = error
         task.updated_at = now
         record = self._ledger_record(
@@ -678,7 +679,7 @@ class TaskOrchestrationService:
         run.error_message = "Cancelled by user"
         run.completed_at = now
         if task.status == "dispatched":
-            task.status = "todo"
+            self._cas_status(task, "todo")
         task.updated_at = now
         record = self._ledger_record(
             task=task,
@@ -825,7 +826,7 @@ class TaskOrchestrationService:
         if existing is not None:
             return self._result_for_record(task, existing)
         self._assert_status(task, expected_status)
-        task.status = "todo"
+        self._cas_status(task, "todo")
         task.current_gate = "plan"
         task.verdict = None
         task.updated_at = datetime.now(timezone.utc)
@@ -1099,7 +1100,9 @@ class TaskOrchestrationService:
             self._notify_gate_pending(task, record)
             return TransitionResult(task, record, False)
 
-        run, output_ref = self._apply_gate(task, gate_type, request_payload)
+        run, output_ref = self._apply_gate(
+            task, gate_type, request_payload, idempotency_key=idempotency_key
+        )
         record = self._ledger_record(
             task=task,
             gate_type=gate_type,
@@ -1249,6 +1252,8 @@ class TaskOrchestrationService:
         task: Task,
         gate_type: str,
         payload: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
     ) -> tuple[AgentRun | None, str | None]:
         self._assert_status(task, str(payload["expected_status"]))
         now = datetime.now(timezone.utc)
@@ -1269,15 +1274,20 @@ class TaskOrchestrationService:
                 status="queued",
                 timeout_seconds=int(payload["timeout_seconds"]),
                 effort=payload.get("effort"),
+                idempotency_key=idempotency_key,
             )
             self.db.add(run)
-            task.status = "dispatched"
+            self._cas_status(task, "dispatched")
             task.current_gate = "dispatch"
             if kind == "review":
                 task.reviewer = str(payload["agent_id"])
+                run.task_round_id = task.current_round_id
             else:
                 task.executor = str(payload["agent_id"])
-                self._start_round(task, agent_id=str(payload["agent_id"]), run_id=run_id, now=now)
+                task_round = self._start_round(
+                    task, agent_id=str(payload["agent_id"]), run_id=run_id, now=now
+                )
+                run.task_round_id = task_round.id
             task.dispatched_at = now
             task.error = None
             task.awaiting_approval = False
@@ -1309,10 +1319,12 @@ class TaskOrchestrationService:
                 agent_role="reviewer",
                 status="queued",
                 timeout_seconds=int(payload["timeout_seconds"]),
+                idempotency_key=idempotency_key,
+                task_round_id=task.current_round_id,
             )
             self.db.add(run)
             task.reviewer = reviewer
-            task.status = "in-review"
+            self._cas_status(task, "in-review")
             task.current_gate = "verdict"
             task.awaiting_approval = False
             task.approval_prompt = None
@@ -1331,12 +1343,12 @@ class TaskOrchestrationService:
             task.awaiting_approval = False
             task.approval_prompt = None
             if verdict == "pass":
-                task.status = "done"
+                self._cas_status(task, "done")
                 task.completed_at = now
                 task.final_result_ref = task.result_ref
                 task.final_verdict = verdict
             else:
-                task.status = "changes-requested"
+                self._cas_status(task, "changes-requested")
                 task.completed_at = None
             self._record_verdict_on_round(task, verdict=verdict, now=now)
             return None, verdict
@@ -1418,7 +1430,7 @@ class TaskOrchestrationService:
 
     def _record_brake(self, task: Task, decision: BrakeDecision) -> None:
         if decision.code in {"autonomy_disabled", "cost_limit"}:
-            task.status = "failed"
+            self._cas_status(task, "failed")
             task.error = decision.reason
             task.awaiting_approval = True
             task.approval_prompt = f"Escalated by safety brake: {decision.reason}"
@@ -1753,6 +1765,40 @@ class TaskOrchestrationService:
                 f"Task {task.id} expected status {expected_status!r}, "
                 f"found {task.status!r}"
             )
+
+    def _cas_status(self, task: Task, new_status: str) -> None:
+        """Move ``task.status`` forward with a compare-and-set UPDATE.
+
+        `_task()` already takes `SELECT ... FOR UPDATE` on this row, which
+        serializes writers on Postgres. This is the second, independent
+        guard: an `UPDATE ... WHERE status = :expected AND version =
+        :expected_version` that only succeeds if nothing changed the row
+        since it was read in *this* transaction. It is what actually
+        protects a backend without real row locks (SQLite, in tests) and is
+        cheap insurance everywhere else -- a losing concurrent writer gets a
+        hard `TransitionConflictError` instead of silently clobbering a
+        state it never observed.
+        """
+        expected_status = task.status
+        expected_version = task.version
+        result = self.db.execute(
+            update(Task)
+            .where(
+                Task.id == task.id,
+                Task.status == expected_status,
+                Task.version == expected_version,
+            )
+            .values(status=new_status, version=expected_version + 1)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            raise TransitionConflictError(
+                f"Task {task.id} status changed concurrently while "
+                f"transitioning {expected_status!r} -> {new_status!r} "
+                f"(expected version {expected_version})"
+            )
+        task.status = new_status
+        task.version = expected_version + 1
 
     def _terminal_review_run(self, task_id: str) -> AgentRun | None:
         return (

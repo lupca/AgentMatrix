@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 import pytest
-from sqlalchemy.exc import StatementError
+from sqlalchemy.exc import IntegrityError, StatementError
 
 from app.db.models import (
     Agent,
@@ -1180,3 +1180,139 @@ def test_verdict_without_a_current_round_does_not_crash(orchestration, db_sessio
     assert result.task.status == "done"
     assert result.task.current_round_id is None
     assert db_session.query(TaskRound).filter(TaskRound.task_id == task.id).count() == 0
+
+
+# --- CTV2-204: task-level locking and idempotency -------------------------
+
+
+def test_dispatch_bumps_task_version(orchestration, db_session):
+    task = _task(db_session, "LOCK-001", mode="bypass")
+    assert task.version == 0
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="lock-dispatch-1",
+    )
+
+    assert result.task.version == 1
+    assert result.agent_run.idempotency_key == "lock-dispatch-1"
+    assert result.agent_run.task_round_id == result.task.current_round_id
+
+
+def test_cas_status_raises_when_version_changed_since_read(orchestration, db_session):
+    """A caller holding a stale in-memory Task (older version) must get a
+    hard conflict from `_cas_status`, not a silent overwrite -- this is the
+    guard that protects backends without real row locks (e.g. SQLite)."""
+    from sqlalchemy import text
+
+    task = _task(db_session, "LOCK-002", mode="bypass")
+    assert task.status == "todo"
+    assert task.version == 0
+
+    # Simulate another transaction having already advanced the row, via a
+    # raw statement that bypasses ORM session sync so `task` keeps holding
+    # the stale values a real concurrent transaction would have read.
+    db_session.execute(
+        text("UPDATE tasks SET status = 'dispatched', version = 1 WHERE id = :id"),
+        {"id": task.id},
+    )
+    assert task.status == "todo"
+    assert task.version == 0
+
+    with pytest.raises(TransitionConflictError):
+        orchestration._cas_status(task, "dispatched")
+
+    row = db_session.execute(
+        text("SELECT status, version FROM tasks WHERE id = :id"), {"id": task.id}
+    ).one()
+    assert row.status == "dispatched"
+    assert row.version == 1
+
+
+def test_agent_run_unique_round_kind_attempt(db_session):
+    db_session.add(Project(id="proj-uniq", name="Uniq", repo_root="/tmp"))
+    db_session.add(
+        Task(
+            id="LOCK-003",
+            project="proj-uniq",
+            title="Uniq task",
+            status="dispatched",
+            acceptance_criteria=["Tests pass"],
+        )
+    )
+    db_session.add(
+        TaskRound(id="round-uniq", task_id="LOCK-003", round_no=1, status="dispatched")
+    )
+    db_session.commit()
+
+    db_session.add(
+        AgentRun(
+            id="run-uniq-1",
+            task_id="LOCK-003",
+            task_round_id="round-uniq",
+            agent_id="@executor",
+            cli="codex",
+            command="codex exec",
+            kind="execute",
+            attempt=1,
+        )
+    )
+    db_session.commit()
+
+    db_session.add(
+        AgentRun(
+            id="run-uniq-2",
+            task_id="LOCK-003",
+            task_round_id="round-uniq",
+            agent_id="@executor",
+            cli="codex",
+            command="codex exec",
+            kind="execute",
+            attempt=1,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()
+
+
+def test_agent_run_unique_task_idempotency_key(db_session):
+    db_session.add(Project(id="proj-uniq2", name="Uniq2", repo_root="/tmp"))
+    db_session.add(
+        Task(
+            id="LOCK-004",
+            project="proj-uniq2",
+            title="Uniq task 2",
+            status="dispatched",
+            acceptance_criteria=["Tests pass"],
+        )
+    )
+    db_session.commit()
+
+    db_session.add(
+        AgentRun(
+            id="run-idem-1",
+            task_id="LOCK-004",
+            agent_id="@executor",
+            cli="codex",
+            command="codex exec",
+            idempotency_key="same-key",
+        )
+    )
+    db_session.commit()
+
+    db_session.add(
+        AgentRun(
+            id="run-idem-2",
+            task_id="LOCK-004",
+            agent_id="@executor",
+            cli="codex",
+            command="codex exec",
+            idempotency_key="same-key",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.commit()
+    db_session.rollback()

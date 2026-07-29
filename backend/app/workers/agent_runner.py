@@ -614,10 +614,29 @@ def advance_task(task_id: str, trigger: str) -> str:
     """
     db: Session = SessionLocal()
     try:
-        task = db.query(Task).filter(Task.id == task_id).with_for_update().first()
+        task = (
+            db.query(Task)
+            .filter(Task.id == task_id)
+            .with_for_update(skip_locked=True)
+            .first()
+        )
         if task is None:
-            logger.warning("advance_task: task %s not found", task_id)
-            return "not_found"
+            # SKIP LOCKED can't distinguish "no such task" from "another
+            # advance_task call already holds this row's lock" -- check
+            # existence separately so a concurrent driver isn't logged as a
+            # missing task. Skipping (rather than blocking) is correct here:
+            # the in-flight call will drive the task forward, and any state
+            # change it makes re-triggers advance_task through the normal
+            # event flow, so this call has nothing left to do.
+            still_exists = db.query(Task.id).filter(Task.id == task_id).scalar()
+            if still_exists is None:
+                logger.warning("advance_task: task %s not found", task_id)
+                return "not_found"
+            logger.info(
+                "advance_task: task %s locked by a concurrent call, skipping",
+                task_id,
+            )
+            return "skipped_locked"
 
         status_before = task.status
         service = TaskOrchestrationService(db)
