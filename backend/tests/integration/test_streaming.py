@@ -99,7 +99,14 @@ def test_stream_reconnection_skips_acknowledged_history(streaming_context):
     events = parse_events(response.text)
 
     history = [event for event in events if event["type"] == "history"]
-    assert history == [{"type": "history", "content": "line3", "index": 3}]
+    assert history == [
+        {
+            "type": "history",
+            "content": "line3",
+            "seq": 3,
+            "index": 3,
+        }
+    ]
     assert events[-1]["type"] == "done"
 
 
@@ -119,8 +126,8 @@ def test_stream_accepts_query_resume_id_and_invalid_header(streaming_context):
     header_history = [
         event for event in parse_events(header_response.text) if event["type"] == "history"
     ]
-    assert [event["index"] for event in query_history] == [2, 3]
-    assert [event["index"] for event in header_history] == [1, 2, 3]
+    assert [event["seq"] for event in query_history] == [2, 3]
+    assert [event["seq"] for event in header_history] == [1, 2, 3]
 
 
 class FakePubSub:
@@ -290,6 +297,35 @@ def test_get_full_output(streaming_context):
         "output": "line1\nline2\nline3",
         "line_count": 3,
         "byte_count": 15,
+        "chunks": [
+            {"seq": 1, "content": "line1"},
+            {"seq": 2, "content": "line2"},
+            {"seq": 3, "content": "line3"},
+        ],
+        "after_seq": 0,
+        "next_seq": 3,
+    }
+
+
+def test_get_output_replays_chunks_after_sequence(streaming_context):
+    client, db = streaming_context
+    add_run(db)
+
+    response = client.get("/api/runs/run-stream/output?after_seq=1")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "run_id": "run-stream",
+        "status": "success",
+        "output": "line1\nline2\nline3",
+        "line_count": 3,
+        "byte_count": 15,
+        "chunks": [
+            {"seq": 2, "content": "line2"},
+            {"seq": 3, "content": "line3"},
+        ],
+        "after_seq": 1,
+        "next_seq": 3,
     }
 
 

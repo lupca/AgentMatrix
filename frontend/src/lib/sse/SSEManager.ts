@@ -91,7 +91,7 @@ export class SSEManager {
       void this.replay(runId, connection).finally(() => {
         if (this.connections.get(runId) === connection) {
           connection.replaying = false;
-          this.connect(runId);
+          this.openEventSource(runId, connection);
         }
       });
       return;
