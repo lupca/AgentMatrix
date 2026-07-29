@@ -9,12 +9,50 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.db.models import Agent, AgentRun, Task
 from app.schemas.agent import AgentSuggestion
+
+# Bumped whenever the scoring formula (weights, signals) changes, so
+# DispatchDecision.policy_version tells you which formula produced a given
+# selected_score/final_score (CTV2-202).
+POLICY_VERSION = "agent_matcher_v1"
+
+_COMPLETED_RUN_STATUSES = ("success", "failed", "timeout")
+
+
+@dataclass
+class CandidateScore:
+    """One agent's eligibility and score breakdown for a task (CTV2-202)."""
+
+    agent_id: str
+    eligible: bool
+    rejection_reason: str | None = None
+    skill_match: float | None = None
+    performance: float | None = None
+    load: float | None = None
+    cost: float | None = None
+    work_type_fit: float | None = None
+    risk_fit: float | None = None
+    final_score: float | None = None
+    predicted_pass1: float | None = None
+    predicted_runtime: float | None = None
+    quota_pressure: float | None = None
+    reason: str | None = None
+    matched_skills: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ScoringResult:
+    """Full output of a scoring pass: every candidate plus the ranked top-N."""
+
+    feature_snapshot: dict[str, Any]
+    candidates: list[CandidateScore]
+    suggestions: list[AgentSuggestion]
 
 
 _STOP_WORDS = {
@@ -75,36 +113,57 @@ class AgentMatcher:
     ) -> list[AgentSuggestion]:
         if top_n <= 0:
             return []
+        return self.score_candidates(
+            task,
+            top_n,
+            required_capabilities=required_capabilities,
+            exclude_agent_id=exclude_agent_id,
+        ).suggestions
 
-        agents = (
-            self.db.query(Agent)
-            .filter(Agent.status.notin_(_UNAVAILABLE_STATUSES))
-            .all()
-        )
-        if required_capabilities:
-            agents = [
-                agent
-                for agent in agents
-                if set(agent.capabilities or []) & required_capabilities
-            ]
-        if exclude_agent_id:
-            excluded = exclude_agent_id.strip().casefold()
-            agents = [
-                agent for agent in agents if agent.id.strip().casefold() != excluded
-            ]
-        if not agents:
-            return []
+    def score_candidates(
+        self,
+        task: Task,
+        top_n: int = 3,
+        *,
+        required_capabilities: set[str] | None = None,
+        exclude_agent_id: str | None = None,
+    ) -> ScoringResult:
+        """Score every agent (eligible or not) for a task (CTV2-202).
 
+        Unlike :meth:`suggest_agents`, ineligible agents are kept in the
+        result (with a rejection reason) rather than filtered out, so callers
+        that persist a DispatchDecision have the full candidate pool to
+        explain why an agent was or wasn't picked.
+        """
+        agents = self.db.query(Agent).all()
         task_terms = self._task_terms(task)
         work_type = self._work_type(task)
         risk_escalated = self._is_risk_escalated(task)
         load_by_agent = self._active_loads()
-        suggestions: list[tuple[float, AgentSuggestion]] = []
+        excluded = exclude_agent_id.strip().casefold() if exclude_agent_id else None
+        feature_snapshot = self._feature_snapshot(task, work_type, risk_escalated)
+
+        candidates: list[CandidateScore] = []
+        scored: list[tuple[float, AgentSuggestion]] = []
 
         for agent in agents:
+            ineligible_reason = self._ineligibility_reason(
+                agent, excluded, required_capabilities
+            )
+            if ineligible_reason is not None:
+                candidates.append(
+                    CandidateScore(
+                        agent_id=agent.id,
+                        eligible=False,
+                        rejection_reason=ineligible_reason,
+                    )
+                )
+                continue
+
             skill_match, matched_skills = self._skill_match(agent, task_terms)
             performance = self._performance(agent, task, task_terms)
-            load = self._load_score(load_by_agent.get(agent.id, 0))
+            active_runs = load_by_agent.get(agent.id, 0)
+            load = self._load_score(active_runs)
             cost = self._cost_score(agent)
             work_type_fit = self._work_type_boost(agent, work_type, task_terms)
             risk_fit = self._risk_escalation(agent, risk_escalated)
@@ -116,27 +175,85 @@ class AgentMatcher:
                 + work_type_fit * 0.15
                 + risk_fit * 0.10
             )
+            final_score = round(max(0.0, min(score, 1.0)), 2)
             reason = self._reason(
-                agent,
-                skill_match,
-                performance,
-                load_by_agent.get(agent.id, 0),
-                cost,
-                matched_skills,
+                agent, skill_match, performance, active_runs, cost, matched_skills
             )
-            suggestions.append(
-                (
-                    score,
-                    AgentSuggestion(
-                        agent_id=agent.id,
-                        score=round(max(0.0, min(score, 1.0)), 2),
-                        reason=reason,
-                    ),
+            candidates.append(
+                CandidateScore(
+                    agent_id=agent.id,
+                    eligible=True,
+                    skill_match=skill_match,
+                    performance=performance,
+                    load=load,
+                    cost=cost,
+                    work_type_fit=work_type_fit,
+                    risk_fit=risk_fit,
+                    final_score=final_score,
+                    predicted_pass1=performance,
+                    predicted_runtime=self._predicted_runtime(agent.id),
+                    quota_pressure=round(1.0 - load, 4),
+                    reason=reason,
+                    matched_skills=matched_skills,
                 )
             )
+            scored.append((final_score, AgentSuggestion(agent_id=agent.id, score=final_score, reason=reason)))
 
-        suggestions.sort(key=lambda item: (-item[0], item[1].agent_id))
-        return [suggestion for _, suggestion in suggestions[:top_n]]
+        scored.sort(key=lambda item: (-item[0], item[1].agent_id))
+        suggestions = [suggestion for _, suggestion in scored[: max(0, top_n)]]
+        return ScoringResult(
+            feature_snapshot=feature_snapshot, candidates=candidates, suggestions=suggestions
+        )
+
+    @staticmethod
+    def _ineligibility_reason(
+        agent: Agent,
+        excluded: str | None,
+        required_capabilities: set[str] | None,
+    ) -> str | None:
+        if agent.status in _UNAVAILABLE_STATUSES:
+            return f"agent status is {agent.status}"
+        if excluded and agent.id.strip().casefold() == excluded:
+            return "excluded from candidate pool (e.g. four-eyes)"
+        if required_capabilities and not (
+            set(agent.capabilities or []) & required_capabilities
+        ):
+            return (
+                "missing required capability: "
+                f"{', '.join(sorted(required_capabilities))}"
+            )
+        return None
+
+    @staticmethod
+    def _feature_snapshot(task: Task, work_type: str, risk_escalated: bool) -> dict[str, Any]:
+        return {
+            "task_id": task.id,
+            "priority": task.priority,
+            "risk": task.risk,
+            "tags": list(getattr(task, "tags", None) or []),
+            "files_count": len(task.files or []),
+            "tests_count": len(task.tests or []),
+            "work_type": work_type,
+            "risk_escalated": risk_escalated,
+        }
+
+    def _predicted_runtime(self, agent_id: str) -> float | None:
+        runs = (
+            self.db.query(AgentRun.started_at, AgentRun.completed_at)
+            .filter(
+                AgentRun.agent_id == agent_id,
+                AgentRun.status.in_(_COMPLETED_RUN_STATUSES),
+                AgentRun.started_at.isnot(None),
+                AgentRun.completed_at.isnot(None),
+            )
+            .all()
+        )
+        durations = [
+            (completed - started).total_seconds() for started, completed in runs
+        ]
+        if not durations:
+            return None
+        return round(sum(durations) / len(durations), 2)
 
     @staticmethod
     def _task_terms(task: Task) -> set[str]:

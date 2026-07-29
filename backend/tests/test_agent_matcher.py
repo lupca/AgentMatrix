@@ -268,3 +268,52 @@ def test_four_eyes_exclusion(db_session):
     )
 
     assert [s.agent_id for s in suggestions] == ["@other-agent"]
+
+
+def test_score_candidates_includes_ineligible_agents_with_rejection_reason(db_session):
+    executor = Agent(
+        id="@executor-agent-2",
+        name="Executor Agent",
+        role="executor",
+        capabilities=["backend"],
+        status="idle",
+    )
+    offline = Agent(
+        id="@offline-agent",
+        name="Offline Agent",
+        role="executor",
+        capabilities=["backend"],
+        status="offline",
+    )
+    task = Task(id="SCORE-001", project="backend", title="Backend task", tags=["backend"])
+    db_session.add_all([executor, offline, task])
+    db_session.commit()
+
+    result = AgentMatcher(db_session).score_candidates(task, top_n=3)
+
+    by_id = {c.agent_id: c for c in result.candidates}
+    assert by_id["@executor-agent-2"].eligible is True
+    assert by_id["@executor-agent-2"].final_score is not None
+    assert by_id["@offline-agent"].eligible is False
+    assert by_id["@offline-agent"].rejection_reason == "agent status is offline"
+    assert [s.agent_id for s in result.suggestions] == ["@executor-agent-2"]
+    assert result.feature_snapshot["task_id"] == "SCORE-001"
+
+
+def test_suggest_agents_matches_score_candidates_eligible_ranking(db_session):
+    agent = Agent(
+        id="@sync-agent",
+        name="Sync Agent",
+        role="executor",
+        capabilities=["backend"],
+        status="idle",
+    )
+    task = Task(id="SCORE-002", project="backend", title="Backend task", tags=["backend"])
+    db_session.add_all([agent, task])
+    db_session.commit()
+
+    matcher = AgentMatcher(db_session)
+    suggestions = matcher.suggest_agents(task, top_n=3)
+    scoring = matcher.score_candidates(task, top_n=3)
+
+    assert suggestions == scoring.suggestions

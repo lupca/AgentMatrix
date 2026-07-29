@@ -238,6 +238,83 @@ class TaskRound(Base):
     )
 
 
+class DispatchDecision(Base):
+    """Snapshot of an AgentMatcher scoring run behind one request_dispatch call (CTV2-202).
+
+    Persisted before the AgentRun it may lead to exists (dispatch can stay
+    pending under supervised mode), so this is the record of *why* an agent
+    was picked -- and what else was considered -- independent of whether a
+    run ever materializes from it.
+    """
+
+    __tablename__ = "dispatch_decisions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    task_id = Column(
+        String(20), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    task_round_id = Column(
+        String(36),
+        ForeignKey(
+            "task_rounds.id", use_alter=True, name="fk_dispatch_decisions_task_round_id"
+        ),
+        nullable=True,
+        index=True,
+    )
+    kind = Column(String(20), nullable=False, default="execute")
+    policy_version = Column(String(50), nullable=False)
+    task_feature_snapshot = Column(JSON, nullable=True)
+    # No FK to agents.id: like Task.executor/reviewer, this is a historical
+    # snapshot of an agent identifier that must survive the agent being
+    # renamed or deleted later.
+    selected_agent_id = Column(String(50), nullable=False)
+    selected_score = Column(Float, nullable=True)
+    selection_reason = Column(Text, nullable=True)
+    exploration = Column(Boolean, nullable=False, default=False, server_default="false")
+    human_override = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    candidates = relationship(
+        "DispatchCandidate",
+        back_populates="decision",
+        cascade="all, delete-orphan",
+        order_by="DispatchCandidate.id",
+    )
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('execute', 'review')", name="ck_dispatch_decisions_kind"),
+    )
+
+
+class DispatchCandidate(Base):
+    """One agent's score breakdown within a DispatchDecision (CTV2-202)."""
+
+    __tablename__ = "dispatch_candidates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dispatch_decision_id = Column(
+        String(36),
+        ForeignKey("dispatch_decisions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    agent_id = Column(String(50), nullable=False)
+    eligible = Column(Boolean, nullable=False, default=True)
+    rejection_reason = Column(Text, nullable=True)
+    predicted_pass1 = Column(Float, nullable=True)
+    predicted_runtime = Column(Float, nullable=True)
+    quota_pressure = Column(Float, nullable=True)
+    final_score = Column(Float, nullable=True)
+
+    decision = relationship("DispatchDecision", back_populates="candidates")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "dispatch_decision_id", "agent_id", name="uq_dispatch_candidates_decision_agent"
+        ),
+    )
+
+
 class GateRecord(Base):
     __tablename__ = "gate_records"
 
@@ -492,6 +569,17 @@ class AgentRun(Base):
     task_round_id = Column(
         String(36),
         ForeignKey("task_rounds.id", use_alter=True, name="fk_agent_runs_task_round_id"),
+        nullable=True,
+        index=True,
+    )
+    # The DispatchDecision (CTV2-202) that selected this run's agent_id, if
+    # any -- only populated for runs created through request_dispatch, which
+    # is the only caller that scores candidates before picking one.
+    dispatch_decision_id = Column(
+        String(36),
+        ForeignKey(
+            "dispatch_decisions.id", use_alter=True, name="fk_agent_runs_dispatch_decision_id"
+        ),
         nullable=True,
         index=True,
     )
@@ -757,4 +845,3 @@ class TaskEvent(Base):
     __table_args__ = (
         Index("idx_task_events_type_created", "event_type", "created_at"),
     )
-

@@ -19,6 +19,8 @@ from app.db.models import (
     Agent,
     AgentRun,
     AuditLog,
+    DispatchCandidate,
+    DispatchDecision,
     GateRecord,
     LLMUsage,
     Project,
@@ -28,6 +30,7 @@ from app.db.models import (
     TaskRound,
 )
 from app.db.models import Session as SessionModel
+from app.services.agent_matcher import AgentMatcher, POLICY_VERSION as AGENT_MATCHER_POLICY_VERSION
 from app.services.command_builder import build_dispatch_command, build_review_command
 from app.services.outbox import record_run_requested
 from app.services.task_event_service import emit_task_event
@@ -252,6 +255,13 @@ class TaskOrchestrationService:
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc
 
+        dispatch_decision_id = self._record_dispatch_decision(
+            task=task,
+            kind=kind,
+            idempotency_key=idempotency_key,
+            selected_agent_id=agent_id,
+        )
+
         return self._request_gate(
             task=task,
             gate_type="dispatch",
@@ -267,8 +277,80 @@ class TaskOrchestrationService:
                 "kind": kind,
                 "agent_role": "reviewer" if kind == "review" else "executor",
                 "effort": resolved_effort,
+                "dispatch_decision_id": dispatch_decision_id,
             },
         )
+
+    def _record_dispatch_decision(
+        self,
+        *,
+        task: Task,
+        kind: str,
+        idempotency_key: str,
+        selected_agent_id: str,
+    ) -> str:
+        """Score every agent for this dispatch and persist the decision (CTV2-202).
+
+        Runs before the gate/idempotency machinery in ``_request_gate`` so the
+        AgentRun it may lead to (immediately, or later on supervised
+        approval) can link back to it via ``dispatch_decision_id``. The
+        decision id is derived deterministically from
+        (task_id, idempotency_key, kind) rather than randomly generated, so a
+        retried call with the same idempotency key reuses the same row
+        instead of inserting a duplicate every time `_request_gate` replays
+        an already-decided/idempotent request.
+        """
+        decision_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"dispatch-decision:{task.id}:{idempotency_key}:{kind}",
+            )
+        )
+        if self.db.get(DispatchDecision, decision_id) is not None:
+            return decision_id
+
+        exclude_agent_id = task.executor if kind == "review" else None
+        scoring = AgentMatcher(self.db).score_candidates(
+            task, top_n=1, exclude_agent_id=exclude_agent_id
+        )
+        selected = next(
+            (c for c in scoring.candidates if c.agent_id == selected_agent_id), None
+        )
+        top_choice = scoring.suggestions[0].agent_id if scoring.suggestions else None
+
+        self.db.add(
+            DispatchDecision(
+                id=decision_id,
+                task_id=task.id,
+                task_round_id=task.current_round_id,
+                kind=kind,
+                policy_version=AGENT_MATCHER_POLICY_VERSION,
+                task_feature_snapshot=scoring.feature_snapshot,
+                selected_agent_id=selected_agent_id,
+                selected_score=selected.final_score if selected else None,
+                selection_reason=(
+                    selected.reason
+                    if selected and selected.reason
+                    else "selected outside matcher ranking"
+                ),
+                exploration=False,
+                human_override=bool(top_choice) and top_choice != selected_agent_id,
+            )
+        )
+        self.db.add_all(
+            DispatchCandidate(
+                dispatch_decision_id=decision_id,
+                agent_id=candidate.agent_id,
+                eligible=candidate.eligible,
+                rejection_reason=candidate.rejection_reason,
+                predicted_pass1=candidate.predicted_pass1,
+                predicted_runtime=candidate.predicted_runtime,
+                quota_pressure=candidate.quota_pressure,
+                final_score=candidate.final_score,
+            )
+            for candidate in scoring.candidates
+        )
+        return decision_id
 
     def request_review(
         self,
@@ -1319,6 +1401,7 @@ class TaskOrchestrationService:
                 timeout_seconds=int(payload["timeout_seconds"]),
                 effort=payload.get("effort"),
                 idempotency_key=idempotency_key,
+                dispatch_decision_id=payload.get("dispatch_decision_id"),
             )
             self.db.add(run)
             self._cas_status(task, "dispatched")

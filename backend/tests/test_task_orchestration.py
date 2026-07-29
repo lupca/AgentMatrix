@@ -7,6 +7,8 @@ from app.db.models import (
     Agent,
     AgentRun,
     AuditLog,
+    DispatchCandidate,
+    DispatchDecision,
     GateRecord,
     LLMUsage,
     OutboxEvent,
@@ -1404,3 +1406,119 @@ def test_review_order_dispatch_creates_outbox_event(orchestration, db_session):
     run_ids = {event.payload["run_id"] for event in events}
     assert run_ids == {dispatch.agent_run.id, review.agent_run.id}
     db_session.rollback()
+
+
+def test_bypass_dispatch_persists_dispatch_decision_and_candidates(
+    orchestration, db_session
+):
+    db_session.add(
+        Agent(id="@other-executor", name="Other Executor", role="executor", cli="codex")
+    )
+    db_session.commit()
+    task = _task(db_session, "DECISION-001", mode="bypass")
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="decision-dispatch-1",
+    )
+
+    assert result.agent_run.dispatch_decision_id is not None
+    decision = db_session.get(DispatchDecision, result.agent_run.dispatch_decision_id)
+    assert decision is not None
+    assert decision.task_id == task.id
+    assert decision.kind == "execute"
+    assert decision.selected_agent_id == "@executor"
+    assert decision.policy_version
+    assert decision.task_feature_snapshot is not None
+    assert decision.exploration is False
+
+    candidates = (
+        db_session.query(DispatchCandidate)
+        .filter(DispatchCandidate.dispatch_decision_id == decision.id)
+        .all()
+    )
+    assert {c.agent_id for c in candidates} == {"@executor", "@other-executor"}
+    assert all(c.eligible for c in candidates)
+    assert all(c.final_score is not None for c in candidates)
+
+
+def test_supervised_dispatch_persists_dispatch_decision_before_agent_run_exists(
+    orchestration, db_session
+):
+    task = _task(db_session, "DECISION-002")
+
+    pending = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="decision-dispatch-2",
+    )
+
+    assert pending.agent_run is None
+    decisions = (
+        db_session.query(DispatchDecision).filter(DispatchDecision.task_id == task.id).all()
+    )
+    assert len(decisions) == 1
+    decision = decisions[0]
+    assert decision.selected_agent_id == "@executor"
+
+    approved = orchestration.decide_gate(
+        gate_record_id=pending.gate_record.id,
+        decision="approved",
+        actor="@supervisor",
+        idempotency_key="decision-dispatch-2:approval",
+    )
+
+    assert approved.agent_run.dispatch_decision_id == decision.id
+
+
+def test_bypass_dispatch_idempotent_replay_reuses_dispatch_decision(
+    orchestration, db_session
+):
+    task = _task(db_session, "DECISION-003", mode="bypass")
+    request = dict(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="decision-dispatch-3",
+    )
+
+    first = orchestration.request_dispatch(**request)
+    second = orchestration.request_dispatch(**request)
+
+    assert first.agent_run.dispatch_decision_id == second.agent_run.dispatch_decision_id
+    assert (
+        db_session.query(DispatchDecision)
+        .filter(DispatchDecision.task_id == task.id)
+        .count()
+        == 1
+    )
+
+
+def test_dispatch_decision_flags_human_override_when_selected_agent_is_not_top_ranked(
+    orchestration, db_session
+):
+    db_session.add(
+        Agent(
+            id="@star-executor",
+            name="Star Executor",
+            role="executor",
+            cli="codex",
+            success_rate=1.0,
+            effort="high",
+        )
+    )
+    db_session.commit()
+    task = _task(db_session, "DECISION-004", mode="bypass")
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="decision-dispatch-4",
+    )
+
+    decision = db_session.get(DispatchDecision, result.agent_run.dispatch_decision_id)
+    assert decision.human_override is True
