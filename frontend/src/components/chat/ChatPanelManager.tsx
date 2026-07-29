@@ -67,7 +67,7 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
 
   // ChatPanel resolves this value via GET /sessions/{id}, so use the session's
   // primary key here (not thread_id, which is a distinct LangGraph checkpoint field).
-  const activeThreadId = activeSession?.id || threadId;
+  const activeThreadId = activeSession?.id;
 
   const sessionProps = {
     contextLevel,
@@ -142,17 +142,30 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
           </div>
         )}
 
-        <ChatPanel
-          key={activeThreadId}
-          threadId={activeThreadId}
-          taskId={taskId}
-          taskTitle={taskTitle}
-          task={task}
-          onTaskAction={onTaskAction}
-          className="rounded-t-none h-full min-h-0 border-t-0"
-          fullHeight={fullHeight}
-          {...sessionProps}
-        />
+        {activeThreadId ? (
+          <ChatPanel
+            key={activeThreadId}
+            threadId={activeThreadId}
+            taskId={taskId}
+            taskTitle={taskTitle}
+            task={task}
+            onTaskAction={onTaskAction}
+            className="rounded-t-none h-full min-h-0 border-t-0"
+            fullHeight={fullHeight}
+            {...sessionProps}
+          />
+        ) : (
+          <div className="flex flex-1 items-center justify-center text-gray-500 text-sm">
+            {sessionProps.sessionsLoading ? (
+              <div className="flex flex-col items-center gap-3">
+                <div className="w-6 h-6 rounded-full border-2 border-indigo-500/30 border-t-indigo-500 animate-spin" />
+                <span>Initializing session...</span>
+              </div>
+            ) : (
+              <span>No active session</span>
+            )}
+          </div>
+        )}
       </div>
     );
   }
@@ -215,18 +228,31 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
           </div>
         )}
 
-        <ChatPanel
-          key={activeThreadId}
-          threadId={activeThreadId}
-          taskId={taskId}
-          taskTitle={taskTitle}
-          task={task}
-          onTaskAction={onTaskAction}
-          className="border-0 rounded-t-none flex-1 min-h-0"
-          fullHeight={fullHeight}
-          isDocked={true}
-          {...sessionProps}
-        />
+        {activeThreadId ? (
+          <ChatPanel
+            key={activeThreadId}
+            threadId={activeThreadId}
+            taskId={taskId}
+            taskTitle={taskTitle}
+            task={task}
+            onTaskAction={onTaskAction}
+            className="border-0 rounded-t-none flex-1 min-h-0"
+            fullHeight={fullHeight}
+            isDocked={true}
+            {...sessionProps}
+          />
+        ) : (
+          <div className="flex flex-1 items-center justify-center text-gray-500 text-sm">
+            {sessionProps.sessionsLoading ? (
+              <div className="flex flex-col items-center gap-3">
+                <div className="w-6 h-6 rounded-full border-2 border-indigo-500/30 border-t-indigo-500 animate-spin" />
+                <span>Initializing session...</span>
+              </div>
+            ) : (
+              <span>No active session</span>
+            )}
+          </div>
+        )}
       </div>
 
       {isSessionSidebarOpen && (

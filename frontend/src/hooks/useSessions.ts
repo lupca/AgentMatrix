@@ -76,10 +76,30 @@ export function useSessions(context: SessionContext): UseSessionsResult {
       });
       if (controller.signal.aborted) return;
       const list = Array.isArray(result) ? result : [];
-      setSessions(list);
-      setActiveSessionId((current) =>
-        current && list.some((s) => s.id === current) ? current : list[0]?.id || null,
-      );
+      
+      if (list.length > 0) {
+        setSessions(list);
+        setActiveSessionId((current) =>
+          current && list.some((s) => s.id === current) ? current : list[0]?.id || null,
+        );
+      } else {
+        // Auto-create a default session if there are none
+        try {
+          const created = await api.post<ChatSessionSummary>('/sessions', {
+            context_level: level,
+            project_id: project_id || undefined,
+            task_id: task_id || undefined,
+            thread_id: `${task_id || project_id || level}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            title: null,
+          });
+          setSessions([created]);
+          setActiveSessionId(created.id);
+        } catch (createErr: any) {
+          console.error("Failed to auto-create session:", createErr);
+          setSessions([]);
+          setActiveSessionId(null);
+        }
+      }
     } catch (err: any) {
       if (controller.signal.aborted || err?.name === 'AbortError') return;
       setError(err?.message || 'Failed to load sessions');
@@ -88,7 +108,7 @@ export function useSessions(context: SessionContext): UseSessionsResult {
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }, [query]);
+  }, [query, level, project_id, task_id]);
 
   useEffect(() => {
     fetchSessions();
