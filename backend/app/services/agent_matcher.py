@@ -14,13 +14,13 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Agent, AgentRun, Task
+from app.db.models import Agent, AgentAccount, AgentRun, Task
 from app.schemas.agent import AgentSuggestion
 
 # Bumped whenever the scoring formula (weights, signals) changes, so
 # DispatchDecision.policy_version tells you which formula produced a given
 # selected_score/final_score (CTV2-202).
-POLICY_VERSION = "agent_matcher_v1"
+POLICY_VERSION = "agent_matcher_v2"
 
 _COMPLETED_RUN_STATUSES = ("success", "failed", "timeout")
 
@@ -140,6 +140,7 @@ class AgentMatcher:
         work_type = self._work_type(task)
         risk_escalated = self._is_risk_escalated(task)
         load_by_agent = self._active_loads()
+        account_by_agent = self._accounts_by_agent()
         excluded = exclude_agent_id.strip().casefold() if exclude_agent_id else None
         feature_snapshot = self._feature_snapshot(task, work_type, risk_escalated)
 
@@ -164,6 +165,7 @@ class AgentMatcher:
             performance = self._performance(agent, task, task_terms)
             active_runs = load_by_agent.get(agent.id, 0)
             load = self._load_score(active_runs)
+            quota_pressure = self._quota_pressure(account_by_agent.get(agent.id))
             cost = self._cost_score(agent)
             work_type_fit = self._work_type_boost(agent, work_type, task_terms)
             risk_fit = self._risk_escalation(agent, risk_escalated)
@@ -173,7 +175,8 @@ class AgentMatcher:
                 + load * 0.10
                 + cost * 0.10
                 + work_type_fit * 0.15
-                + risk_fit * 0.10
+                + risk_fit * 0.05
+                + (1.0 - quota_pressure) * 0.05
             )
             final_score = round(max(0.0, min(score, 1.0)), 2)
             reason = self._reason(
@@ -192,7 +195,7 @@ class AgentMatcher:
                     final_score=final_score,
                     predicted_pass1=performance,
                     predicted_runtime=self._predicted_runtime(agent.id),
-                    quota_pressure=round(1.0 - load, 4),
+                    quota_pressure=round(quota_pressure, 4),
                     reason=reason,
                     matched_skills=matched_skills,
                 )
@@ -373,6 +376,19 @@ class AgentMatcher:
         for (agent_id,) in self.db.query(Agent.id).filter(Agent.status == "busy").all():
             loads[agent_id] = max(loads[agent_id], 1)
         return loads
+
+    def _accounts_by_agent(self) -> dict[str, AgentAccount]:
+        accounts = self.db.query(AgentAccount).all()
+        result: dict[str, AgentAccount] = {}
+        for account in accounts:
+            current = result.get(account.agent_id)
+            if current is None or account.quota_pressure > current.quota_pressure:
+                result[account.agent_id] = account
+        return result
+
+    @staticmethod
+    def _quota_pressure(account: AgentAccount | None) -> float:
+        return max(0.0, min(1.0, float(account.quota_pressure or 0.0))) if account else 0.0
 
     @staticmethod
     def _load_score(active_runs: int) -> float:

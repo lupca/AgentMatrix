@@ -552,6 +552,31 @@ class Agent(ArchivableMixin, Base):
         return bool(self.api_key)
 
 
+class AgentAccount(Base):
+    """Health projection for one CLI subscription used by an agent."""
+
+    __tablename__ = "agent_accounts"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    agent_id = Column(String(50), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False, index=True)
+    cli = Column(String(20), nullable=False)
+    subscription_plan = Column(String(50), nullable=True)
+    status = Column(String(20), nullable=False, default="healthy", server_default="healthy")
+    quota_pressure = Column(Float, nullable=False, default=0.0, server_default="0")
+    cooldown_until = Column(DateTime(timezone=True), nullable=True)
+    last_rate_limit_at = Column(DateTime(timezone=True), nullable=True)
+    health_score = Column(Float, nullable=False, default=1.0, server_default="1")
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    agent = relationship("Agent")
+
+    __table_args__ = (
+        UniqueConstraint("agent_id", "cli", name="uq_agent_accounts_agent_cli"),
+        CheckConstraint("quota_pressure >= 0 AND quota_pressure <= 1", name="ck_agent_accounts_quota_pressure"),
+        CheckConstraint("health_score >= 0 AND health_score <= 1", name="ck_agent_accounts_health_score"),
+    )
+
+
 class AgentRun(Base):
     __tablename__ = "agent_runs"
 
@@ -645,6 +670,10 @@ class AgentRun(Base):
         order_by="VendorRawEvent.seq",
     )
     llm_usages = relationship("LLMUsage", back_populates="agent_run")
+    resource_usage = relationship(
+        "RunResourceUsage", back_populates="agent_run", uselist=False,
+        cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         CheckConstraint("timeout_seconds > 0", name="ck_agent_runs_timeout_positive"),
@@ -687,6 +716,32 @@ class AgentOutputChunk(Base):
     __table_args__ = (
         CheckConstraint("chunk_index >= 0", name="ck_output_chunks_index_nonnegative"),
         UniqueConstraint("run_id", "chunk_index", name="uq_output_chunks_run_index"),
+    )
+
+
+class RunResourceUsage(Base):
+    """Aggregated resource counters for one completed agent run."""
+
+    __tablename__ = "run_resource_usage"
+
+    agent_run_id = Column(String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), primary_key=True)
+    llm_calls = Column(Integer, nullable=False, default=0, server_default="0")
+    input_tokens = Column(Integer, nullable=False, default=0, server_default="0")
+    output_tokens = Column(Integer, nullable=False, default=0, server_default="0")
+    tool_calls = Column(Integer, nullable=False, default=0, server_default="0")
+    bash_commands = Column(Integer, nullable=False, default=0, server_default="0")
+    files_read = Column(Integer, nullable=False, default=0, server_default="0")
+    files_written = Column(Integer, nullable=False, default=0, server_default="0")
+    active_seconds = Column(Float, nullable=False, default=0.0, server_default="0")
+    rate_limit_events = Column(Integer, nullable=False, default=0, server_default="0")
+    estimated_cost_usd = Column(Numeric(14, 8), nullable=False, default=0, server_default="0")
+
+    agent_run = relationship("AgentRun", back_populates="resource_usage")
+
+    __table_args__ = (
+        CheckConstraint("llm_calls >= 0", name="ck_run_resource_usage_llm_calls"),
+        CheckConstraint("input_tokens >= 0 AND output_tokens >= 0", name="ck_run_resource_usage_tokens"),
+        CheckConstraint("estimated_cost_usd >= 0", name="ck_run_resource_usage_cost"),
     )
 
 

@@ -25,6 +25,8 @@ from app.db.models import (
     AgentEvent,
     AgentOutputChunk,
     AgentRun,
+    LLMUsage,
+    RunResourceUsage,
     AuditLog,
     Task,
     TaskDependency,
@@ -317,6 +319,49 @@ def _next_agent_event_seq(db: Session, run_id: str) -> int:
         .first()
     )
     return (latest[0] + 1) if latest else 0
+
+
+def _record_run_resource_usage(db: Session, run: AgentRun) -> None:
+    """Persist a repeat-safe aggregate when a run reaches a terminal state."""
+    events = db.query(AgentEvent).filter(AgentEvent.run_id == run.id).all()
+    usages = db.query(LLMUsage).filter(LLMUsage.agent_run_id == run.id).all()
+    tool_events = [event for event in events if event.event_type == "tool.started"]
+    bash_commands = 0
+    files_read = files_written = rate_limit_events = 0
+    for event in events:
+        payload = event.payload or {}
+        payload_text = json.dumps(payload).lower()
+        if event.event_type == "tool.started" and any(
+            term in payload_text for term in ("bash", "shell", "terminal", "command")
+        ):
+            bash_commands += 1
+        if event.event_type == "workspace.changed":
+            files_read += int(payload.get("files_read", 0) or 0)
+            files_written += int(payload.get("files_written", 0) or 0)
+        if any(term in payload_text for term in ("rate limit", "rate_limit", "ratelimit", "429")):
+            rate_limit_events += 1
+    raw_events = db.query(VendorRawEvent).filter(VendorRawEvent.run_id == run.id).all()
+    rate_limit_events += sum(
+        bool(re.search(r"rate[ -]?limit|429|quota exceeded", event.raw_output, re.I))
+        for event in raw_events
+    )
+    active_seconds = 0.0
+    if run.started_at and run.completed_at:
+        active_seconds = max(0.0, (run.completed_at - run.started_at).total_seconds())
+    usage = db.get(RunResourceUsage, run.id)
+    if usage is None:
+        usage = RunResourceUsage(agent_run_id=run.id)
+        db.add(usage)
+    usage.llm_calls = len(usages)
+    usage.input_tokens = sum(item.input_tokens or 0 for item in usages)
+    usage.output_tokens = sum(item.output_tokens or 0 for item in usages)
+    usage.tool_calls = len(tool_events)
+    usage.bash_commands = bash_commands
+    usage.files_read = files_read
+    usage.files_written = files_written
+    usage.active_seconds = active_seconds
+    usage.rate_limit_events = rate_limit_events
+    usage.estimated_cost_usd = sum((item.cost_usd or 0) for item in usages)
 
 
 def _nudge_driver(task_id: str, trigger: str) -> None:
@@ -695,6 +740,7 @@ def run_agent(
                 idempotency_key=f"run:{run.id}:execution-{result.status.value}",
                 run_id=run.id,
             )
+        _record_run_resource_usage(db, run)
         db.commit()
         effective_error = run.error_message or result.error
         if effective_status == ProcessStatus.COMPLETED.value:
