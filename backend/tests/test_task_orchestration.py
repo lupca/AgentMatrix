@@ -13,6 +13,7 @@ from app.db.models import (
     Setting,
     Task,
     TaskDependency,
+    TaskRound,
 )
 from app.services.task_orchestration import (
     BrakeViolationError,
@@ -976,3 +977,203 @@ def test_write_spec_plan_updates_task_mode_by_policy(orchestration, db_session):
     )
     db_session.refresh(task_high)
     assert task_high.mode == "supervised"
+
+
+def test_dispatch_creates_task_round_and_links_it_to_task(orchestration, db_session):
+    task = _task(db_session, "ROUND-001", mode="bypass")
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="round-dispatch-1",
+    )
+
+    assert result.applied is True
+    assert result.task.current_round_id is not None
+    round_ = db_session.get(TaskRound, result.task.current_round_id)
+    assert round_ is not None
+    assert round_.task_id == task.id
+    assert round_.round_no == 1
+    assert round_.status == "dispatched"
+    assert round_.executor_agent_id == "@executor"
+    assert round_.executor_run_id == result.agent_run.id
+    assert round_.started_at is not None
+
+
+def test_second_dispatch_after_replan_opens_a_second_round(orchestration, db_session):
+    task = _task(db_session, "ROUND-002", mode="bypass")
+
+    first = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="round-dispatch-2a",
+    )
+    first_round_id = first.task.current_round_id
+
+    first.agent_run.status = "success"
+    task.status = "changes-requested"
+    db_session.commit()
+    orchestration.reopen_for_replan(
+        task_id=task.id, actor="@driver", idempotency_key="round-replan-2"
+    )
+
+    second = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="round-dispatch-2b",
+    )
+
+    assert second.task.current_round_id != first_round_id
+    rounds = (
+        db_session.query(TaskRound)
+        .filter(TaskRound.task_id == task.id)
+        .order_by(TaskRound.round_no)
+        .all()
+    )
+    assert [r.round_no for r in rounds] == [1, 2]
+    assert rounds[1].id == second.task.current_round_id
+
+
+def test_verdict_pass_updates_current_round_and_task_projection_fields(
+    orchestration, db_session
+):
+    db_session.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex"))
+    db_session.commit()
+    task = _task(db_session, "ROUND-003", mode="bypass")
+
+    dispatched = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="round-dispatch-3",
+    )
+    round_id = dispatched.task.current_round_id
+
+    db_session.add(
+        AgentRun(
+            id="round-3-review-run",
+            task_id=task.id,
+            agent_id="@reviewer",
+            cli="codex",
+            command="codex exec /code-review",
+            kind="review",
+            agent_role="reviewer",
+            status="success",
+        )
+    )
+    task.status = "in-review"
+    task.reviewer = "@reviewer"
+    task.result_ref = "base..head"
+    db_session.commit()
+
+    result = orchestration.request_verdict(
+        task_id=task.id,
+        verdict="pass",
+        ac_results=[{"passed": True}],
+        actor="@reviewer",
+        idempotency_key="round-verdict-3",
+    )
+
+    assert result.task.status == "done"
+    assert result.task.final_result_ref == "base..head"
+    assert result.task.final_verdict == "pass"
+
+    round_ = db_session.get(TaskRound, round_id)
+    assert round_.verdict == "pass"
+    assert round_.status == "done"
+    assert round_.reviewer_agent_id == "@reviewer"
+    assert round_.reviewer_run_id == "round-3-review-run"
+    assert round_.result_ref == "base..head"
+    assert round_.completed_at is not None
+
+
+def test_verdict_changes_updates_round_without_setting_final_projection(
+    orchestration, db_session
+):
+    db_session.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex"))
+    db_session.commit()
+    task = _task(db_session, "ROUND-004", mode="bypass")
+
+    dispatched = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="round-dispatch-4",
+    )
+    round_id = dispatched.task.current_round_id
+
+    db_session.add(
+        AgentRun(
+            id="round-4-review-run",
+            task_id=task.id,
+            agent_id="@reviewer",
+            cli="codex",
+            command="codex exec /code-review",
+            kind="review",
+            agent_role="reviewer",
+            status="success",
+        )
+    )
+    task.status = "in-review"
+    task.reviewer = "@reviewer"
+    task.result_ref = "base..head"
+    db_session.commit()
+
+    result = orchestration.request_verdict(
+        task_id=task.id,
+        verdict="changes",
+        ac_results=[{"passed": False}],
+        actor="@reviewer",
+        idempotency_key="round-verdict-4",
+    )
+
+    assert result.task.status == "changes-requested"
+    assert result.task.final_result_ref is None
+    assert result.task.final_verdict is None
+
+    round_ = db_session.get(TaskRound, round_id)
+    assert round_.verdict == "changes"
+    assert round_.status == "changes-requested"
+
+
+def test_verdict_without_a_current_round_does_not_crash(orchestration, db_session):
+    """Tasks driven straight to in-review without going through
+    request_dispatch (as several other tests in this suite do) have no
+    current_round_id -- the verdict-round update must be a no-op, not an
+    error."""
+    db_session.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex"))
+    db_session.commit()
+    task = _task(db_session, "ROUND-005", mode="bypass")
+    task.status = "in-review"
+    task.executor = "@executor"
+    task.reviewer = "@reviewer"
+    task.result_ref = "base..head"
+    db_session.commit()
+    db_session.add(
+        AgentRun(
+            id="round-5-review-run",
+            task_id=task.id,
+            agent_id="@reviewer",
+            cli="codex",
+            command="codex exec /code-review",
+            kind="review",
+            agent_role="reviewer",
+            status="success",
+        )
+    )
+    db_session.commit()
+
+    result = orchestration.request_verdict(
+        task_id=task.id,
+        verdict="pass",
+        ac_results=[{"passed": True}],
+        actor="@reviewer",
+        idempotency_key="round-verdict-5",
+    )
+
+    assert result.task.status == "done"
+    assert result.task.current_round_id is None
+    assert db_session.query(TaskRound).filter(TaskRound.task_id == task.id).count() == 0

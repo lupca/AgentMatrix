@@ -25,6 +25,7 @@ from app.db.models import (
     Setting,
     Task,
     TaskDependency,
+    TaskRound,
 )
 from app.db.models import Session as SessionModel
 from app.services.command_builder import build_dispatch_command, build_review_command
@@ -1176,6 +1177,74 @@ class TaskOrchestrationService:
             global_session.last_activity_at = datetime.now(timezone.utc)
             self.db.commit()
 
+    def _start_round(
+        self,
+        task: Task,
+        *,
+        agent_id: str,
+        run_id: str,
+        now: datetime,
+    ) -> TaskRound:
+        """Open a new TaskRound for an execute dispatch (CTV2-201).
+
+        One row per execute-dispatch attempt, numbered from the highest
+        ``round_no`` seen for this task so far -- history from earlier
+        rounds (dispatch/review agents, verdicts) is preserved instead of
+        being overwritten the way the flat `Task` columns are.
+        """
+        next_round_no = (
+            self.db.query(func.max(TaskRound.round_no))
+            .filter(TaskRound.task_id == task.id)
+            .scalar()
+            or 0
+        ) + 1
+        round_id = str(uuid.uuid4())
+        task_round = TaskRound(
+            id=round_id,
+            task_id=task.id,
+            round_no=next_round_no,
+            status="dispatched",
+            executor_agent_id=agent_id,
+            executor_run_id=run_id,
+            started_at=now,
+        )
+        self.db.add(task_round)
+        # Flush the round's INSERT ahead of the task's UPDATE: tasks and
+        # task_rounds reference each other (task_rounds.task_id -> tasks.id,
+        # tasks.current_round_id -> task_rounds.id), so without this the
+        # unit of work can order the FK-setting UPDATE before the row it
+        # points at exists and the database rejects it.
+        self.db.flush()
+        task.current_round_id = round_id
+        return task_round
+
+    def _record_verdict_on_round(
+        self,
+        task: Task,
+        *,
+        verdict: str,
+        now: datetime,
+    ) -> None:
+        """Fold a verdict's outcome into the task's current TaskRound.
+
+        A no-op when the task has no current round -- e.g. tests and other
+        callers that drive a task straight into `in-review` without going
+        through `request_dispatch` first.
+        """
+        if not task.current_round_id:
+            return
+        current_round = self.db.get(TaskRound, task.current_round_id)
+        if current_round is None:
+            return
+        review_run = self._terminal_review_run(task.id)
+        current_round.verdict = verdict
+        current_round.findings_ref = task.findings
+        current_round.reviewer_agent_id = task.reviewer
+        current_round.reviewer_run_id = review_run.id if review_run else None
+        current_round.result_ref = task.result_ref
+        current_round.status = task.status
+        current_round.completed_at = now
+
     def _apply_gate(
         self,
         task: Task,
@@ -1209,6 +1278,7 @@ class TaskOrchestrationService:
                 task.reviewer = str(payload["agent_id"])
             else:
                 task.executor = str(payload["agent_id"])
+                self._start_round(task, agent_id=str(payload["agent_id"]), run_id=run_id, now=now)
             task.dispatched_at = now
             task.error = None
             task.awaiting_approval = False
@@ -1264,9 +1334,12 @@ class TaskOrchestrationService:
             if verdict == "pass":
                 task.status = "done"
                 task.completed_at = now
+                task.final_result_ref = task.result_ref
+                task.final_verdict = verdict
             else:
                 task.status = "changes-requested"
                 task.completed_at = None
+            self._record_verdict_on_round(task, verdict=verdict, now=now)
             return None, verdict
         raise OrchestrationError(f"Unsupported gate type: {gate_type}")
 

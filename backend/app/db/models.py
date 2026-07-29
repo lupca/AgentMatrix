@@ -65,6 +65,13 @@ class Task(ArchivableMixin, Base):
     result_ref = Column(String(100), nullable=True)
     findings = Column(JSON, default=list)
     verdict = Column(String(10), nullable=True)
+    current_round_id = Column(
+        String(36),
+        ForeignKey("task_rounds.id", use_alter=True, name="fk_tasks_current_round_id"),
+        nullable=True,
+    )
+    final_result_ref = Column(String(100), nullable=True)
+    final_verdict = Column(String(10), nullable=True)
     predicted_success = Column(String(10), nullable=True)
     prediction_factors = Column(JSON, nullable=True)
     awaiting_approval = Column(Boolean, default=False)
@@ -81,6 +88,16 @@ class Task(ArchivableMixin, Base):
     gate_records = relationship("GateRecord", back_populates="task", cascade="all, delete-orphan")
     agent_runs = relationship("AgentRun", back_populates="task", cascade="all, delete-orphan")
     llm_usages = relationship("LLMUsage", back_populates="task")
+    rounds = relationship(
+        "TaskRound",
+        foreign_keys="TaskRound.task_id",
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="TaskRound.round_no",
+    )
+    current_round = relationship(
+        "TaskRound", foreign_keys=[current_round_id], post_update=True
+    )
     dependency_edges = relationship(
         "TaskDependency",
         foreign_keys="TaskDependency.task_id",
@@ -151,6 +168,46 @@ class TaskDependency(Base):
             "task_id <> depends_on_task_id", name="ck_task_dependencies_no_self"
         ),
         Index("ix_task_dependencies_depends_on", "depends_on_task_id"),
+    )
+
+
+class TaskRound(Base):
+    """Per-round snapshot of a task's dispatch/review cycle (CTV2-201).
+
+    ``Task`` overwrites executor/reviewer/result_ref on each round, losing
+    history; one row here is written per execute-dispatch and updated when
+    that round's verdict lands, so analytics/debugging can see every past
+    round instead of only the current one.
+    """
+
+    __tablename__ = "task_rounds"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    task_id = Column(
+        String(20), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    round_no = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="dispatched")
+    base_sha = Column(String(100), nullable=True)
+    plan_ref = Column(String(255), nullable=True)
+    # No FK to agents.id: like Task.executor/reviewer, this is a historical
+    # snapshot of an agent identifier that must survive the agent being
+    # renamed or deleted later.
+    executor_agent_id = Column(String(50), nullable=True)
+    executor_run_id = Column(String(36), ForeignKey("agent_runs.id"), nullable=True)
+    reviewer_agent_id = Column(String(50), nullable=True)
+    reviewer_run_id = Column(String(36), ForeignKey("agent_runs.id"), nullable=True)
+    result_ref = Column(String(255), nullable=True)
+    verdict = Column(String(10), nullable=True)
+    findings_ref = Column(JSON, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    task = relationship("Task", foreign_keys=[task_id], back_populates="rounds")
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "round_no", name="uq_task_rounds_task_round_no"),
     )
 
 
