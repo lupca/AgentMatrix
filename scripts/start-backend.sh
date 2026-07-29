@@ -67,7 +67,7 @@ echo $! > "$PID_FILE"
 
 # Start worker
 echo "Starting Dramatiq worker..."
-nohup dramatiq app.workers.agent_runner > "$WORKER_LOG_FILE" 2>&1 &
+nohup dramatiq app.workers.agent_runner app.workers.outbox_publisher > "$WORKER_LOG_FILE" 2>&1 &
 echo $! > "$WORKER_PID_FILE"
 
 sleep 3

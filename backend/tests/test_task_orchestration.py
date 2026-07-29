@@ -9,6 +9,7 @@ from app.db.models import (
     AuditLog,
     GateRecord,
     LLMUsage,
+    OutboxEvent,
     Project,
     Setting,
     Task,
@@ -1315,4 +1316,91 @@ def test_agent_run_unique_task_idempotency_key(db_session):
     )
     with pytest.raises(IntegrityError):
         db_session.commit()
+
+
+def test_bypass_dispatch_creates_agent_run_and_outbox_event_atomically(
+    orchestration, db_session
+):
+    """CTV2-205: the outbox row must land in the same commit as the run.
+
+    Guards against the pre-outbox failure mode -- INSERT AgentRun -> COMMIT
+    -> run_agent.send() -- where a crash between the commit and the send
+    left a "queued" run with nothing to ever wake it up.
+    """
+    task = _task(db_session, "OUTBOX-001", mode="bypass")
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="outbox-dispatch-1",
+    )
+
+    assert result.applied is True
+    run = result.agent_run
+    assert run is not None
+
+    events = db_session.query(OutboxEvent).filter(OutboxEvent.event_type == "run_requested").all()
+    assert len(events) == 1
+    event = events[0]
+    assert event.published_at is None
+    assert event.attempts == 0
+    assert event.dead_letter is False
+    assert event.payload["run_id"] == run.id
+    assert event.payload["task_id"] == task.id
+    assert event.payload["command"] == run.command
+    assert event.payload["repo_root"] == "/tmp"
+
+
+def test_supervised_dispatch_approval_creates_outbox_event_with_the_run(
+    orchestration, db_session
+):
+    """The supervised path creates the AgentRun (and its outbox row) only
+    once a human approves the pending gate, not at request time."""
+    task = _task(db_session, "OUTBOX-002")
+
+    pending = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="outbox-dispatch-2",
+    )
+    assert db_session.query(OutboxEvent).count() == 0
+
+    approved = orchestration.decide_gate(
+        gate_record_id=pending.gate_record.id,
+        decision="approved",
+        actor="@supervisor",
+        idempotency_key="outbox-dispatch-2:approval",
+    )
+
+    events = db_session.query(OutboxEvent).all()
+    assert len(events) == 1
+    assert events[0].payload["run_id"] == approved.agent_run.id
+
+
+def test_review_order_dispatch_creates_outbox_event(orchestration, db_session):
+    db_session.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex"))
+    db_session.commit()
+    task = _task(db_session, "OUTBOX-003", mode="bypass")
+    dispatch = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="outbox-review-dispatch",
+    )
+    task.status = "awaiting-review"
+    task.result_ref = "base..head"
+    db_session.commit()
+
+    review = orchestration.request_review(
+        task_id=task.id,
+        reviewer="@reviewer",
+        actor="@operator",
+        idempotency_key="outbox-review-order",
+    )
+
+    events = db_session.query(OutboxEvent).filter(OutboxEvent.event_type == "run_requested").all()
+    run_ids = {event.payload["run_id"] for event in events}
+    assert run_ids == {dispatch.agent_run.id, review.agent_run.id}
     db_session.rollback()

@@ -29,6 +29,7 @@ from app.db.models import (
 )
 from app.db.models import Session as SessionModel
 from app.services.command_builder import build_dispatch_command, build_review_command
+from app.services.outbox import record_run_requested
 from app.services.task_event_service import emit_task_event
 
 logger = logging.getLogger(__name__)
@@ -1292,6 +1293,12 @@ class TaskOrchestrationService:
             task.error = None
             task.awaiting_approval = False
             task.approval_prompt = None
+            # Same transaction as the AgentRun insert above (CTV2-205): a
+            # crash before this commit loses the run entirely (nothing was
+            # ever persisted), and a crash after it leaves an unpublished
+            # OutboxEvent for outbox_publisher to pick up instead of a
+            # "queued" run with no Dramatiq message behind it.
+            record_run_requested(self.db, run, str(payload["repo_root"]))
             emit_task_event(
                 task_id=task.id,
                 event_type="dispatched",
@@ -1328,6 +1335,7 @@ class TaskOrchestrationService:
             task.current_gate = "verdict"
             task.awaiting_approval = False
             task.approval_prompt = None
+            record_run_requested(self.db, run, str(payload["repo_root"]))
             return run, run_id
         if gate_type == "verdict":
             verdict = str(payload["verdict"])

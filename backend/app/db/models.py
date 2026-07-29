@@ -564,6 +564,45 @@ class AgentOutputChunk(Base):
     )
 
 
+class OutboxEvent(Base):
+    """Transactional outbox for reliably handing a queued run off to Dramatiq (CTV2-205).
+
+    `TaskOrchestrationService._apply_gate` inserts one of these in the same
+    DB transaction (and commit) as the `AgentRun` row it describes, so a
+    crash between "AgentRun committed" and "Dramatiq message sent" can never
+    strand a run: `app.services.outbox.publish_pending_events` (polled by
+    `app.workers.outbox_publisher`) picks up any row still unpublished and
+    (re)sends it. `last_attempted_at` drives the retry backoff and
+    `attempts`/`dead_letter` cap it -- see `app.services.outbox` for the
+    policy.
+    """
+
+    __tablename__ = "outbox_events"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    event_type = Column(String(30), nullable=False, index=True)
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+    published_at = Column(DateTime(timezone=True), nullable=True, index=True)
+    last_attempted_at = Column(DateTime(timezone=True), nullable=True)
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    last_error = Column(Text, nullable=True)
+    dead_letter = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    __table_args__ = (
+        CheckConstraint("event_type IN ('run_requested')", name="ck_outbox_events_type"),
+        CheckConstraint("attempts >= 0", name="ck_outbox_events_attempts_nonnegative"),
+        Index(
+            "ix_outbox_events_unpublished",
+            "dead_letter",
+            "published_at",
+            "created_at",
+        ),
+    )
+
+
 class LLMUsage(Base):
     """Immutable token and cost ledger for one provider request."""
 
