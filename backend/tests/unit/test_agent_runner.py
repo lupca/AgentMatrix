@@ -22,6 +22,7 @@ from app.db.models import (
     Task,
     TaskDependency,
     TaskEvent,
+    TaskRound,
 )
 from app.services.process_manager import (
     ProcessResult,
@@ -922,13 +923,9 @@ def test_advance_task_changes_requested_escalates_at_round_cap(driver_db):
     db = factory()
     for i in range(runner.AUTO_MAX_ROUNDS):
         db.add(
-            GateRecord(
+            TaskRound(
                 task_id="ADV-008",
-                gate_type="replan",
-                status="approved",
-                actor="system:orchestration-driver",
-                idempotency_key=f"replan-{i}",
-                input_hash=f"hash-{i}",
+                round_no=i + 1,
             )
         )
     db.commit()
@@ -963,13 +960,9 @@ def test_advance_task_changes_requested_escalates_at_custom_policy_round_cap(dri
     )
     db = factory()
     db.add(
-        GateRecord(
+        TaskRound(
             task_id="ADV-POLICY-ROUND",
-            gate_type="replan",
-            status="approved",
-            actor="system:orchestration-driver",
-            idempotency_key="replan-policy-0",
-            input_hash="hash-0",
+            round_no=1,
         )
     )
     db.commit()

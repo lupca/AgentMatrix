@@ -846,19 +846,18 @@ class TaskOrchestrationService:
         return TransitionResult(task, record, True)
 
     def changes_round_count(self, task_id: str) -> int:
-        """Count completed changes-requested -> todo replan cycles for a task.
+        """Return the highest persisted TaskRound number for a task.
 
-        Used as the loop-cap counter for the orchestration driver
-        (`advance_task`): each `reopen_for_replan` call is one round.
+        Used as the round counter by the orchestration driver
+        (`advance_task`). TaskRound is the source of truth for dispatch
+        history; GateRecord also contains replan records, but those records
+        do not represent dispatch rounds and may exist for legacy tasks.
         """
-        return (
-            self.db.query(GateRecord)
-            .filter(
-                GateRecord.task_id == task_id,
-                GateRecord.gate_type == "replan",
-                GateRecord.status == "approved",
-            )
-            .count()
+        return int(
+            self.db.query(func.max(TaskRound.round_no))
+            .filter(TaskRound.task_id == task_id)
+            .scalar()
+            or 0
         )
 
     def add_dependency(

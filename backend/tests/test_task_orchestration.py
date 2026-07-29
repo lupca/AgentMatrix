@@ -621,7 +621,7 @@ def test_reopen_for_replan_transitions_changes_requested_to_todo(orchestration, 
     assert result.task.current_gate == "plan"
     assert result.task.verdict is None
     assert result.gate_record.gate_type == "replan"
-    assert orchestration.changes_round_count(task.id) == 1
+    assert orchestration.changes_round_count(task.id) == 0
 
 
 def test_reopen_for_replan_requires_changes_requested_status(orchestration, db_session):
@@ -654,27 +654,30 @@ def test_reopen_for_replan_is_idempotent(orchestration, db_session):
     )
 
     assert first.gate_record.id == second.gate_record.id
-    assert orchestration.changes_round_count(task.id) == 1
+    assert orchestration.changes_round_count(task.id) == 0
 
 
-def test_changes_round_count_only_counts_approved_replans(orchestration, db_session):
+def test_changes_round_count_uses_highest_task_round_number(
+    orchestration, db_session
+):
     task = _task(db_session, "REPLAN-004", mode="bypass")
     assert orchestration.changes_round_count(task.id) == 0
 
-    task.status = "changes-requested"
-    db_session.commit()
-    orchestration.reopen_for_replan(
-        task_id=task.id, actor="@driver", idempotency_key="replan-4a"
+    db_session.add(
+        GateRecord(
+            task_id=task.id,
+            gate_type="replan",
+            status="approved",
+            actor="@driver",
+            idempotency_key="replan-4a",
+            input_hash="hash-4a",
+        )
     )
-    assert orchestration.changes_round_count(task.id) == 1
+    db_session.add(TaskRound(task_id=task.id, round_no=1))
+    db_session.add(TaskRound(task_id=task.id, round_no=3))
+    db_session.commit()
+    assert orchestration.changes_round_count(task.id) == 3
 
-    task = db_session.get(Task, task.id)
-    task.status = "changes-requested"
-    db_session.commit()
-    orchestration.reopen_for_replan(
-        task_id=task.id, actor="@driver", idempotency_key="replan-4b"
-    )
-    assert orchestration.changes_round_count(task.id) == 2
 
 
 def test_write_spec_plan_requires_todo_status(orchestration, db_session):
