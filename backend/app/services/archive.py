@@ -44,6 +44,9 @@ class ArchiveService:
             raise ArchiveError(f"{entity} '{entity_id}' is already archived")
         archived_at = datetime.now(timezone.utc)
         obj.archived_at = archived_at
+        # Also set status to "archived" if the entity has a status field
+        if hasattr(obj, "status"):
+            obj.status = "archived"
         result = {"entity": entity, "id": entity_id, "action": "archive", "archived": 1}
         if model is Project:
             result.update(self._cascade_project(entity_id, archived_at))
@@ -60,6 +63,9 @@ class ArchiveService:
             raise ArchiveError(f"{entity} '{entity_id}' is not archived")
         archived_at = obj.archived_at
         obj.archived_at = None
+        # Also restore status to "active" if the entity has a status field
+        if hasattr(obj, "status"):
+            obj.status = "active"
         result = {"entity": entity, "id": entity_id, "action": "restore", "restored": 1}
         if restore_children and model is Project:
             result.update(self._restore_project(entity_id, archived_at))

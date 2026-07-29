@@ -53,6 +53,7 @@ def test_stats_overview(client, db_session):
         "completedTasks": 2,
         "activeGates": 2,
         "tasksByStatus": {"todo": 1, "in_progress": 1, "done": 2},
+        "recentActivity": [],
     }
 
 

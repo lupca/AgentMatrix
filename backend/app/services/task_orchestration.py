@@ -1554,12 +1554,18 @@ class TaskOrchestrationService:
             "max_tool_calls_per_run": self.max_tool_calls_per_run,
             "max_no_progress_seconds": self.max_no_progress_seconds,
         }
+        # Check for pending (not failed) dependencies - queue the run to retry later.
+        # Failed dependency escalation is handled by _blocked_by_dependencies in agent_runner.
+        dep_ids = self._dependency_ids(task.id)
+        deps = list(self.db.query(Task).filter(Task.id.in_(dep_ids)).all()) if dep_ids else []
+        pending_deps = [d for d in deps if d.status not in {"done", "failed"}]
         if task.status in {"done", "cancelled"}:
             decision = BrakeDecision(False, f"Task is terminal: {task.status}", "terminal", observations=observations)
         elif task.awaiting_approval:
             decision = BrakeDecision(False, "Task has a pending gate", "pending_gate", observations=observations)
-        elif any(dep.status != "done" for dep in self.db.query(Task).filter(Task.id.in_(self._dependency_ids(task.id))).all()):
-            decision = BrakeDecision(False, "Task is waiting for dependencies", "dependency_pending", queue=True, retry_after_seconds=30, observations=observations)
+        elif pending_deps:
+            dep_ids_str = ", ".join(str(d.id) for d in pending_deps[:3])
+            decision = BrakeDecision(False, f"Waiting for dependencies: {dep_ids_str}", "dependency_pending", queue=True, observations=observations)
         elif not self.autonomy_enabled:
             decision = BrakeDecision(False, "Autonomy is disabled", "autonomy_disabled", observations=observations)
         elif cost >= self.max_cost_usd_per_task:

@@ -995,6 +995,9 @@ def _advance_todo(db: Session, service: TaskOrchestrationService, task: Task) ->
 
     brake = service.check_brakes(task, for_spawn=False, audit=True)
     if not brake.allowed:
+        # Map dependency_pending brake to waiting_dependency for consistent outcome naming
+        if brake.code == "dependency_pending":
+            return "waiting_dependency"
         return f"brake:{brake.code}"
 
     return _dispatch_execute(db, service, task)
@@ -1376,12 +1379,9 @@ def _build_execution_result_ref(
             if _has_committed_diff(repo_root, base, explicit):
                 return f"{base[:12]}..{explicit[:12]}", None
             return None, "Executor result-ref points to an empty diff"
-        # explicit_ref provided but commit not found - log and continue to HEAD fallback
-        logger.warning(
-            "Executor result-ref %s not found in %s; falling back to HEAD",
-            explicit_ref,
-            repo_root,
-        )
+        # explicit_ref provided but commit not found - reject rather than fall back,
+        # since the executor claimed a specific ref that doesn't exist
+        return None, f"Executor result-ref {explicit_ref} is outside the actual base..head range"
 
     # Priority 2: fallback to base..HEAD
     head_ref = _parse_result_ref(repo_root)
