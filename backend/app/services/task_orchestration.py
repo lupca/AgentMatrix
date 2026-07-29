@@ -607,6 +607,30 @@ class TaskOrchestrationService:
         self.wake_dependents(task_id)
         return TransitionResult(task, record, True)
 
+    def escalate_task(
+        self, *, task_id: str, reason: str, actor: str = "system"
+    ) -> GateRecord:
+        """Record a blocked/escalated task state through the lifecycle ledger."""
+        task = self._task(task_id)
+        self._cas_status(task, "failed")
+        task.error = reason
+        task.awaiting_approval = True
+        task.approval_prompt = reason
+        task.updated_at = datetime.now(timezone.utc)
+        payload = {"reason": reason, "task_status": "failed"}
+        record = self._ledger_record(
+            task=task,
+            gate_type="escalation",
+            status="rejected",
+            actor=actor,
+            idempotency_key=str(uuid.uuid4()),
+            input_hash=self._input_hash(payload),
+            payload=payload,
+            error_message=reason,
+        )
+        self._audit(task, record, reason=reason)
+        return record
+
     def record_dispatch_queue_failure(
         self,
         *,
@@ -787,6 +811,25 @@ class TaskOrchestrationService:
         task.flows = flows
         task.current_gate = "plan"
         task.updated_at = datetime.now(timezone.utc)
+        payload = {
+            "acceptance_criteria": acceptance_criteria,
+            "plan": plan,
+            "files": files,
+            "tests": tests,
+            "risk": risk,
+            "flows": flows,
+        }
+        record = self._ledger_record(
+            task=task,
+            gate_type="spec_plan",
+            status="approved",
+            actor=actor,
+            idempotency_key=str(uuid.uuid4()),
+            input_hash=self._input_hash(payload),
+            payload=payload,
+            output_payload=self._gate_output(task, "spec_plan"),
+        )
+        self._audit(task, record)
         self.db.add(
             AuditLog(
                 task_id=task.id,
@@ -1442,6 +1485,18 @@ class TaskOrchestrationService:
             task.error = decision.reason
             task.awaiting_approval = True
             task.approval_prompt = f"Escalated by safety brake: {decision.reason}"
+            payload = {"code": decision.code, "reason": decision.reason}
+            record = self._ledger_record(
+                task=task,
+                gate_type="safety_brake",
+                status="rejected",
+                actor="system:safety-brake",
+                idempotency_key=str(uuid.uuid4()),
+                input_hash=self._input_hash(payload),
+                payload=payload,
+                error_message=decision.reason,
+            )
+            self._audit(task, record, reason=decision.reason)
         self.db.add(
             AuditLog(
                 task_id=task.id,

@@ -238,6 +238,7 @@ def request_task_review(
     return {
         "task_id": id,
         "status": result.task.status,
+        "workflow_state": result.task.workflow_state,
         "decision_status": result.status,
         "gate_record_id": result.gate_record.id,
         "applied": result.applied,
@@ -264,6 +265,7 @@ def request_task_verdict(
     return {
         "task_id": id,
         "status": result.task.status,
+        "workflow_state": result.task.workflow_state,
         "decision_status": result.status,
         "gate_record_id": result.gate_record.id,
         "applied": result.applied,

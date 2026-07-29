@@ -716,11 +716,7 @@ def _advance_task_stalled(db: Session, task_id: str, current_status: str) -> boo
 
 
 def _escalate(db: Session, task: Task, reason: str) -> None:
-    task.status = "failed"
-    task.error = reason
-    task.awaiting_approval = True
-    task.approval_prompt = reason
-    task.updated_at = datetime.now(timezone.utc)
+    TaskOrchestrationService(db).escalate_task(task_id=task.id, reason=reason)
 
 
 def _advance_task_step(

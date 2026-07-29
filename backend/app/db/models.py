@@ -42,6 +42,14 @@ class AgentType(str, Enum):
 
 
 class Task(ArchivableMixin, Base):
+    """Task lifecycle projection backed by the immutable gate ledger.
+
+    ``GateRecord`` is the source of truth for lifecycle intent and decisions.
+    ``status``, ``current_gate``, and ``awaiting_approval`` are read-optimized
+    projections maintained atomically with each gate record by the
+    orchestration service. Clients should use :attr:`workflow_state` instead
+    of inferring state from those individual fields.
+    """
     __tablename__ = "tasks"
 
     id = Column(String(20), primary_key=True)
@@ -125,6 +133,11 @@ class Task(ArchivableMixin, Base):
             ")",
             name="ck_tasks_done_invariants",
         ),
+        CheckConstraint(
+            "status NOT IN ('done', 'changes-requested') "
+            "OR awaiting_approval IS NOT TRUE",
+            name="ck_tasks_terminal_not_awaiting_approval",
+        ),
     )
 
     @validates("executor", "reviewer")
@@ -144,6 +157,19 @@ class Task(ArchivableMixin, Base):
     @property
     def depends_on(self) -> list[str]:
         return [edge.depends_on_task_id for edge in self.dependency_edges]
+
+    @property
+    def workflow_state(self) -> str:
+        """Return the stable UI lifecycle state derived from the projection."""
+        if self.status in {"done", "cancelled"}:
+            return "terminal"
+        if self.awaiting_approval:
+            return "waiting_human"
+        if self.status == "failed":
+            return "blocked"
+        if self.status in {"awaiting-review", "in-review", "changes-requested"}:
+            return "reviewing"
+        return "executing"
 
 
 class TaskDependency(Base):

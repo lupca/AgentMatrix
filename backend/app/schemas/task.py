@@ -112,6 +112,9 @@ class TaskState(BaseModel):
     prediction_factors: dict[str, Any] | None = None
     audit_trail: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
+    workflow_state: Literal[
+        "waiting_human", "executing", "reviewing", "blocked", "terminal"
+    ] = "executing"
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -195,5 +198,8 @@ class Task(BaseModel):
     dispatched_at: datetime | None = None
     completed_at: datetime | None = None
     archived_at: datetime | None = None
+    workflow_state: Literal[
+        "waiting_human", "executing", "reviewing", "blocked", "terminal"
+    ] = "executing"
 
     model_config = ConfigDict(from_attributes=True)
