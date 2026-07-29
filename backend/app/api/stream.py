@@ -55,6 +55,17 @@ def _status_payload(run: AgentRun) -> dict[str, Any]:
     }
 
 
+def _output_events(chunks: list[AgentOutputChunk]) -> list[dict[str, Any]]:
+    """Flatten stored chunks into the sequence used by SSE and replay."""
+    events: list[dict[str, Any]] = []
+    seq = 0
+    for chunk in chunks:
+        for line in chunk.content.split("\n"):
+            seq += 1
+            events.append({"seq": seq, "content": line})
+    return events
+
+
 def _last_seen(
     header_value: str | None,
     query_value: int | None,
@@ -99,21 +110,21 @@ async def stream_run_output(
                 .order_by(AgentOutputChunk.chunk_index)
                 .all()
             )
-            history_index = 0
-            for chunk in chunks:
-                for line in chunk.content.split("\n"):
-                    history_index += 1
-                    if history_index <= resume_after:
-                        continue
-                    last_sent = history_index
-                    yield _sse(
-                        {
-                            "type": "history",
-                            "content": line,
-                            "index": history_index,
-                        },
-                        event_id=history_index,
-                    )
+            for output_event in _output_events(chunks):
+                seq = output_event["seq"]
+                if seq <= resume_after:
+                    continue
+                last_sent = seq
+                yield _sse(
+                    {
+                        "type": "history",
+                        "content": output_event["content"],
+                        "seq": seq,
+                        # Kept for clients that consumed the original stream.
+                        "index": seq,
+                    },
+                    event_id=seq,
+                )
 
             db.expire_all()
             current_run = (
@@ -164,12 +175,13 @@ async def stream_run_output(
                 except (TypeError, json.JSONDecodeError):
                     continue
 
-                event_index = payload.get("index")
-                if isinstance(event_index, int):
-                    if event_index <= last_sent:
+                event_seq = payload.get("seq", payload.get("index"))
+                if isinstance(event_seq, int):
+                    if event_seq <= last_sent:
                         continue
-                    last_sent = event_index
-                yield _sse(payload, event_id=event_index)
+                    last_sent = event_seq
+                    payload["seq"] = event_seq
+                yield _sse(payload, event_id=event_seq)
 
                 if (
                     payload.get("type") == "status"
@@ -219,7 +231,11 @@ async def _close(resource: Any) -> None:
 
 
 @router.get("/runs/{run_id}/output")
-def get_run_output(run_id: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+def get_run_output(
+    run_id: str,
+    after_seq: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -230,10 +246,14 @@ def get_run_output(run_id: str, db: Session = Depends(get_db)) -> dict[str, Any]
         .order_by(AgentOutputChunk.chunk_index)
         .all()
     )
+    replay = [event for event in _output_events(chunks) if event["seq"] > after_seq]
     return {
         "run_id": run_id,
         "status": run.status,
         "output": "\n".join(chunk.content for chunk in chunks),
         "line_count": run.output_lines,
         "byte_count": run.output_bytes,
+        "chunks": replay,
+        "after_seq": after_seq,
+        "next_seq": replay[-1]["seq"] if replay else after_seq,
     }

@@ -18,6 +18,7 @@ interface ConnectionState {
   source: EventSource | null;
   lastEventId: number;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
+  replaying: boolean;
 }
 
 const RECONNECT_DELAY_MS = 2_000;
@@ -78,12 +79,28 @@ export class SSEManager {
       source: null,
       lastEventId: 0,
       reconnectTimer: null,
+      replaying: false,
     };
 
-    if (connection.source) return;
+    if (connection.source || connection.replaying) return;
     connection.reconnectTimer = null;
     this.connections.set(runId, connection);
 
+    if (connection.lastEventId > 0) {
+      connection.replaying = true;
+      void this.replay(runId, connection).finally(() => {
+        if (this.connections.get(runId) === connection) {
+          connection.replaying = false;
+          this.connect(runId);
+        }
+      });
+      return;
+    }
+
+    this.openEventSource(runId, connection);
+  }
+
+  private openEventSource(runId: string, connection: ConnectionState): void {
     const url = this.getStreamUrl(runId, connection.lastEventId);
     let source: EventSource;
     try {
@@ -141,6 +158,31 @@ export class SSEManager {
       connection.source = null;
       this.scheduleReconnect(runId);
     };
+  }
+
+  private async replay(runId: string, connection: ConnectionState): Promise<void> {
+    try {
+      const response = await fetch(
+        `/api/runs/${encodeURIComponent(runId)}/output?after_seq=${connection.lastEventId}`,
+      );
+      if (!response.ok) return;
+      const body = (await response.json()) as {
+        chunks?: Array<{ seq?: unknown; content?: unknown }>;
+      };
+      for (const chunk of body.chunks ?? []) {
+        const seq = typeof chunk.seq === 'number' ? chunk.seq : NaN;
+        if (!Number.isInteger(seq) || seq <= connection.lastEventId) continue;
+        connection.lastEventId = seq;
+        this.notify(runId, {
+          type: 'history',
+          content: chunk.content,
+          seq,
+          lastEventId: String(seq),
+        });
+      }
+    } catch {
+      // EventSource remains the durable retry mechanism if replay is unavailable.
+    }
   }
 
   private scheduleReconnect(runId: string): void {
