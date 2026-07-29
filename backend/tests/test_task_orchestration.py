@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError, StatementError
 
 from app.db.models import (
     Agent,
+    AgentAccount,
     AgentRun,
     AuditLog,
     DispatchCandidate,
@@ -316,6 +317,99 @@ def test_cost_cap_exceeded_stops_task_and_escalates(orchestration, db_session):
         .one()
     )
     assert audit.task_id == task.id
+
+
+def test_dependency_pending_brake_queues_dispatch_instead_of_raising(
+    orchestration, db_session
+):
+    """A queueable brake (dependency_pending) must not raise (CTV2-208 round 2).
+
+    Only the terminal brakes (autonomy_disabled, cost_limit) should abort the
+    dispatch outright; a queueable brake should let the AgentRun land as
+    "queued" so the worker's own brake re-check (agent_runner.run_agent) can
+    retry once the dependency clears.
+    """
+    blocker = _task(db_session, "GATE-BRAKE-DEP-1", mode="bypass")
+    task = _task(db_session, "GATE-BRAKE-DEP-2", mode="bypass")
+    db_session.add(TaskDependency(task_id=task.id, depends_on_task_id=blocker.id))
+    db_session.commit()
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-dependency-pending",
+    )
+
+    assert result.agent_run is not None
+    assert result.agent_run.status == "queued"
+    db_session.refresh(task)
+    assert task.status == "dispatched"
+    audit = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.action == "brake:dependency_pending")
+        .one()
+    )
+    assert audit.task_id == task.id
+
+
+def test_account_health_brake_queues_dispatch_instead_of_raising(
+    orchestration, db_session
+):
+    """A queueable brake (account_health) must not raise (CTV2-208 round 2)."""
+    db_session.add(
+        AgentAccount(
+            agent_id="@executor",
+            cli="codex",
+            status="cooldown",
+            health_score=0.0,
+        )
+    )
+    task = _task(db_session, "GATE-BRAKE-ACC-1", mode="bypass")
+    db_session.commit()
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-account-unhealthy",
+    )
+
+    assert result.agent_run is not None
+    assert result.agent_run.status == "queued"
+    db_session.refresh(task)
+    assert task.status == "dispatched"
+    audit = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.action == "brake:account_health")
+        .one()
+    )
+    assert audit.task_id == task.id
+
+
+def test_allowed_brake_decision_is_not_audited(orchestration, db_session):
+    """CTV2-208 round 2: an allowed decision (code=None) must not spam the
+    audit log with a "brake:None" entry — only violations are logged."""
+    task = _task(db_session, "GATE-BRAKE-OK-1", mode="bypass")
+    db_session.commit()
+
+    orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-allowed",
+    )
+
+    assert (
+        db_session.query(AuditLog).filter(AuditLog.action == "brake:None").count()
+        == 0
+    )
+    assert (
+        db_session.query(AuditLog)
+        .filter(AuditLog.action.like("brake:%"))
+        .count()
+        == 0
+    )
 
 
 def test_idempotency_key_cannot_be_reused_with_new_input(

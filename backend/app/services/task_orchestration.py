@@ -1179,7 +1179,7 @@ class TaskOrchestrationService:
                 audit=True,
                 agent_id=payload.get("brake_agent_id"),
             )
-            if not decision.allowed and (not decision.queue or decision.code != "concurrency_limit"):
+            if not decision.allowed and not decision.queue:
                 raise BrakeViolationError(decision.reason or "Safety brake engaged")
         self._assert_status(task, expected_status)
         if gate_type == "dispatch":
@@ -1624,21 +1624,22 @@ class TaskOrchestrationService:
                 error_message=decision.reason,
             )
             self._audit(task, record, reason=decision.reason)
-        self.db.add(
-            AuditLog(
-                task_id=task.id,
-                action=f"brake:{decision.code}",
-                actor="system:safety-brake",
-                details={
-                    "code": decision.code,
-                    "reason": decision.reason,
-                    "cost_usd": str(decision.cost_usd),
-                    "max_cost_usd_per_task": str(self.max_cost_usd_per_task),
-                    "max_concurrent_runs": self.max_concurrent_runs,
-                    "decision": self._json_safe(asdict(decision)),
-                },
+        if not decision.allowed:
+            self.db.add(
+                AuditLog(
+                    task_id=task.id,
+                    action=f"brake:{decision.code}",
+                    actor="system:safety-brake",
+                    details={
+                        "code": decision.code,
+                        "reason": decision.reason,
+                        "cost_usd": str(decision.cost_usd),
+                        "max_cost_usd_per_task": str(self.max_cost_usd_per_task),
+                        "max_concurrent_runs": self.max_concurrent_runs,
+                        "decision": self._json_safe(asdict(decision)),
+                    },
+                )
             )
-        )
         self.db.commit()
         if decision.code in {"autonomy_disabled", "cost_limit"}:
             self.wake_dependents(task.id)
