@@ -1,5 +1,7 @@
 # CTV2-111: Soft Delete (Archive) Architecture
 
+**Status:** Implemented (ArchivableMixin + ArchiveService)
+
 ## Overview
 
 This document defines the soft delete (archive) architecture for CTV2. Soft delete preserves data for recovery and audit purposes while hiding archived records from normal operations.

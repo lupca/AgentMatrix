@@ -2,7 +2,7 @@
 
 **Task:** CTV2-118  
 **Date:** 2026-07-28  
-**Status:** Research Complete
+**Status:** Implemented (CTV2-123, CTV2-124, CTV2-125)
 
 ---
 

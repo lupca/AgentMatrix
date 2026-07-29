@@ -1,9 +1,24 @@
 # ADR-001: Unified Tool Architecture & Full DB Access
 
-> Status: Proposed
+> Status: **Implemented** (Phases 1-3 complete)
 > Date: 2026-07-27
-> Related: CTV2-075 (Full DB Access research), CTV2-076 (Tool System Audit), CTV2-059 (Hybrid snapshot+tools, 74% token savings)
+> Updated: 2026-07-29
+> Related: CTV2-075, CTV2-076, CTV2-059
 > Supersedes: MCP-TypeScript-first proposal in `docs/research/tool-system-architecture.md`
+
+## Implementation Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| 1a | ✅ Done | `tool_registry.py` + CommandRouter + `/api/tools` |
+| 1b | ✅ Done | Context layout fix, snapshot placement |
+| 1c | ✅ Done | Legacy adapter removal |
+| 2a | ✅ Done | System State snapshot + `query_db` |
+| 2b | ✅ Done | `load_tools` meta-tool |
+| 2c | ✅ Done | `manage_project/agent/knowledge` + gate wiring |
+| 2d | ✅ Done | `Settings` table + `update_settings` |
+| 3 | ✅ Done | MCP projection (`app/mcp_server.py`) + CLI config |
+| 4 | Partial | UI tool palette (basic, not full registry dump) |
 
 ## 1. Context & Constraints
 

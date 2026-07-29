@@ -1,6 +1,8 @@
 # Event & Notification Architecture
 
-## Status: Draft - Issues Documented, Implementation Pending
+## Status: Superseded by `polling-notification-architecture.md` (CTV2-114)
+
+> Problems documented here were addressed by TaskEvent table + polling.
 
 ## Context
 

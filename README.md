@@ -1,161 +1,86 @@
 # Control Tower V2
 
-Control Tower V2 is a redesigned task coordination and management system built with Python, FastAPI, LangGraph, Chainlit, and Streamlit.
+Task coordination system for coding agents with gate-based workflow, four-eyes review, and autonomy controls.
 
-## Architecture & Services
+## Architecture
 
-The application consists of four main Docker container services:
+| Component | Stack | Port |
+|-----------|-------|------|
+| Backend API | FastAPI + SQLAlchemy | 8000 |
+| Frontend | React + Vite + Tailwind + shadcn/ui | 5173 |
+| Worker | Dramatiq + Redis | - |
+| Database | PostgreSQL | 5432 |
 
-- **`db`**: PostgreSQL 16 database (Source of Truth)
-- **`backend`**: FastAPI REST API + Alembic migrations
-- **`chat`**: Chainlit interactive Chat UI
-- **`dashboard`**: Streamlit Task Monitoring Dashboard
-
-## Prerequisites
-
-- [Docker](https://docs.docker.com/get-docker/) (v20.10+)
-- [Docker Compose](https://docs.docker.com/compose/) (v2.0+ or `docker-compose`)
-
-## Environment Setup
-
-Copy `.env.example` to `.env` and configure your environment variables:
+## Quick Start
 
 ```bash
-cp .env.example .env
-```
+# 1. Database
+docker-compose up -d db
 
-Key environment variables:
-- `POSTGRES_USER`: Database user (default: `ct`)
-- `POSTGRES_DB`: Database name (default: `control_tower`)
-- `DB_PASSWORD`: Database password
-- `POSTGRES_PORT`: Host port mapped for PostgreSQL (default: `15436`)
-- `BACKEND_PORT`: Host port mapped for FastAPI backend (default: `18000`)
-- `CHAT_PORT`: Host port mapped for Chainlit chat UI (default: `18080`)
-- `DASHBOARD_PORT`: Host port mapped for Streamlit dashboard (default: `18501`)
-- `ANTHROPIC_API_KEY`: API key for Claude integration
+# 2. Backend + Worker
+./scripts/start-backend.sh
 
-## Deployment
-
-### Using Deployment Script
-
-Run the automated deployment script:
-
-```bash
-./scripts/deploy.sh
-```
-
-### Using Docker Compose Directly
-
-To build and start all containers in detached mode:
-
-```bash
-docker-compose up --build -d
-```
-
-or with Docker CLI v2:
-
-```bash
-docker compose up --build -d
+# 3. Frontend
+cd frontend && npm install && npm run dev
 ```
 
 ## Service URLs
 
-Once all containers are running and healthy:
+- Backend API: http://localhost:8000 (OpenAPI: /docs)
+- Frontend: http://localhost:5173
+- PostgreSQL: localhost:5432
 
-- **Backend API & Health**: [http://localhost:18000](http://localhost:18000) (OpenAPI Docs: [http://localhost:18000/docs](http://localhost:18000/docs))
-- **Chainlit Chat UI**: [http://localhost:18080](http://localhost:18080)
-- **Streamlit Dashboard**: [http://localhost:18501](http://localhost:18501)
-- **PostgreSQL**: `localhost:15436`
+## Environment
 
-*(Host ports are configurable in `.env`)*
-
-## Verification & Health Status
-
-Check the status of running containers and health checks:
+Copy `.env.example` to `.env`:
 
 ```bash
-docker-compose ps
+DATABASE_URL=postgresql://ct:password@localhost:5432/control_tower
+REDIS_URL=redis://localhost:6379
+MCP_API_TOKEN=<random string>  # enables CLI→MCP tool access
 ```
 
-Verify individual service health endpoints:
+## MCP Integration
 
-```bash
-# Backend Health Endpoint
-curl http://localhost:18000/health
-
-# Chat UI Endpoint
-curl http://localhost:18080/
-
-# Dashboard Endpoint
-curl http://localhost:18501/_stcore/health
-```
-
-## Coordinator Chat CLI: MCP Tool Access
-
-When a chat turn is routed to an account-backed CLI (`claude`, `codex`, or
-`agy`) instead of the OpenAI-compatible API, that CLI can reach the same
-Control Tower tools (create/dispatch tasks, `query_db`, admin actions, ...)
-through an MCP stdio server, `backend/app/mcp_server.py`. It's a thin
-projection of the tool registry (`backend/app/services/tool_registry.py`) —
-one canonical name and schema per tool, shared with API mode — whose
-handlers call the backend over `POST /api/mcp/tools/call` with a scoped
-bearer token. Permission and gate checks run server-side in that endpoint
-(the same `CommandRouter.execute_tool` path API mode uses), so a CLI can
-never bypass the four-eyes rule locally.
-
-The **executor dispatch** CLI (`agent_runner`, which runs a CLI inside a
-target repo to write code) is unrelated and unaffected: it never gets
-Control Tower tools.
-
-### Enable it
-
-1. Set a scoped token the backend and the MCP server both use:
-
-   ```bash
-   MCP_API_TOKEN=<a long random string>
-   ```
-
-2. `backend/app/services/cli_dispatcher.py` picks this up automatically
-   (via `MCP_API_TOKEN` / `CT_API_URL`) and passes a generated `--mcp-config`
-   file to the CLI on every coordinator chat turn. No token configured means
-   no `--mcp-config` flag — CLI-mode behaves exactly as before.
-
-### Config shape
-
-`build_mcp_config()` generates one file per CLI spawn in the standard
-`mcpServers` shape:
+CLI coordinators (claude/agy/codex) access CT tools via MCP:
 
 ```json
 {
   "mcpServers": {
     "control-tower": {
-      "command": "/path/to/venv/bin/python",
+      "command": "python",
       "args": ["-m", "app.mcp_server", "--api-url", "http://localhost:8000"],
-      "env": { "CT_MCP_TOKEN": "<scoped token>" }
+      "env": {"CT_MCP_TOKEN": "<token>"}
     }
   }
 }
 ```
 
-`claude`, `codex`, and `agy` all read this file via `--mcp-config <path>`.
-To register it manually against a running backend (for local testing
-outside the coordinator):
+Set `MCP_API_TOKEN` in `.env` to enable. CLIDispatcher auto-generates config per spawn.
+
+## Key Concepts
+
+- **Gates**: spec → dispatch → review_order → verdict
+- **Modes**: supervised (human approve), plan-only (block dispatch), bypass (auto)
+- **Four-eyes**: reviewer must differ from executor
+- **Brakes**: autonomy toggle, cost limit, concurrency limit
+
+## Development
 
 ```bash
-cd backend
-CT_MCP_TOKEN=<scoped token> python -m app.mcp_server --api-url http://localhost:8000
+# Run tests
+pytest backend/tests/ -v
+
+# Migrations
+cd backend && alembic upgrade head
+
+# Full Docker stack
+docker-compose up --build
 ```
 
-## Shutdown & Cleanup
+## Documentation
 
-To stop and remove all services without deleting persistent volumes:
-
-```bash
-docker-compose down
-```
-
-To stop all services and remove database volumes (clean shutdown):
-
-```bash
-docker-compose down -v
-```
+- `CLAUDE.md` - System spec for AI assistants
+- `docs/adr/ADR-001-unified-tool-architecture.md` - Tool system design
+- `docs/design/` - Architecture designs
+- `docs/research/` - Research docs

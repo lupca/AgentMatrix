@@ -1,78 +1,71 @@
-# Control Tower V2 - LangGraph Redesign
+# Control Tower V2
 
-## Overview
+Hệ thống điều phối coding agent với gate-based workflow, four-eyes review, và autonomy controls.
 
-This is a complete redesign of the Control Tower task coordination system using LangGraph (Python). The goal is to reduce token consumption by ~80% while maintaining output quality.
-
-## Architecture
-
-- **Backend**: FastAPI + SQLAlchemy + LangGraph
-- **Database**: PostgreSQL (source of truth)
-- **Chat UI**: Chainlit
-- **Dashboard**: Streamlit
-- **LLM**: OpenAI-compatible API (coordinator) + account-backed CLIs (`claude`/`agy`/`codex`), direct not through LangChain
-
-## Project Structure
+## Kiến trúc
 
 ```
-control-tower-v2/
-├── backend/
-│   ├── app/
-│   │   ├── main.py              # FastAPI entrypoint
-│   │   ├── api/                 # REST endpoints
-│   │   ├── db/                  # SQLAlchemy models
-│   │   ├── graph/               # LangGraph definitions
-│   │   │   ├── state.py         # TaskState Pydantic
-│   │   │   ├── nodes.py         # Node functions
-│   │   │   ├── builder.py       # StateGraph
-│   │   │   └── gates/           # Gate implementations
-│   │   ├── schemas/             # Pydantic schemas
-│   │   └── services/            # External services (MCP, Claude)
-│   ├── tests/
-│   ├── alembic/                 # DB migrations
-│   └── requirements.txt
-├── frontend/
-│   ├── chat/                    # Chainlit
-│   └── dashboard/               # Streamlit
-├── docker-compose.yml
-└── .env.example
+Frontend (React/Vite/Tailwind)     Backend (FastAPI/SQLAlchemy)     Worker (Dramatiq)
+├── Dashboard, Kanban              ├── /api/chat (SSE)              ├── run_agent
+├── Tasks, Agents, Projects        ├── /api/tasks, /api/agents      ├── advance_task
+└── WebSocket ← Redis pubsub       ├── CommandRouter                └── Redis broker
+                                   ├── CoordinatorService
+                                   ├── TaskOrchestrationService
+                                   └── CLIDispatcher → claude/agy/codex
 ```
+
+## Data Model chính
+
+- **Task**: todo→dispatched→awaiting-review→in-review→done/changes-requested/failed
+- **AgentRun**: queued→running→success/failed/timeout (kind: execute|review)
+- **GateRecord**: append-only ledger (pending→approved/rejected)
+- **Agent**: CLI-backed (claude/agy/codex) với capabilities[], success_rate
+- **Session**: context_level (global|project|task), messages[]
+
+## Gate Flow
+
+```
+todo → [dispatch gate] → dispatched → [run_agent] → awaiting-review
+     → [review_order gate] → in-review → [run_agent review] → [verdict gate] → done
+```
+
+Mode: supervised (cần approve), plan-only (block dispatch), bypass (auto-approve)
+
+## Autonomy & Brakes
+
+```python
+AutonomyPolicy(per project hoặc global Setting):
+  autonomy: supervised|plan-only|auto
+  auto_max_risk: low|normal
+  auto_max_rounds: 3
+
+check_brakes():
+  - autonomy_enabled=false → STOP
+  - task_cost ≥ max_cost_usd_per_task → STOP
+  - active_runs ≥ max_concurrent_runs → QUEUE
+```
+
+## Agent Scoring
+
+AgentMatcher tính điểm: skill_match(0.30) + performance(0.25) + load(0.10) + cost(0.10) + work_type_fit(0.15) + risk_fit(0.10)
 
 ## Commands
 
 ```bash
-# Development
-docker-compose up -d db
-cd backend && alembic upgrade head
-uvicorn app.main:app --reload
+# Dev
+./scripts/start-backend.sh      # FastAPI + Dramatiq worker
+cd frontend && npm run dev      # Vite dev server
 
-# Chat UI
-cd frontend/chat && chainlit run app.py
-
-# Dashboard
-cd frontend/dashboard && streamlit run app.py
-
-# Tests
+# Test
 pytest backend/tests/ -v
 
-# Full stack
+# Docker
 docker-compose up --build
 ```
 
-## Key Concepts
+## Quy tắc quan trọng
 
-### Gates
-- **Spec Gate**: Validate input, generate AC (LLM)
-- **Plan Gate**: Generate implementation plan (LLM)
-- **Dispatch Gate**: Assign executor, change status
-- **Review-Order Gate**: Create review sheet
-- **Verdict Gate**: Record pass/changes, enforce four-eyes
-
-### Token Optimization
-- Only call LLM for judgment tasks (spec validation, plan writing)
-- Route commands directly to pipeline (0 tokens)
-- Use Haiku for simple tasks, Sonnet for complex ones
-
-### Four-Eyes Rule
-- `reviewer` must differ from `executor`
-- Enforced at Verdict Gate (hard failure if violated)
+- **Four-eyes**: reviewer ≠ executor (DB constraint)
+- **GateRecord**: append-only, immutable
+- **Worktree isolation**: mỗi AgentRun chạy trong git worktree riêng
+- **MCP integration**: CLI agent gọi CT tools qua MCP server

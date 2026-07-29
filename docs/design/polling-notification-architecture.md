@@ -1,6 +1,6 @@
 # Polling Notification Architecture
 
-## Status: Draft
+## Status: Implemented (CTV2-114)
 
 ## Context
 
