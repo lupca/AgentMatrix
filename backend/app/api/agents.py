@@ -41,7 +41,7 @@ def create_agent(agent_in: AgentCreate, db: Session = Depends(get_db)):
         )
 
 
-@router.get("/{id}", response_model=Agent)
+@router.get("/{id:path}", response_model=Agent)
 def get_agent(id: str, include_archived: bool = Query(False), db: Session = Depends(get_db)):
     db_agent = with_archived(db, AgentModel, include_archived).filter(AgentModel.id == id).first()
     if not db_agent:
@@ -52,7 +52,7 @@ def get_agent(id: str, include_archived: bool = Query(False), db: Session = Depe
     return db_agent
 
 
-@router.patch("/{id}", response_model=Agent)
+@router.patch("/{id:path}", response_model=Agent)
 def update_agent(id: str, agent_in: AgentUpdate, db: Session = Depends(get_db)):
     update_data = agent_in.model_dump(exclude_unset=True)
     try:
@@ -65,7 +65,7 @@ def update_agent(id: str, agent_in: AgentUpdate, db: Session = Depends(get_db)):
         )
 
 
-@router.post("/{id}/set-default", response_model=Agent)
+@router.post("/{id:path}/set-default", response_model=Agent)
 def set_default_agent(id: str, db: Session = Depends(get_db)):
     db_agent = db.query(AgentModel).filter(AgentModel.id == id).first()
     if not db_agent:
@@ -87,7 +87,7 @@ def set_default_agent(id: str, db: Session = Depends(get_db)):
     return db_agent
 
 
-@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{id:path}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_agent(id: str, db: Session = Depends(get_db)):
     try:
         ArchiveService(db, "rest:agents").archive("agents", id)
@@ -97,7 +97,7 @@ def delete_agent(id: str, db: Session = Depends(get_db)):
     return None
 
 
-@router.post("/{id}/archive")
+@router.post("/{id:path}/archive")
 def archive_agent(id: str, db: Session = Depends(get_db)):
     try:
         return ArchiveService(db, "rest:agents").archive("agents", id)
@@ -105,7 +105,7 @@ def archive_agent(id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
-@router.post("/{id}/restore")
+@router.post("/{id:path}/restore")
 def restore_agent(id: str, db: Session = Depends(get_db)):
     try:
         return ArchiveService(db, "rest:agents").restore("agents", id)
