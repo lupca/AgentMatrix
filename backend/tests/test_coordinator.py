@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -268,6 +268,59 @@ async def test_transient_failure_retries_without_duplicate_user_message(db_sessi
     assert result.content == "recovered"
     assert len(openai.calls) == 2
     assert [m["role"] for m in session.messages] == ["user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_run_turn_programmatic_persists_messages_and_broadcasts(db_session):
+    openai = _FakeProvider("openai", ["Decision handled"])
+    service = _service(db_session, openai)
+    session = Session(
+        id="session-programmatic",
+        messages=[],
+        selected_provider="openai",
+        selected_model="gpt-4o",
+    )
+    db_session.add(session)
+    db_session.commit()
+    status_message = json.dumps(
+        {
+            "task_id": "WAKE-1",
+            "step": "run_failed",
+            "result": {"exit_code": 1},
+            "error": "execute failed",
+            "available_actions": {
+                "dispatch": {"tool": "dispatch_task", "task_id": "WAKE-1"},
+                "cancel": {"tool": "cancel_task", "task_id": "WAKE-1"},
+                "update_task": {"tool": "update_task", "task_id": "WAKE-1"},
+                "verdict": {"tool": "record_verdict", "task_id": "WAKE-1"},
+            },
+        },
+        sort_keys=True,
+    )
+    broadcast = AsyncMock()
+
+    with patch("app.api.ws.ws_manager.broadcast", broadcast):
+        result = await service.run_turn_programmatic(
+            session,
+            status_message,
+            source_event_id=41,
+        )
+
+    assert result.content == "Decision handled"
+    assert [message["role"] for message in session.messages] == [
+        "user",
+        "assistant",
+    ]
+    assert session.messages[0]["content"] == status_message
+    assert "WAKE-1" in session.messages[0]["content"]
+    assert "available_actions" in session.messages[0]["content"]
+    assert session.messages[1]["idempotency_key"] == "wake-41"
+    broadcast.assert_awaited_once()
+    payload = broadcast.await_args.args[0]
+    assert payload["type"] == "coordinator_message"
+    assert payload["session_id"] == session.id
+    assert payload["source_event_id"] == 41
+    assert payload["message"]["content"] == "Decision handled"
 
 
 @pytest.mark.asyncio

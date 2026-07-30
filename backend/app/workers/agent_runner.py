@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -31,8 +32,10 @@ from app.db.models import (
     LLMUsage,
     RunResourceUsage,
     AuditLog,
+    Session as SessionModel,
     Task,
     TaskDependency,
+    TaskEvent,
     VendorRawEvent,
 )
 from app.schemas.task import ReviewResult
@@ -46,7 +49,7 @@ from app.services.process_manager import (
     WorktreeManager,
     WorktreeUnsupportedError,
 )
-from app.services.task_event_service import emit_task_event
+from app.services.task_event_service import TaskEventService, emit_task_event
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.workers import redis_broker
 from app.workers.output_streamer import (
@@ -385,6 +388,134 @@ def _nudge_driver(task_id: str, trigger: str) -> None:
         )
 
 
+def _enqueue_coordinator_wake(event_id: int) -> None:
+    """Best-effort enqueue of a decision event for coordinator handling."""
+
+    try:
+        wake_coordinator.send(event_id)
+    except Exception:
+        logger.warning(
+            "Could not enqueue coordinator wake for task event %s",
+            event_id,
+            exc_info=True,
+        )
+
+
+def _emit_decision_event(
+    db: Session,
+    *,
+    task_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+) -> TaskEvent:
+    """Persist a decision event before making its best-effort wake request."""
+
+    event = emit_task_event(
+        task_id=task_id,
+        event_type=event_type,
+        kind="decision",
+        payload=payload,
+        db=db,
+    )
+    _enqueue_coordinator_wake(event.id)
+    return event
+
+
+def _decision_status_message(event: TaskEvent) -> str:
+    """Build the structured user message presented to a woken coordinator."""
+
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    result = payload.get("result")
+    if result is None:
+        result = payload.get("result_ref")
+    if result is None and "exit_code" in payload:
+        result = {"exit_code": payload["exit_code"]}
+    status = {
+        "type": "task_decision",
+        "source_event_id": event.id,
+        "task_id": event.task_id,
+        "step": event.event_type,
+        "result": result,
+        "error": payload.get("error") or payload.get("reason"),
+        "available_actions": {
+            "dispatch": {
+                "tool": "dispatch_task",
+                "task_id": event.task_id,
+                "purpose": "retry or dispatch the failed task",
+            },
+            "cancel": {"tool": "cancel_task", "task_id": event.task_id},
+            "update_task": {"tool": "update_task", "task_id": event.task_id},
+            "verdict": {"tool": "record_verdict", "task_id": event.task_id},
+        },
+        "event_payload": payload,
+    }
+    return "TASK_DECISION_EVENT\n" + json.dumps(
+        status,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+
+
+@dramatiq.actor(
+    broker=redis_broker,
+    max_retries=0,
+    time_limit=900_000,
+)
+def wake_coordinator(event_id: int) -> str:
+    """Claim one decision event and wake exactly one coordinator session."""
+
+    db: Session = SessionLocal()
+    try:
+        event = db.get(TaskEvent, event_id)
+        if event is None:
+            return "not_found"
+        if event.kind != "decision":
+            return "ignored_info"
+
+        task = db.get(Task, event.task_id)
+        session = None
+        if task is not None and task.session_id:
+            session = (
+                db.query(SessionModel)
+                .filter(
+                    SessionModel.id == task.session_id,
+                    SessionModel.status == "active",
+                )
+                .first()
+            )
+        if session is None:
+            session = (
+                db.query(SessionModel)
+                .filter(
+                    SessionModel.context_level == "global",
+                    SessionModel.status == "active",
+                )
+                .order_by(
+                    SessionModel.last_activity_at.desc(),
+                    SessionModel.id.desc(),
+                )
+                .first()
+            )
+        if session is None:
+            return "parked"
+
+        if not TaskEventService(db).claim_event(event.id, session.id):
+            return "already_claimed"
+
+        message = _decision_status_message(event)
+        asyncio.run(
+            CoordinatorService(db).run_turn_programmatic(
+                session,
+                message,
+                source_event_id=event.id,
+            )
+        )
+        return "completed"
+    finally:
+        db.close()
+
+
 def _publish(run_id: str, payload: dict) -> None:
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     for attempt in range(3):
@@ -491,16 +622,15 @@ def run_agent(
             run.status = "failed"
             run.error_message = "Could not determine repository HEAD before execution"
             db.commit()
-            emit_task_event(
+            _emit_decision_event(
+                db,
                 task_id=task_id,
-                event_type="failed",
-                kind="decision",
+                event_type="run_failed",
                 payload={
                     "run_id": run_id,
                     "error": run.error_message,
                     "exit_code": -1,
                 },
-                db=db,
             )
             TaskOrchestrationService(db).record_execution_failure(
                 task_id=task_id,
@@ -793,16 +923,15 @@ def run_agent(
                 db=db,
             )
         elif effective_status != ProcessStatus.CANCELLED.value:
-            emit_task_event(
+            _emit_decision_event(
+                db,
                 task_id=task_id,
-                event_type="failed",
-                kind="decision",
+                event_type="run_failed",
                 payload={
                     "run_id": run_id,
                     "error": effective_error,
                     "exit_code": result.exit_code,
                 },
-                db=db,
             )
         _nudge_driver(task_id, "run_agent_completed")
 
@@ -828,12 +957,11 @@ def run_agent(
         if should_retry:
             publish_status(run_id, "retrying", error=str(exc))
             raise
-        emit_task_event(
+        _emit_decision_event(
+            db,
             task_id=task_id,
-            event_type="failed",
-            kind="decision",
+            event_type="run_failed",
             payload={"run_id": run_id, "error": str(exc)},
-            db=db,
         )
         publish_status(run_id, "failed", error=str(exc))
         _nudge_driver(task_id, "run_agent_completed")
@@ -892,6 +1020,7 @@ def advance_task(task_id: str, trigger: str) -> str:
             return "skipped_locked"
 
         status_before = task.status
+        was_awaiting_approval = bool(task.awaiting_approval)
         service = TaskOrchestrationService(db)
         if task.awaiting_approval:
             # Already parked for a human decision (a gate pending, or a
@@ -922,6 +1051,20 @@ def advance_task(task_id: str, trigger: str) -> str:
             )
         )
         db.commit()
+        if outcome == "gate_pending" and not was_awaiting_approval:
+            gate_event = (
+                db.query(TaskEvent)
+                .filter(
+                    TaskEvent.task_id == task_id,
+                    TaskEvent.kind == "decision",
+                    TaskEvent.event_type == "gate_pending",
+                    TaskEvent.claimed_by_session_id.is_(None),
+                )
+                .order_by(TaskEvent.id.desc())
+                .first()
+            )
+            if gate_event is not None:
+                _enqueue_coordinator_wake(gate_event.id)
         if status_before != "failed" and task.status == "failed":
             # `_escalate` (missing AC, no agent, a failed dependency, a
             # round/stall cap, ...) sets task.status directly rather than
@@ -970,12 +1113,11 @@ def _advance_task_stalled(db: Session, task_id: str, current_status: str) -> boo
 
 def _escalate(db: Session, task: Task, reason: str) -> None:
     TaskOrchestrationService(db).escalate_task(task_id=task.id, reason=reason)
-    emit_task_event(
+    _emit_decision_event(
+        db,
         task_id=task.id,
         event_type="escalated",
-        kind="decision",
         payload={"reason": reason},
-        db=db,
     )
 
 

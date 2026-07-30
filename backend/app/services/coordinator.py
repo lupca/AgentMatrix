@@ -679,6 +679,49 @@ class CoordinatorService:
         # the next provider request in this turn and by the next user turn.
         invalidate_context_snapshot(self.db, project_id=db_session.project_id)
 
+    async def _run_tool_exchange(
+        self,
+        *,
+        db_session: SessionModel,
+        turn_id: str,
+        response: ProviderResponse,
+        canonical: list[dict[str, Any]],
+        active_tools: list[dict[str, Any]],
+        active_tool_names: set[str],
+        duplicate_call_ids: set[str],
+    ) -> list[dict[str, Any]]:
+        """Execute and persist one tool-loop exchange for every turn mode."""
+
+        tool_calls = response.tool_calls or []
+        canonical.append(
+            {
+                "role": "assistant",
+                "content": response.text or "",
+                "tool_calls": tool_calls,
+            }
+        )
+        self._merge_loaded_tools(
+            active_tools,
+            active_tool_names,
+            tool_calls,
+            db_session,
+        )
+        tool_results = await self._execute_tools(
+            tool_calls,
+            db_session,
+            active_tools,
+            active_tool_names,
+            duplicate_call_ids=duplicate_call_ids,
+        )
+        canonical.extend(tool_results)
+        self._persist_tool_exchange(
+            db_session,
+            turn_id=turn_id,
+            response=response,
+            results=tool_results,
+        )
+        return tool_results
+
     @staticmethod
     def _retryable(exc: Exception) -> bool:
         if isinstance(exc, CLIDispatchError):
@@ -1004,29 +1047,14 @@ class CoordinatorService:
                                         )
                                         break
 
-                            canonical.append(
-                                {
-                                    "role": "assistant",
-                                    "content": response.text or "",
-                                    "tool_calls": response.tool_calls,
-                                }
-                            )
-                            self._merge_loaded_tools(
-                                active_tools, active_tool_names, response.tool_calls, db_session
-                            )
-                            tool_results = await self._execute_tools(
-                                response.tool_calls,
-                                db_session,
-                                active_tools,
-                                active_tool_names,
-                                duplicate_call_ids=duplicate_call_ids,
-                            )
-                            canonical.extend(tool_results)
-                            self._persist_tool_exchange(
-                                db_session,
+                            await self._run_tool_exchange(
+                                db_session=db_session,
                                 turn_id=turn_id,
                                 response=response,
-                                results=tool_results,
+                                canonical=canonical,
+                                active_tools=active_tools,
+                                active_tool_names=active_tool_names,
+                                duplicate_call_ids=duplicate_call_ids,
                             )
 
                             if stop_reason:
@@ -1263,16 +1291,6 @@ class CoordinatorService:
                                         )
                                         break
 
-                            canonical.append(
-                                {
-                                    "role": "assistant",
-                                    "content": response.text or "",
-                                    "tool_calls": response.tool_calls,
-                                }
-                            )
-                            self._merge_loaded_tools(
-                                active_tools, active_tool_names, response.tool_calls, db_session
-                            )
                             for position, tool_call in enumerate(response.tool_calls):
                                 yield {
                                     "type": "tool_call",
@@ -1282,19 +1300,14 @@ class CoordinatorService:
                                     "name": str(tool_call.get("name", "")),
                                     "input": dict(self._tool_arguments(tool_call)),
                                 }
-                            tool_results = await self._execute_tools(
-                                response.tool_calls,
-                                db_session,
-                                active_tools,
-                                active_tool_names,
-                                duplicate_call_ids=duplicate_call_ids,
-                            )
-                            canonical.extend(tool_results)
-                            self._persist_tool_exchange(
-                                db_session,
+                            tool_results = await self._run_tool_exchange(
+                                db_session=db_session,
                                 turn_id=turn_id,
                                 response=response,
-                                results=tool_results,
+                                canonical=canonical,
+                                active_tools=active_tools,
+                                active_tool_names=active_tool_names,
+                                duplicate_call_ids=duplicate_call_ids,
                             )
                             for result in tool_results:
                                 yield {
@@ -1383,3 +1396,52 @@ class CoordinatorService:
                         error=exc,
                     )
                     raise
+
+    async def run_turn_programmatic(
+        self,
+        db_session: SessionModel,
+        message: str,
+        *,
+        source_event_id: int,
+    ) -> CoordinatorResult:
+        """Run a complete non-SSE turn and notify open UIs in real time."""
+
+        result = await self.complete_turn(
+            db_session,
+            message,
+            idempotency_key=f"wake-{source_event_id}",
+        )
+        if result.cached:
+            return result
+
+        assistant = next(
+            (
+                item
+                for item in reversed(list(db_session.messages or []))
+                if item.get("id") == result.message_id
+            ),
+            {
+                "id": result.message_id,
+                "role": "assistant",
+                "content": result.content,
+            },
+        )
+        try:
+            from app.api.ws import ws_manager
+
+            await ws_manager.broadcast(
+                {
+                    "type": "coordinator_message",
+                    "session_id": db_session.id,
+                    "source_event_id": source_event_id,
+                    "message": assistant,
+                }
+            )
+        except Exception:
+            logger.warning(
+                "Failed to broadcast programmatic turn for session=%s event=%s",
+                db_session.id,
+                source_event_id,
+                exc_info=True,
+            )
+        return result
