@@ -1,11 +1,13 @@
 import React, { createContext, useContext, useState, ReactNode } from 'react';
 
-export type GlobalChatMode = 'closed' | 'floating' | 'docked' | 'collapsed';
+export type GlobalChatMode = 'closed' | 'floating' | 'docked' | 'collapsed' | 'fullscreen';
 
 interface GlobalChatContextType {
   mode: GlobalChatMode;
   setMode: (mode: GlobalChatMode) => void;
   toggleChat: () => void;
+  isMobileDrawerOpen: boolean;
+  setIsMobileDrawerOpen: (isOpen: boolean) => void;
 }
 
 const GlobalChatContext = createContext<GlobalChatContextType | undefined>(undefined);
@@ -13,13 +15,14 @@ const GlobalChatContext = createContext<GlobalChatContextType | undefined>(undef
 export function GlobalChatProvider({ children }: { children: ReactNode }) {
   // Sidebar open by default
   const [mode, setMode] = useState<GlobalChatMode>('docked');
+  const [isMobileDrawerOpen, setIsMobileDrawerOpen] = useState(false);
 
   const toggleChat = () => {
     setMode((prev) => (prev === 'closed' ? 'docked' : 'closed'));
   };
 
   return (
-    <GlobalChatContext.Provider value={{ mode, setMode, toggleChat }}>
+    <GlobalChatContext.Provider value={{ mode, setMode, toggleChat, isMobileDrawerOpen, setIsMobileDrawerOpen }}>
       {children}
     </GlobalChatContext.Provider>
   );

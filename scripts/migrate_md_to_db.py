@@ -122,6 +122,17 @@ def parse_project_registry(index_path: Path) -> list[dict]:
         elif in_table and not line.strip().startswith('|'):
             break
 
+    for p in projects:
+        project_md = index_path.parent / "projects" / p['id'] / f"{p['id']}.md"
+        if project_md.exists():
+            content = project_md.read_text()
+            fm = parse_frontmatter(content)
+            body = get_body_content(content)
+            p['name'] = fm.get('full_name', p['name'])
+            p['task_prefix'] = fm.get('task_prefix', p['id'].upper()[:5])
+            p['description'] = fm.get('description')
+            p['context_md'] = body
+
     return projects
 
 
@@ -155,8 +166,18 @@ def parse_task_files(projects_dir: Path) -> list[dict]:
             if title_match:
                 raw_input = title_match.group(1).strip()
 
+        task_id = fm.get('id')
+        existing_ids = [t['id'] for t in tasks]
+        if task_id in existing_ids:
+            counter = 2
+            new_id = f"{task_id}_{counter}"
+            while new_id in existing_ids:
+                counter += 1
+                new_id = f"{task_id}_{counter}"
+            task_id = new_id
+
         tasks.append({
-            'id': fm.get('id'),
+            'id': task_id,
             'project': project,
             'title': fm.get('title', ''),
             'raw_input': raw_input,
@@ -178,6 +199,11 @@ def parse_task_files(projects_dir: Path) -> list[dict]:
             'prediction_factors': fm.get('prediction_factors'),
             'deadline': fm.get('deadline'),
             'tags': fm.get('tags', []),
+            'depends_on': fm.get('depends_on', []),
+            'created_at': fm.get('created'),
+            'updated_at': fm.get('updated'),
+            'dispatched_at': fm.get('dispatched'),
+            'completed_at': fm.get('completed'),
         })
 
     return tasks
@@ -349,11 +375,14 @@ def migrate(dry_run: bool = False, clear: bool = True):
         print("\nImporting projects...")
         for p in projects:
             session.execute(text("""
-                INSERT INTO projects (id, name, repo_root, status)
-                VALUES (:id, :name, :repo_root, :status)
+                INSERT INTO projects (id, name, repo_root, status, description, context_md, task_prefix)
+                VALUES (:id, :name, :repo_root, :status, :description, :context_md, :task_prefix)
             """), {
                 **p,
                 'status': p.get('status', 'active'),
+                'description': p.get('description'),
+                'context_md': p.get('context_md'),
+                'task_prefix': p.get('task_prefix'),
             })
 
         # Insert agents
@@ -429,11 +458,13 @@ def migrate(dry_run: bool = False, clear: bool = True):
                 INSERT INTO tasks (id, project, title, raw_input, status, current_gate, mode, priority, risk,
                                   executor, reviewer, acceptance_criteria, files, tests, flows,
                                   plan, result_ref, verdict, predicted_success, prediction_factors,
-                                  deadline, tags, legacy_no_ac)
+                                  deadline, tags, legacy_no_ac,
+                                  created_at, updated_at, dispatched_at, completed_at)
                 VALUES (:id, :project, :title, :raw_input, :status, :current_gate, :mode, :priority, :risk,
                        :executor, :reviewer, :acceptance_criteria, :files, :tests, :flows,
                        :plan, :result_ref, :verdict, :predicted_success, :prediction_factors,
-                       :deadline, :tags, :legacy_no_ac)
+                       :deadline, :tags, :legacy_no_ac,
+                       :created_at, :updated_at, :dispatched_at, :completed_at)
             """), {
                 'id': t['id'],
                 'project': t['project'],
@@ -458,6 +489,10 @@ def migrate(dry_run: bool = False, clear: bool = True):
                 'deadline': t.get('deadline'),
                 'tags': json.dumps(tags),
                 'legacy_no_ac': legacy_no_ac,
+                'created_at': t.get('created_at'),
+                'updated_at': t.get('updated_at'),
+                'dispatched_at': t.get('dispatched_at'),
+                'completed_at': t.get('completed_at'),
             })
 
         # Insert knowledge items
@@ -471,6 +506,30 @@ def migrate(dry_run: bool = False, clear: bool = True):
                 **k,
                 'tags': json.dumps(tags),
             })
+
+        # Insert task dependencies
+        print("Importing task dependencies...")
+        all_task_ids = {t['id'] for t in tasks}
+        for t in tasks:
+            deps = t.get('depends_on')
+            if not deps:
+                continue
+            if isinstance(deps, str):
+                deps = [deps]
+            for dep in deps:
+                dep = dep.strip()
+                if dep and dep in all_task_ids:
+                    try:
+                        session.execute(text("""
+                            INSERT INTO task_dependencies (task_id, depends_on_task_id)
+                            VALUES (:task_id, :depends_on_task_id)
+                            ON CONFLICT DO NOTHING
+                        """), {
+                            'task_id': t['id'],
+                            'depends_on_task_id': dep,
+                        })
+                    except Exception as e:
+                        print(f"Skipping dependency {t['id']} -> {dep}: {e}")
 
         # Re-enable trigger
         print("Re-enabling done-verdict trigger...")

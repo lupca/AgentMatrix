@@ -13,39 +13,40 @@ import {
 import { useTheme } from '../contexts/ThemeContext';
 import { NotificationCenter } from './notifications/NotificationCenter';
 
+export const navGroups = [
+  {
+    title: 'Overview',
+    items: [
+      { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    ]
+  },
+  {
+    title: 'Work & Execution',
+    items: [
+      { path: '/projects', label: 'Projects', icon: FolderKanban },
+      { path: '/tasks', label: 'Tasks', icon: CheckSquare },
+      { path: '/kanban', label: 'Kanban', icon: LayoutGrid },
+    ]
+  },
+  {
+    title: 'AI Assets',
+    items: [
+      { path: '/agents', label: 'Agents', icon: Bot },
+    ]
+  },
+  {
+    title: 'System',
+    items: [
+      { path: '/telemetry', label: 'Telemetry', icon: Activity },
+      { path: '/settings', label: 'Settings', icon: SettingsIcon },
+    ]
+  }
+];
+
 export function Navigation() {
   const location = useLocation();
   const { theme, toggleTheme } = useTheme();
 
-  const navGroups = [
-    {
-      title: 'Overview',
-      items: [
-        { path: '/', label: 'Dashboard', icon: LayoutDashboard },
-      ]
-    },
-    {
-      title: 'Work & Execution',
-      items: [
-        { path: '/projects', label: 'Projects', icon: FolderKanban },
-        { path: '/tasks', label: 'Tasks', icon: CheckSquare },
-        { path: '/kanban', label: 'Kanban', icon: LayoutGrid },
-      ]
-    },
-    {
-      title: 'AI Assets',
-      items: [
-        { path: '/agents', label: 'Agents', icon: Bot },
-      ]
-    },
-    {
-      title: 'System',
-      items: [
-        { path: '/telemetry', label: 'Telemetry', icon: Activity },
-        { path: '/settings', label: 'Settings', icon: SettingsIcon },
-      ]
-    }
-  ];
 
   return (
     <aside className="w-64 h-full bg-gray-950/80 backdrop-blur border-r border-gray-800 flex flex-col shrink-0">
