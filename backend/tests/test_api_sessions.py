@@ -1,3 +1,14 @@
+from app.db.models import (
+    Session as SessionModel,
+)
+from app.db.models import (
+    SessionEventCursor,
+    Task,
+    TaskEvent,
+)
+from app.services.context_hierarchy import ContextHierarchy
+
+
 def test_create_and_get_task_session(client):
     # Create task first
     task_res = client.post("/api/tasks", json={"project": "web", "title": "Session task"})
@@ -184,3 +195,95 @@ def test_session_model_selection_is_persisted_and_validated(client):
 def test_get_session_404(client):
     res = client.get("/api/sessions/nonexistent-id")
     assert res.status_code == 404
+
+
+def test_get_session_reports_pending_info_events_after_cursor(client, db_session):
+    task_res = client.post(
+        "/api/tasks",
+        json={"project": "web", "title": "Digest count task"},
+    )
+    task_id = task_res.json()["id"]
+    session_res = client.post(
+        "/api/sessions",
+        json={"context_level": "task", "task_id": task_id},
+    )
+    session_id = session_res.json()["id"]
+    events = [
+        TaskEvent(
+            task_id=task_id,
+            event_type="progress",
+            kind="info",
+            payload={"sequence": sequence},
+        )
+        for sequence in range(1, 7)
+    ]
+    db_session.add_all(events)
+    db_session.flush()
+    db_session.add(
+        SessionEventCursor(
+            session_id=session_id,
+            last_digest_event_id=events[1].id,
+        )
+    )
+    db_session.add(
+        TaskEvent(
+            task_id=task_id,
+            event_type="gate_pending",
+            kind="decision",
+            payload={"approval_prompt": "Approve this"},
+        )
+    )
+    db_session.commit()
+
+    response = client.get(f"/api/sessions/{session_id}")
+
+    assert response.status_code == 200
+    assert response.json()["pending_digest_count"] == 4
+    cursor = db_session.get(SessionEventCursor, session_id)
+    assert cursor.last_digest_event_id == events[1].id
+
+
+def test_claimed_decision_digest_is_read_only_without_approval_prompt(db_session):
+    task = Task(
+        id="TASK-CLAIMED",
+        project="web",
+        title="Claimed decision",
+        status="todo",
+    )
+    session_a = SessionModel(
+        id="session-a",
+        task_id=task.id,
+        project_id=task.project,
+        context_level="task",
+        messages=[],
+    )
+    session_b = SessionModel(
+        id="session-b",
+        task_id=task.id,
+        project_id=task.project,
+        context_level="task",
+        messages=[],
+    )
+    decision = TaskEvent(
+        task_id=task.id,
+        event_type="gate_pending",
+        kind="decision",
+        claimed_by_session_id=session_b.id,
+        payload={
+            "gate": "dispatch",
+            "approval_prompt": "Approve dispatch now",
+        },
+    )
+    db_session.add_all([task, session_a, session_b, decision])
+    db_session.commit()
+
+    messages = ContextHierarchy(db_session).build_messages(session_a)
+    digest = next(
+        message["content"]
+        for message in messages
+        if message.get("kind") == "task_event_digest"
+    )
+
+    assert "đang xử lý ở session session-b" in digest
+    assert "approval_prompt" not in digest
+    assert "Approve dispatch now" not in digest

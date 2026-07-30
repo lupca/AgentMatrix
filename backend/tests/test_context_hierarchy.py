@@ -1,15 +1,66 @@
 import hashlib
 import json
+
 import pytest
-import os
-from app.db.models import Agent, Project, Session as SessionModel, Task, LLMUsage
-from app.services.context_hierarchy import ContextHierarchy, PROJECT_CONTEXT_MAX_CHARS
-from app.services.coordinator import CoordinatorService
+from app.db.models import (
+    Agent,
+    Project,
+    SessionEventCursor,
+    Task,
+    TaskEvent,
+)
+from app.db.models import (
+    Session as SessionModel,
+)
+from app.graph.context import build_context_snapshot, invalidate_context_snapshot
 from app.services.command_router import CommandRouter
+from app.services.context_hierarchy import PROJECT_CONTEXT_MAX_CHARS, ContextHierarchy
+from app.services.coordinator import CoordinatorService
+from app.services.llm_client import UsageCounts
 from app.services.providers import ProviderResponse
 from app.services.providers.openai_adapter import OpenAIAdapter
-from app.services.llm_client import UsageCounts
-from app.graph.context import build_context_snapshot, invalidate_context_snapshot
+
+
+class _DigestProvider:
+    name = "openai"
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = []
+
+    async def complete(
+        self,
+        messages,
+        model,
+        stream=False,
+        *,
+        max_tokens=2048,
+        temperature=0.7,
+        tools=None,
+    ):
+        self.calls.append(list(messages))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return ProviderResponse(
+            provider=self.name,
+            model=model,
+            text=str(outcome),
+            usage=UsageCounts(input_tokens=10, output_tokens=5),
+            request_id=f"digest-request-{len(self.calls)}",
+            stop_reason="stop",
+        )
+
+
+def _digest_message(messages):
+    return next(
+        (
+            message["content"]
+            for message in messages
+            if message.get("kind") == "task_event_digest"
+        ),
+        None,
+    )
 
 
 def _tool_turn(turn_id: str, *, call_id: str, name: str, content: str, final_text: str) -> list[dict]:
@@ -634,62 +685,135 @@ async def test_compact_command_via_router(db_session, monkeypatch):
     assert len(session.messages) == 15
 
 
-def test_get_recent_task_events(db_session):
-    """AC1: _get_recent_task_events reads from task_events table and filters by since."""
-    from datetime import datetime, timezone, timedelta
-    from app.db.models import TaskEvent
-
-    t0 = datetime(2026, 7, 28, 10, 0, 0, tzinfo=timezone.utc)
-    t1 = t0 + timedelta(minutes=5)
-    t2 = t0 + timedelta(minutes=10)
-
-    e1 = TaskEvent(task_id="TASK-EV-1", event_type="dispatched", payload={"run_id": "run-1"}, created_at=t0)
-    e2 = TaskEvent(task_id="TASK-EV-1", event_type="running", payload={"run_id": "run-1"}, created_at=t1)
-    e3 = TaskEvent(task_id="TASK-EV-1", event_type="done", payload={"run_id": "run-1", "result_ref": "hash123"}, created_at=t2)
-    db_session.add_all([e1, e2, e3])
-    db_session.commit()
-
-    hierarchy = ContextHierarchy(db_session)
-
-    # All events
-    events = hierarchy._get_recent_task_events("TASK-EV-1")
-    assert len(events) == 3
-    assert events[0]["type"] == "dispatched"
-    assert events[1]["type"] == "running"
-    assert events[2]["type"] == "done"
-
-    # Filtered by since t0
-    events_since = hierarchy._get_recent_task_events("TASK-EV-1", since=t0)
-    assert len(events_since) == 2
-    assert events_since[0]["type"] == "running"
-    assert events_since[1]["type"] == "done"
-
-
-def test_build_messages_injects_recent_task_events(db_session):
-    """AC2: build_messages() injects recent task events into context when task_id is present."""
-    from app.db.models import TaskEvent
-
-    task = Task(id="TASK-BUILD-1", project="proj-build", title="Build Task", status="todo")
-    session = SessionModel(
-        id="sess-build-events",
-        task_id="TASK-BUILD-1",
-        project_id="proj-build",
-        context_level="task",
-        messages=[{"id": "msg-1", "role": "user", "content": "Help me", "status": "complete"}],
+@pytest.mark.asyncio
+async def test_closed_session_replays_events_after_cursor_then_advances(db_session):
+    """Cursor 2 replays exactly event IDs 3-6 once after a session reopens."""
+    task = Task(
+        id="TASK-REPLAY",
+        project="proj-replay",
+        title="Replay Task",
+        status="todo",
     )
-    e1 = TaskEvent(task_id="TASK-BUILD-1", event_type="dispatched", payload={"agent": "@claude"})
-    e2 = TaskEvent(task_id="TASK-BUILD-1", event_type="running", payload={"pid": 1234})
-    db_session.add_all([task, session, e1, e2])
+    session = SessionModel(
+        id="sess-replay-events",
+        task_id=task.id,
+        project_id=task.project,
+        context_level="task",
+        status="closed",
+        messages=[],
+    )
+    events = [
+        TaskEvent(
+            task_id=task.id,
+            event_type="progress",
+            kind="info",
+            payload={"sequence": sequence},
+        )
+        for sequence in range(1, 7)
+    ]
+    db_session.add_all([task, session, *events])
+    db_session.flush()
+    assert [event.id for event in events] == [1, 2, 3, 4, 5, 6]
+    cursor = SessionEventCursor(
+        session_id=session.id,
+        last_digest_event_id=2,
+    )
+    db_session.add(cursor)
     db_session.commit()
 
-    hierarchy = ContextHierarchy(db_session)
-    messages = hierarchy.build_messages(session)
+    provider = _DigestProvider(["first response", "second response"])
+    coordinator = CoordinatorService(
+        db_session,
+        providers={"openai": provider},
+        retry_base_seconds=0,
+    )
+    await coordinator.complete_turn(
+        session,
+        "What happened while this session was closed?",
+        model="gpt-4o",
+        idempotency_key="replay-turn-1",
+    )
 
-    events_msgs = [m for m in messages if m.get("role") == "system" and "Recent task events:" in m.get("content", "")]
-    assert len(events_msgs) == 1
-    assert "dispatched" in events_msgs[0]["content"]
-    assert "running" in events_msgs[0]["content"]
-    assert "@claude" in events_msgs[0]["content"]
+    first_digest = _digest_message(provider.calls[0])
+    assert first_digest is not None
+    assert "event #1 " not in first_digest
+    assert "event #2 " not in first_digest
+    positions = [first_digest.index(f"event #{event_id} ") for event_id in range(3, 7)]
+    assert positions == sorted(positions)
+    db_session.refresh(cursor)
+    assert cursor.last_digest_event_id == 6
+
+    await coordinator.complete_turn(
+        session,
+        "Anything else?",
+        model="gpt-4o",
+        idempotency_key="replay-turn-2",
+    )
+    assert _digest_message(provider.calls[1]) is None
+    db_session.refresh(cursor)
+    assert cursor.last_digest_event_id == 6
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_keeps_cursor_and_replays_same_digest(db_session):
+    task = Task(
+        id="TASK-RETRY-DIGEST",
+        project="proj-retry-digest",
+        title="Retry Digest Task",
+        status="todo",
+    )
+    session = SessionModel(
+        id="sess-retry-digest",
+        task_id=task.id,
+        project_id=task.project,
+        context_level="task",
+        messages=[],
+    )
+    events = [
+        TaskEvent(
+            task_id=task.id,
+            event_type="progress",
+            kind="info",
+            payload={"sequence": sequence},
+        )
+        for sequence in range(1, 4)
+    ]
+    cursor = SessionEventCursor(
+        session_id=session.id,
+        last_digest_event_id=0,
+    )
+    db_session.add_all([task, session, *events, cursor])
+    db_session.commit()
+
+    provider = _DigestProvider([RuntimeError("provider failed"), "recovered"])
+    coordinator = CoordinatorService(
+        db_session,
+        providers={"openai": provider},
+        max_retries=0,
+        retry_base_seconds=0,
+    )
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        await coordinator.complete_turn(
+            session,
+            "Read these events",
+            model="gpt-4o",
+            idempotency_key="failed-digest-turn",
+        )
+    db_session.refresh(cursor)
+    assert cursor.last_digest_event_id == 0
+    failed_digest = _digest_message(provider.calls[0])
+    assert failed_digest is not None
+
+    await coordinator.complete_turn(
+        session,
+        "Retry reading these events",
+        model="gpt-4o",
+        idempotency_key="successful-digest-turn",
+    )
+    assert _digest_message(provider.calls[1]) == failed_digest
+    db_session.refresh(cursor)
+    assert cursor.last_digest_event_id == events[-1].id
 
 
 def test_remove_rollup_logic_from_session_messages(db_session):
@@ -739,11 +863,8 @@ def test_integration_llm_receives_task_events_in_context(db_session):
     hierarchy = ContextHierarchy(db_session)
     messages = hierarchy.build_messages(session)
 
-    event_system_msg = next(
-        m for m in messages if m.get("role") == "system" and "Recent task events:" in m.get("content", "")
-    )
-    assert event_system_msg is not None
-    assert "dispatched" in event_system_msg["content"]
-    assert "done" in event_system_msg["content"]
-    assert "abc123def" in event_system_msg["content"]
-
+    digest = _digest_message(messages)
+    assert digest is not None
+    assert "dispatched" in digest
+    assert "done" in digest
+    assert "abc123def" in digest

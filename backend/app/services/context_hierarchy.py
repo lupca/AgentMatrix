@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
-import logging
 import json
+import logging
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session as DBSession
 
-from app.db.models import GateRecord, Project, Session as SessionModel, Task, TaskEvent
+from app.core.compression import context_window_for_model, count_tokens
 from app.core.config import settings
-from app.core.compression import count_tokens, context_window_for_model
+from app.db.models import (
+    GateRecord,
+    Project,
+    SessionEventCursor,
+    Task,
+    TaskEvent,
+)
+from app.db.models import (
+    Session as SessionModel,
+)
 from app.graph.context import get_context_snapshot
 from app.services import tool_definitions as _tool_definitions
+from app.services.task_event_service import TaskEventService
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +35,10 @@ _TRUNCATION_NOTICE = "\n\n[... project context truncated to fit 25KB cap ...]"
 
 # Auto-memory: how many recently completed tasks to summarize per project.
 PROJECT_MEMORY_TASK_LIMIT = 5
+
+# Keep a digest bounded and make every event independently scannable.
+TASK_EVENT_DIGEST_LIMIT = 100
+TASK_EVENT_DIGEST_LINE_MAX_CHARS = 600
 
 
 def drop_orphan_tool_pairs(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -214,27 +227,94 @@ class ContextHierarchy:
             return None
         return "[Task Gate State] " + ", ".join(parts)
 
-    def _get_recent_task_events(
+    def _get_task_event_digest(
         self,
-        task_id: str,
-        since: datetime | None = None,
-    ) -> list[dict[str, Any]]:
-        """Retrieve recent task events from task_events table for LLM context (CTV2-117)."""
-        if not task_id:
-            return []
-        query = self.db.query(TaskEvent).filter(TaskEvent.task_id == task_id)
-        if since is not None:
-            query = query.filter(TaskEvent.created_at > since)
-        events = query.order_by(TaskEvent.created_at.asc(), TaskEvent.id.asc()).all()
+        session: SessionModel,
+        limit: int = TASK_EVENT_DIGEST_LIMIT,
+    ) -> list[TaskEvent]:
+        """Return this session's ordered, cursor-based digest.
 
-        return [
-            {
-                "type": e.event_type,
-                "payload": e.payload,
-                "at": e.created_at.isoformat() if e.created_at else None,
+        ``TaskEventService.get_digest`` owns informational-event cursor
+        semantics. Claimed decisions are added as read-only status lines so a
+        second session can see that work is already in progress without being
+        prompted to intervene.
+        """
+        if not session.id:
+            return []
+
+        info_events = TaskEventService(self.db).get_digest(session.id, limit=limit)
+        cursor = self.db.get(SessionEventCursor, session.id)
+        last_event_id = cursor.last_digest_event_id if cursor else 0
+        claimed_decisions = (
+            self.db.query(TaskEvent)
+            .filter(
+                TaskEvent.kind == "decision",
+                TaskEvent.id > last_event_id,
+                TaskEvent.claimed_by_session_id.is_not(None),
+                TaskEvent.claimed_by_session_id != session.id,
+            )
+            .order_by(TaskEvent.id.asc())
+            .limit(limit)
+            .all()
+        )
+        return sorted(
+            [*info_events, *claimed_decisions],
+            key=lambda event: event.id,
+        )[:limit]
+
+    @staticmethod
+    def _without_approval_prompt(value: Any) -> Any:
+        """Recursively remove action prompts from a read-only decision."""
+        if isinstance(value, dict):
+            return {
+                key: ContextHierarchy._without_approval_prompt(item)
+                for key, item in value.items()
+                if str(key).casefold() != "approval_prompt"
             }
-            for e in events
-        ]
+        if isinstance(value, list):
+            return [
+                ContextHierarchy._without_approval_prompt(item)
+                for item in value
+            ]
+        return value
+
+    @classmethod
+    def _format_task_event(
+        cls,
+        event: TaskEvent,
+        session_id: str,
+    ) -> str:
+        """Render one bounded digest event on one line."""
+        prefix = (
+            f"- event #{event.id} task={event.task_id} "
+            f"type={event.event_type}"
+        )
+        claimed_elsewhere = (
+            event.kind == "decision"
+            and event.claimed_by_session_id is not None
+            and event.claimed_by_session_id != session_id
+        )
+        payload: Any = event.payload or {}
+        if claimed_elsewhere:
+            payload = cls._without_approval_prompt(payload)
+            line = (
+                f"{prefix} — ⏳ đang xử lý ở session "
+                f"{event.claimed_by_session_id}"
+            )
+        else:
+            line = prefix
+
+        if payload:
+            rendered = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            )
+            line = f"{line} — {rendered}"
+        if len(line) > TASK_EVENT_DIGEST_LINE_MAX_CHARS:
+            line = line[: TASK_EVENT_DIGEST_LINE_MAX_CHARS - 3] + "..."
+        return line
 
     def _task_header(self, session: SessionModel) -> dict[str, Any] | None:
         """Return the live task header as a post-snapshot suffix block."""
@@ -380,7 +460,6 @@ class ContextHierarchy:
         session: SessionModel,
         project_id: str | None = None,
         current_turn_id: str | None = None,
-        since: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Compose tiers in increasing order of volatility:
 
@@ -416,13 +495,18 @@ class ContextHierarchy:
         )
         messages.extend(task_context)
 
-        # Inject recent task events if task_id exists
+        # Inject task events newer than this session's durable cursor.
         if session.task_id:
-            recent_events = self._get_recent_task_events(session.task_id, since=since)
-            if recent_events:
+            digest_events = self._get_task_event_digest(session)
+            if digest_events:
                 messages.append({
                     "role": "system",
-                    "content": f"Recent task events:\n{json.dumps(recent_events, ensure_ascii=False)}",
+                    "kind": "task_event_digest",
+                    "digest_max_event_id": max(event.id for event in digest_events),
+                    "content": "Task event digest:\n" + "\n".join(
+                        self._format_task_event(event, session.id)
+                        for event in digest_events
+                    ),
                 })
 
         # Dynamic snapshot: keep this as the last prefix block.

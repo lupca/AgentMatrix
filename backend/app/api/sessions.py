@@ -1,15 +1,46 @@
 from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from app.db.base import get_db
-from app.db.models import ContextLevel, Session as SessionModel, SessionStatus, Task as TaskModel
-from app.graph.context import invalidate_context_snapshot
-from app.schemas.session import Session as SessionSchema, SessionCreate, SessionUpdate
-from app.services.llm_service import provider_name_for_model
+
 from app.db.archive import with_archived
+from app.db.base import get_db
+from app.db.models import (
+    ContextLevel,
+    SessionEventCursor,
+    SessionStatus,
+    TaskEvent,
+)
+from app.db.models import (
+    Session as SessionModel,
+)
+from app.db.models import (
+    Task as TaskModel,
+)
+from app.graph.context import invalidate_context_snapshot
+from app.schemas.session import Session as SessionSchema
+from app.schemas.session import SessionCreate, SessionUpdate
 from app.services.archive import ArchiveError, ArchiveService
+from app.services.llm_service import provider_name_for_model
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
+
+
+class SessionDetail(SessionSchema):
+    pending_digest_count: int = 0
+
+
+def _pending_digest_count(db_session: SessionModel, db: Session) -> int:
+    cursor = db.get(SessionEventCursor, db_session.id)
+    last_event_id = cursor.last_digest_event_id if cursor else 0
+    return (
+        db.query(TaskEvent)
+        .filter(
+            TaskEvent.kind == "info",
+            TaskEvent.id > last_event_id,
+        )
+        .count()
+    )
 
 
 def _validate_model_selection(
@@ -159,7 +190,7 @@ def create_session(session_in: SessionCreate, db: Session = Depends(get_db)):
     return db_session
 
 
-@router.get("/{id}", response_model=SessionSchema)
+@router.get("/{id}", response_model=SessionDetail)
 def get_session(id: str, include_archived: bool = Query(False), db: Session = Depends(get_db)):
     db_session = with_archived(db, SessionModel, include_archived).filter(SessionModel.id == id).first()
     if not db_session:
@@ -167,7 +198,11 @@ def get_session(id: str, include_archived: bool = Query(False), db: Session = De
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session '{id}' not found."
         )
-    return db_session
+    session_data = SessionSchema.model_validate(db_session).model_dump()
+    return SessionDetail(
+        **session_data,
+        pending_digest_count=_pending_digest_count(db_session, db),
+    )
 
 
 @router.post("/{id}/archive")

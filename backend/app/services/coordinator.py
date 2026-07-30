@@ -15,28 +15,35 @@ from typing import Any
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.config import settings
-from app.db.models import Agent as AgentModel, LLMUsage, Session as SessionModel, Task as TaskModel
+from app.db.models import Agent as AgentModel
+from app.db.models import LLMUsage
+from app.db.models import Session as SessionModel
+from app.db.models import Task as TaskModel
+from app.graph.context import invalidate_context_snapshot
+from app.services.cli_dispatcher import (
+    CLIDispatcher,
+    CLIDispatchError,
+)
+from app.services.command_router import CommandRouter
+from app.services.context_hierarchy import ContextHierarchy, drop_orphan_tool_pairs
 from app.services.llm_client import (
     UsageCounts,
     calculate_cost,
 )
-from app.services.cli_dispatcher import (
-    CLIDispatchError,
-    CLIDispatcher,
+from app.services.llm_service import (
+    ConfigurationError,
+    LLMService,
+    provider_name_for_model,
 )
-from app.services.context_hierarchy import ContextHierarchy, drop_orphan_tool_pairs
-from app.services.command_router import CommandRouter
+from app.services.providers import CoordinatorProvider, ProviderResponse
+from app.services.providers.cli_provider import CLIProvider
+from app.services.task_event_service import TaskEventService
 from app.services.tool_registry import (
     get_group_for_tool,
     get_group_tool_definitions,
     get_spec,
     resolve_tool_name,
 )
-from app.graph.context import invalidate_context_snapshot
-from app.services.providers import CoordinatorProvider, ProviderResponse
-from app.services.providers.cli_provider import CLIProvider
-from app.services.llm_service import ConfigurationError, LLMService, provider_name_for_model
-
 
 logger = logging.getLogger(__name__)
 
@@ -699,6 +706,7 @@ class CoordinatorService:
         response: ProviderResponse,
         latency_ms: int,
         tool_iterations: int = 0,
+        digest_event_id: int | None = None,
     ) -> CoordinatorResult:
         assistant = self.append_message(
             db_session,
@@ -712,7 +720,15 @@ class CoordinatorService:
             provider_response_id=response.request_id,
             stop_reason=response.stop_reason,
             tool_iterations=tool_iterations,
+            digest_event_id=digest_event_id,
         )
+        # append_message commits the completed assistant message. Only after
+        # that durable success may this session stop replaying the digest.
+        if digest_event_id is not None:
+            TaskEventService(self.db).advance_cursor(
+                db_session.id,
+                digest_event_id,
+            )
         db_session.selected_provider = response.provider
         db_session.selected_model = response.model
         self.db.commit()
@@ -732,6 +748,23 @@ class CoordinatorService:
             provider=response.provider,
             model=response.model,
         )
+
+    @staticmethod
+    def _injected_digest_event_id(messages: list[dict[str, Any]]) -> int | None:
+        """Return the max ID only when the digest survived context budgeting."""
+        event_ids = [
+            message.get("digest_max_event_id")
+            for message in messages
+            if message.get("kind") == "task_event_digest"
+            and isinstance(message.get("digest_max_event_id"), int)
+        ]
+        return max(event_ids) if event_ids else None
+
+    def _advance_cached_digest(self, message: dict[str, Any], session_id: str) -> None:
+        """Finish cursor advancement if persistence won but a later step failed."""
+        event_id = message.get("digest_event_id")
+        if isinstance(event_id, int):
+            TaskEventService(self.db).advance_cursor(session_id, event_id)
 
     def _record_usage(
         self,
@@ -834,6 +867,7 @@ class CoordinatorService:
             self.ensure_user_message(db_session, message, turn_id)
             completed = self.completed_turn(db_session, turn_id)
             if completed:
+                self._advance_cached_digest(completed, db_session.id)
                 return self._cached_result(completed, turn_id)
             provider_name, resolved_model, agent = self._resolve_selection(
                 db_session, model, provider
@@ -887,6 +921,7 @@ class CoordinatorService:
                 ctx.build_messages(db_session, current_turn_id=turn_id),
                 resolved_model,
             )
+            digest_event_id = self._injected_digest_event_id(canonical)
             started = perf_counter()
             tool_activity = False
             active_tools = ctx.get_tool_definitions()
@@ -927,6 +962,7 @@ class CoordinatorService:
                                     response=response,
                                     latency_ms=round((perf_counter() - started) * 1000),
                                     tool_iterations=iteration,
+                                    digest_event_id=digest_event_id,
                                 )
 
                             # Track tool call responses separately (final response tracked in _persist_success)
@@ -1030,6 +1066,7 @@ class CoordinatorService:
                                 response=soft_response,
                                 latency_ms=round((perf_counter() - started) * 1000),
                                 tool_iterations=iteration,
+                                digest_event_id=digest_event_id,
                             )
                     else:
                         response = await self.llm_service.complete(
@@ -1046,6 +1083,7 @@ class CoordinatorService:
                         turn_id=turn_id,
                         response=response,
                         latency_ms=round((perf_counter() - started) * 1000),
+                        digest_event_id=digest_event_id,
                     )
                 except Exception as exc:
                     if (
@@ -1085,6 +1123,7 @@ class CoordinatorService:
             self.ensure_user_message(db_session, message, turn_id)
             completed = self.completed_turn(db_session, turn_id)
             if completed:
+                self._advance_cached_digest(completed, db_session.id)
                 yield str(completed.get("content", ""))
                 return
             provider_name, resolved_model, agent = self._resolve_selection(
@@ -1139,6 +1178,7 @@ class CoordinatorService:
                 ctx.build_messages(db_session, current_turn_id=turn_id),
                 resolved_model,
             )
+            digest_event_id = self._injected_digest_event_id(canonical)
             started = perf_counter()
             partial = ""
             tool_activity = False
@@ -1320,6 +1360,7 @@ class CoordinatorService:
                         response=response,
                         latency_ms=round((perf_counter() - started) * 1000),
                         tool_iterations=iteration if getattr(agent.agent_type, "value", agent.agent_type) == "api" else 1,
+                        digest_event_id=digest_event_id,
                     )
                     return
                 except Exception as exc:
