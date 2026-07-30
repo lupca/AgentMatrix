@@ -1269,6 +1269,7 @@ class TaskOrchestrationService:
         emit_task_event(
             task_id=task.id,
             event_type="gate_pending",
+            kind="decision",
             payload={
                 "gate": record.gate_type,
                 "gate_record_id": record.id,

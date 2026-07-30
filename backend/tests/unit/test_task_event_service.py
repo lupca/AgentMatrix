@@ -4,8 +4,15 @@ import uuid
 from datetime import datetime, timezone
 
 import pytest
-from app.db.models import Project, Task, TaskEvent
+from app.db.models import (
+    Project,
+    Session as ChatSession,
+    SessionEventCursor,
+    Task,
+    TaskEvent,
+)
 from app.services.task_event_service import (
+    DECISION_EVENT_TYPES,
     TaskEventService,
     emit_task_event,
 )
@@ -133,3 +140,66 @@ def test_cascade_delete_task(db_session, sample_task):
     # Verify event is deleted via CASCADE
     deleted_event = db_session.query(TaskEvent).filter_by(id=event_id).first()
     assert deleted_event is None
+
+
+def test_claim_event_is_atomic_and_keeps_winning_session(db_session, sample_task):
+    sessions = [ChatSession() for _ in range(2)]
+    db_session.add_all(sessions)
+    db_session.commit()
+    event = emit_task_event(sample_task.id, "run_failed", {"error": "boom"}, db=db_session)
+    service = TaskEventService(db_session)
+
+    assert service.claim_event(event.id, sessions[0].id) is True
+    assert service.claim_event(event.id, sessions[1].id) is False
+
+    db_session.refresh(event)
+    assert event.claimed_by_session_id == sessions[0].id
+
+
+def test_digest_uses_independent_session_cursors(db_session, sample_task):
+    sessions = [ChatSession() for _ in range(2)]
+    db_session.add_all(sessions)
+    db_session.commit()
+    events = [
+        emit_task_event(sample_task.id, "running", {"index": i}, db=db_session)
+        for i in range(5)
+    ]
+    db_session.add_all(
+        [
+            SessionEventCursor(
+                session_id=sessions[0].id,
+                last_digest_event_id=0,
+            ),
+            SessionEventCursor(
+                session_id=sessions[1].id,
+                last_digest_event_id=events[2].id,
+            ),
+        ]
+    )
+    db_session.commit()
+    service = TaskEventService(db_session)
+
+    assert [event.id for event in service.get_digest(sessions[0].id, limit=10)] == [
+        event.id for event in events
+    ]
+    assert [event.id for event in service.get_digest(sessions[1].id, limit=10)] == [
+        events[3].id,
+        events[4].id,
+    ]
+
+    for session in sessions:
+        service.advance_cursor(session.id, events[-1].id)
+        assert service.get_digest(session.id, limit=10) == []
+
+
+@pytest.mark.parametrize("event_type", sorted(DECISION_EVENT_TYPES))
+def test_emit_infers_decision_kind_from_event_type(
+    db_session, sample_task, event_type
+):
+    decision = emit_task_event(sample_task.id, event_type, {}, db=db_session)
+    assert decision.kind == "decision"
+
+
+def test_emit_infers_info_kind_for_other_event_types(db_session, sample_task):
+    info = emit_task_event(sample_task.id, "done", {}, db=db_session)
+    assert info.kind == "info"

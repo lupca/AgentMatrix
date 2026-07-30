@@ -465,6 +465,12 @@ class Session(ArchivableMixin, Base):
     task = relationship("Task", back_populates="sessions")
     project = relationship("Project", backref="sessions")
     llm_usages = relationship("LLMUsage", back_populates="session")
+    event_cursor = relationship(
+        "SessionEventCursor",
+        back_populates="session",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -952,6 +958,12 @@ class TaskEvent(Base):
         index=True,
     )
     event_type = Column(String(30), nullable=False)
+    kind = Column(String(10), nullable=False, server_default="info")
+    claimed_by_session_id = Column(
+        String(36),
+        ForeignKey("sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     payload = Column(JSON, nullable=False, default=dict)
     created_at = Column(
         DateTime(timezone=True),
@@ -962,7 +974,34 @@ class TaskEvent(Base):
     consumed_at = Column(DateTime(timezone=True), nullable=True)
 
     task = relationship("Task", back_populates="task_events")
+    claimed_by_session = relationship("Session")
 
     __table_args__ = (
         Index("idx_task_events_type_created", "event_type", "created_at"),
+        CheckConstraint(
+            "kind IN ('decision', 'info')",
+            name="ck_task_events_kind_valid",
+        ),
+        Index(
+            "idx_task_events_decision_claim",
+            "kind",
+            "claimed_by_session_id",
+            postgresql_where=(kind == "decision"),
+            sqlite_where=(kind == "decision"),
+        ),
     )
+
+
+class SessionEventCursor(Base):
+    """Per-session cursor for digesting informational task events."""
+
+    __tablename__ = "session_event_cursors"
+
+    session_id = Column(
+        String(36),
+        ForeignKey("sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    last_digest_event_id = Column(Integer, nullable=False, server_default="0", default=0)
+
+    session = relationship("Session", back_populates="event_cursor")

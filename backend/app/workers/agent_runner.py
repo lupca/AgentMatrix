@@ -494,6 +494,7 @@ def run_agent(
             emit_task_event(
                 task_id=task_id,
                 event_type="failed",
+                kind="decision",
                 payload={
                     "run_id": run_id,
                     "error": run.error_message,
@@ -795,6 +796,7 @@ def run_agent(
             emit_task_event(
                 task_id=task_id,
                 event_type="failed",
+                kind="decision",
                 payload={
                     "run_id": run_id,
                     "error": effective_error,
@@ -829,6 +831,7 @@ def run_agent(
         emit_task_event(
             task_id=task_id,
             event_type="failed",
+            kind="decision",
             payload={"run_id": run_id, "error": str(exc)},
             db=db,
         )
@@ -967,6 +970,13 @@ def _advance_task_stalled(db: Session, task_id: str, current_status: str) -> boo
 
 def _escalate(db: Session, task: Task, reason: str) -> None:
     TaskOrchestrationService(db).escalate_task(task_id=task.id, reason=reason)
+    emit_task_event(
+        task_id=task.id,
+        event_type="escalated",
+        kind="decision",
+        payload={"reason": reason},
+        db=db,
+    )
 
 
 def _advance_task_step(

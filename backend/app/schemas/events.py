@@ -12,6 +12,7 @@ class TaskEventResponse(BaseModel):
     id: int
     task_id: str
     event_type: str
+    kind: str
     payload: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     consumed_at: datetime | None = None
