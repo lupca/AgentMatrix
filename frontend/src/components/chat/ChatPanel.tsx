@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { ChatMessage, Message } from './ChatMessage';
+import { Message } from './ChatMessage';
 import { ChatInput } from './ChatInput';
 import { SessionTabs } from './SessionTabs';
 import { ContextIndicator } from './ContextIndicator';
 import { api } from '../../lib/api';
 import { Task } from '../../types/task';
-import { Bot, RefreshCw, Trash2, AlertCircle } from 'lucide-react';
+import { Bot, RefreshCw, Trash2 } from 'lucide-react';
 import { ChatHeader } from './ChatHeader';
 import { MessageList } from './MessageList';
 import {
@@ -66,10 +66,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
   const { isModelSwitching, updateSessionModel } = useChat(sessionId || threadId);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
-  const isNearBottomRef = useRef<boolean>(true);
 
   // Abort any in-flight SSE stream when this panel unmounts (e.g. session switch,
   // since ChatPanelManager remounts ChatPanel via a key change on activeThreadId).
@@ -78,21 +75,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       streamAbortRef.current?.abort();
     };
   }, []);
-
-  const checkIfNearBottom = useCallback(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return true;
-    const threshold = 100;
-    return container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
-  }, []);
-
-  const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, []);
-
-  const handleScroll = useCallback(() => {
-    isNearBottomRef.current = checkIfNearBottom();
-  }, [checkIfNearBottom]);
 
   // Fetch session history on mount or threadId change
   const fetchSessionHistory = useCallback(async () => {
@@ -137,6 +119,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
             status: tc.status,
           }));
           return {
+            ...m,
             id: m.id || `msg-${Math.random()}`,
             role: m.role || 'assistant',
             content: m.content || '',
@@ -202,12 +185,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     fetchSessionHistory();
   }, [fetchSessionHistory]);
 
-  useEffect(() => {
-    if (!loadingHistory && isNearBottomRef.current) {
-      scrollToBottom();
-    }
-  }, [messages, loadingHistory, scrollToBottom]);
-
   // Handle SSE streaming chat message send
   const handleSendMessage = async (userText: string) => {
     if (!userText.trim() || isStreaming) return;
@@ -238,7 +215,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     setMessages((prev) => [...prev, userMessage, assistantPlaceholder]);
     setIsStreaming(true);
     setError(null);
-    isNearBottomRef.current = true; // Auto-scroll when user sends a message
 
     streamAbortRef.current?.abort();
     const controller = new AbortController();
@@ -495,32 +471,12 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       </div>
 
       {/* Messages List Area */}
-      <div
-        ref={messagesContainerRef}
-        onScroll={handleScroll}
-        className="flex-1 min-h-0 overflow-y-auto overscroll-contain p-4 space-y-2 no-scrollbar"
-      >
-        {loadingHistory ? (
-          <div className="flex flex-col items-center justify-center h-full py-12 text-gray-500 space-y-2">
-            <RefreshCw className="w-6 h-6 animate-spin text-indigo-500" />
-            <span className="text-xs">Loading session history...</span>
-          </div>
-        ) : (
-          <>
-            {messages.map((msg) => (
-              <ChatMessage key={msg.id} message={msg} />
-            ))}
-            <div ref={messagesEndRef} />
-          </>
-        )}
-
-        {error && (
-          <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-xs flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span>{error}</span>
-          </div>
-        )}
-      </div>
+      <MessageList
+        messages={messages}
+        loading={loadingHistory}
+        error={error}
+        sessionId={sessionId || activeSessionId || threadId}
+      />
 
       {/* Chat Input */}
       <div className="shrink-0">

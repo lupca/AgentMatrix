@@ -1,7 +1,14 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { MemoryRouter } from 'react-router-dom';
 import ChatMessage, { type Message } from '../ChatMessage';
+import MessageList from '../MessageList';
+import { useWebSocket } from '../../../hooks/useWebSocket';
+
+vi.mock('../../../hooks/useWebSocket', () => ({
+  useWebSocket: vi.fn(),
+}));
 
 describe('ChatMessage Markdown rendering', () => {
   let container: HTMLDivElement;
@@ -12,6 +19,7 @@ describe('ChatMessage Markdown rendering', () => {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
+    vi.mocked(useWebSocket).mockReset();
     writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {
       configurable: true,
@@ -126,5 +134,122 @@ describe('ChatMessage Markdown rendering', () => {
     });
 
     expect(container.textContent).toContain('fetch_data');
+  });
+
+  it('renders a digest with a task-event badge and task link, unlike a user message', () => {
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <ChatMessage
+            message={{
+              id: 'digest-1',
+              role: 'system',
+              kind: 'digest',
+              task_id: 'CTV2-999',
+              result: 'fail',
+              content: 'Executor returned a failure.',
+            }}
+          />
+        </MemoryRouter>,
+      );
+    });
+
+    expect(
+      container.querySelector('[data-testid="task-event-badge"]')?.textContent,
+    ).toContain('Task event');
+    expect(
+      container.querySelector('a[href="/tasks/CTV2-999"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-message-kind="digest"]')).not.toBeNull();
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <ChatMessage
+            message={{
+              id: 'user-1',
+              role: 'user',
+              content: 'What happened?',
+            }}
+          />
+        </MemoryRouter>,
+      );
+    });
+
+    expect(
+      container.querySelector('[data-testid="task-event-badge"]'),
+    ).toBeNull();
+  });
+
+  it('renders a claimed digest as read-only with no action buttons', () => {
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <ChatMessage
+            message={{
+              id: 'decision-1',
+              role: 'system',
+              kind: 'system-event',
+              task_id: 'CTV2-999',
+              result: 'fail',
+              content: 'A decision was claimed.',
+              claimed_by_session_id: 'session-B',
+              claimed_by_session_name: 'Session B',
+            }}
+          />
+        </MemoryRouter>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'đang xử lý ở session Session B',
+    );
+    expect(
+      container.querySelector('[aria-label="Read-only claimed decision"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('button')).toBeNull();
+  });
+
+  it('appends a coordinator WS message only to its active session', () => {
+    act(() => {
+      root.render(
+        <MessageList
+          messages={[]}
+          loading={false}
+          error={null}
+          sessionId="session-A"
+        />,
+      );
+    });
+
+    const websocketHandler = vi.mocked(useWebSocket).mock.calls.at(-1)?.[0];
+    expect(websocketHandler).toBeTypeOf('function');
+
+    act(() => {
+      websocketHandler?.({
+        type: 'coordinator_message',
+        session_id: 'session-B',
+        message: {
+          id: 'wake-B',
+          role: 'assistant',
+          content: 'Other session response',
+        },
+      });
+    });
+    expect(container.textContent).not.toContain('Other session response');
+
+    act(() => {
+      websocketHandler?.({
+        type: 'coordinator_message',
+        session_id: 'session-A',
+        source_event_id: 77,
+        message: {
+          id: 'wake-A',
+          role: 'assistant',
+          content: 'Realtime wake response',
+        },
+      });
+    });
+    expect(container.textContent).toContain('Realtime wake response');
   });
 });

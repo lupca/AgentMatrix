@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link } from 'react-router-dom';
+import toast from 'react-hot-toast';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
   Bell,
@@ -126,11 +127,24 @@ function formatEventTime(value: string): string {
   });
 }
 
-export function NotificationCenter() {
+interface NotificationCenterProps {
+  activeSessionId?: string | null;
+  onNavigateToSession?: (sessionId: string) => void;
+}
+
+const SESSION_SWITCH_EVENT = 'control-tower:switch-session';
+const REQUESTED_SESSION_KEY = 'control-tower:requested-session-id';
+
+export function NotificationCenter({
+  activeSessionId,
+  onNavigateToSession,
+}: NotificationCenterProps = {}) {
+  const navigate = useNavigate();
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const {
     events,
+    latestDecisionToast,
     unreadCount,
     loading,
     error,
@@ -138,6 +152,68 @@ export function NotificationCenter() {
     clearEvents,
     markAllAsRead,
   } = useTaskEvents();
+
+  useEffect(() => {
+    if (!latestDecisionToast) {
+      return;
+    }
+
+    const currentSessionId =
+      activeSessionId ??
+      document.documentElement.dataset.activeChatSessionId ??
+      null;
+    if (latestDecisionToast.claimedBySessionId === currentSessionId) {
+      return;
+    }
+
+    const {
+      taskId,
+      claimedBySessionId,
+      claimedBySessionLabel,
+      eventId,
+    } = latestDecisionToast;
+    const message = `Task ${taskId} fail — đang xử lý ở session ${claimedBySessionLabel}`;
+
+    toast.custom(
+      (toastItem) => (
+        <button
+          type="button"
+          onClick={() => {
+            toast.dismiss(toastItem.id);
+            if (onNavigateToSession) {
+              onNavigateToSession(claimedBySessionId);
+              return;
+            }
+
+            try {
+              sessionStorage.setItem(
+                REQUESTED_SESSION_KEY,
+                claimedBySessionId,
+              );
+            } catch {
+              // Session switching still works through the live DOM event.
+            }
+            document.dispatchEvent(
+              new CustomEvent(SESSION_SWITCH_EVENT, {
+                detail: { sessionId: claimedBySessionId },
+              }),
+            );
+            navigate(`/tasks/${encodeURIComponent(taskId)}`, {
+              state: { chatSessionId: claimedBySessionId },
+            });
+          }}
+          className="pointer-events-auto rounded-lg border border-amber-500/30 bg-gray-900 px-4 py-3 text-left text-sm text-gray-100 shadow-xl transition-colors hover:bg-gray-800"
+          aria-label={`${message}. Open session ${claimedBySessionLabel}`}
+        >
+          {message}
+        </button>
+      ),
+      {
+        id: `decision-claimed-${String(eventId)}`,
+        duration: 8_000,
+      },
+    );
+  }, [activeSessionId, latestDecisionToast, navigate, onNavigateToSession]);
 
   useEffect(() => {
     if (!isOpen) {

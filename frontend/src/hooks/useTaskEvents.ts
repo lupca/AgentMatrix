@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../lib/api';
 import { EventsPollResponse, TaskEvent } from '../types/taskEvent';
+import { useWebSocket, type WebSocketMessage } from './useWebSocket';
 
 const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const INITIAL_LOOKBACK_MS = 60_000;
@@ -18,6 +19,7 @@ export interface UseTaskEventsOptions {
 export interface UseTaskEventsResult {
   events: TaskEvent[];
   latestEvent: TaskEvent | null;
+  latestDecisionToast: DecisionToast | null;
   loading: boolean;
   error: string | null;
   cursor: string | null;
@@ -27,8 +29,56 @@ export interface UseTaskEventsResult {
   markAllAsRead: () => void;
 }
 
+export interface DecisionToast {
+  taskId: string;
+  claimedBySessionId: string;
+  claimedBySessionLabel: string;
+  eventId: string | number;
+}
+
 function initialCursor(): string {
   return new Date(Date.now() - INITIAL_LOOKBACK_MS).toISOString();
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function decisionToastFromMessage(
+  message: WebSocketMessage,
+): DecisionToast | null {
+  const normalizedType = message.type.replace(/[_.]/g, '-');
+  if (normalizedType !== 'decision-claimed') {
+    return null;
+  }
+
+  const payload = asRecord(message.payload);
+  const taskId = payload.task_id ?? message.task_id;
+  const claimedBySessionId =
+    payload.claimed_by_session_id ?? message.claimed_by_session_id;
+  const eventId = payload.event_id ?? message.event_id;
+  const claimedBySessionLabel =
+    payload.claimed_by_session_name ??
+    message.claimed_by_session_name ??
+    claimedBySessionId;
+
+  if (
+    typeof taskId !== 'string' ||
+    typeof claimedBySessionId !== 'string' ||
+    (typeof eventId !== 'string' && typeof eventId !== 'number') ||
+    typeof claimedBySessionLabel !== 'string'
+  ) {
+    return null;
+  }
+
+  return {
+    taskId,
+    claimedBySessionId,
+    claimedBySessionLabel,
+    eventId,
+  };
 }
 
 export function useTaskEvents({
@@ -44,10 +94,21 @@ export function useTaskEvents({
   const [cursor, setCursor] = useState<string | null>(startingCursor.current);
   const [eventsMap, setEventsMap] = useState<Map<number, TaskEvent>>(new Map());
   const [readEventIds, setReadEventIds] = useState<Set<number>>(new Set());
+  const [latestDecisionToast, setLatestDecisionToast] =
+    useState<DecisionToast | null>(null);
 
   const cursorRef = useRef<string>(startingCursor.current);
   const activeFilterRef = useRef(filterKey);
   const visibleFilterRef = useRef(filterKey);
+
+  const handleWebSocketMessage = useCallback((message: WebSocketMessage) => {
+    const decisionToast = decisionToastFromMessage(message);
+    if (decisionToast) {
+      setLatestDecisionToast(decisionToast);
+    }
+  }, []);
+
+  useWebSocket(handleWebSocketMessage);
 
   useEffect(() => {
     if (visibleFilterRef.current !== filterKey) {
@@ -166,6 +227,7 @@ export function useTaskEvents({
   return {
     events: eventsList,
     latestEvent,
+    latestDecisionToast,
     loading: query.isLoading,
     error: query.error ? (query.error as Error).message : null,
     cursor,

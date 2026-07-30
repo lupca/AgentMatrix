@@ -1,9 +1,12 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ChatPanel } from './ChatPanel';
 import { Task } from '../../types/task';
 import { MessageSquare, Minimize2, Maximize2, X, PanelRightClose, PanelRightOpen } from 'lucide-react';
 import { ContextLevel, useSessions } from '../../hooks/useSessions';
 import { SessionSidebar } from './SessionSidebar';
+
+const SESSION_SWITCH_EVENT = 'control-tower:switch-session';
+const REQUESTED_SESSION_KEY = 'control-tower:requested-session-id';
 
 interface ChatPanelManagerProps {
   threadId: string;
@@ -68,6 +71,63 @@ export const ChatPanelManager: React.FC<ChatPanelManagerProps> = ({
   // ChatPanel resolves this value via GET /sessions/{id}, so use the session's
   // primary key here (not thread_id, which is a distinct LangGraph checkpoint field).
   const activeThreadId = activeSession?.id;
+
+  useEffect(() => {
+    if (!activeSessionId) {
+      return;
+    }
+
+    document.documentElement.dataset.activeChatSessionId = activeSessionId;
+    return () => {
+      if (
+        document.documentElement.dataset.activeChatSessionId ===
+        activeSessionId
+      ) {
+        delete document.documentElement.dataset.activeChatSessionId;
+      }
+    };
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    const switchIfAvailable = (requestedSessionId: string | null) => {
+      if (
+        !requestedSessionId ||
+        !sessions.some((session) => session.id === requestedSessionId)
+      ) {
+        return;
+      }
+
+      switchSession(requestedSessionId);
+      try {
+        if (
+          sessionStorage.getItem(REQUESTED_SESSION_KEY) ===
+          requestedSessionId
+        ) {
+          sessionStorage.removeItem(REQUESTED_SESSION_KEY);
+        }
+      } catch {
+        // The live switch has already succeeded.
+      }
+    };
+
+    let requestedSessionId: string | null = null;
+    try {
+      requestedSessionId = sessionStorage.getItem(REQUESTED_SESSION_KEY);
+    } catch {
+      // Storage can be unavailable in privacy-restricted browser contexts.
+    }
+    switchIfAvailable(requestedSessionId);
+
+    const handleSessionSwitch = (event: Event) => {
+      const sessionId = (event as CustomEvent<{ sessionId?: unknown }>).detail
+        ?.sessionId;
+      switchIfAvailable(typeof sessionId === 'string' ? sessionId : null);
+    };
+    document.addEventListener(SESSION_SWITCH_EVENT, handleSessionSwitch);
+    return () => {
+      document.removeEventListener(SESSION_SWITCH_EVENT, handleSessionSwitch);
+    };
+  }, [sessions, switchSession]);
 
   const sessionProps = {
     contextLevel,

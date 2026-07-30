@@ -1,5 +1,14 @@
 import React from 'react';
-import { Bot, User, Copy, Check, AlertCircle } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import {
+  Activity,
+  AlertCircle,
+  Bot,
+  Check,
+  Copy,
+  LockKeyhole,
+  User,
+} from 'lucide-react';
 import MessageContent from './MessageContent';
 import type { ToolCall } from './ToolCallBlock';
 
@@ -7,6 +16,13 @@ export interface Message {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  kind?: string;
+  task_id?: string;
+  event_type?: string;
+  result?: string;
+  claimed_by_session_id?: string;
+  claimed_by_session_name?: string;
+  payload?: Record<string, unknown>;
   timestamp?: string;
   isStreaming?: boolean;
   error?: boolean;
@@ -28,6 +44,94 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({ message }) => {
 
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
+  const isDigest =
+    message.kind === 'digest' ||
+    message.kind === 'system-event' ||
+    message.kind === 'task_event_digest';
+
+  if (isDigest) {
+    const payload = message.payload ?? {};
+    const taskId =
+      message.task_id ??
+      (typeof payload.task_id === 'string' ? payload.task_id : undefined);
+    const result =
+      message.result ??
+      (typeof payload.result === 'string' ? payload.result : undefined) ??
+      message.event_type;
+    const claimedBySessionId =
+      message.claimed_by_session_id ??
+      (typeof payload.claimed_by_session_id === 'string'
+        ? payload.claimed_by_session_id
+        : undefined);
+    const claimedBySessionLabel =
+      message.claimed_by_session_name ??
+      (typeof payload.claimed_by_session_name === 'string'
+        ? payload.claimed_by_session_name
+        : undefined) ??
+      claimedBySessionId;
+    const isFailure =
+      result === 'fail' ||
+      result === 'failed' ||
+      message.event_type === 'run_failed';
+
+    return (
+      <article
+        className={`my-3 rounded-xl border px-4 py-3 ${
+          claimedBySessionId
+            ? 'border-amber-500/30 bg-amber-500/5'
+            : 'border-cyan-500/25 bg-cyan-500/5'
+        }`}
+        data-message-kind="digest"
+      >
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span
+            className="inline-flex items-center gap-1.5 rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-0.5 font-semibold uppercase tracking-wide text-cyan-300"
+            data-testid="task-event-badge"
+          >
+            <Activity className="h-3 w-3" />
+            Task event
+          </span>
+          {taskId && (
+            <Link
+              to={`/tasks/${encodeURIComponent(taskId)}`}
+              className="font-mono font-semibold text-indigo-300 underline decoration-indigo-500/50 underline-offset-2 hover:text-indigo-200"
+            >
+              {taskId}
+            </Link>
+          )}
+          {result && (
+            <span
+              className={`rounded px-1.5 py-0.5 font-mono font-semibold ${
+                isFailure
+                  ? 'bg-red-500/15 text-red-300'
+                  : 'bg-gray-800 text-gray-300'
+              }`}
+            >
+              {result}
+            </span>
+          )}
+        </div>
+
+        {message.content && (
+          <p className="mt-2 whitespace-pre-wrap text-sm text-gray-300">
+            {message.content}
+          </p>
+        )}
+
+        {claimedBySessionId && (
+          <div
+            className="mt-2 flex items-center gap-1.5 text-xs font-medium text-amber-300"
+            aria-label="Read-only claimed decision"
+          >
+            <LockKeyhole className="h-3.5 w-3.5" />
+            <span>
+              đang xử lý ở session {claimedBySessionLabel}
+            </span>
+          </div>
+        )}
+      </article>
+    );
+  }
 
   if (isSystem) {
     return (

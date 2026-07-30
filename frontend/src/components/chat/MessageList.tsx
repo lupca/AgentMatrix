@@ -1,21 +1,91 @@
-import React, { useRef, useCallback, useEffect } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { ChatMessage, Message } from './ChatMessage';
 import { RefreshCw, AlertCircle } from 'lucide-react';
+import {
+  useWebSocket,
+  type WebSocketMessage,
+} from '../../hooks/useWebSocket';
 
 interface MessageListProps {
   messages: Message[];
   loading: boolean;
   error: string | null;
+  sessionId?: string | null;
 }
 
 export const MessageList: React.FC<MessageListProps> = ({
   messages,
   loading,
   error,
+  sessionId,
 }) => {
+  const [realtimeMessages, setRealtimeMessages] = useState<Message[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    setRealtimeMessages([]);
+  }, [sessionId]);
+
+  const handleWebSocketMessage = useCallback(
+    (event: WebSocketMessage) => {
+      if (
+        event.type !== 'coordinator_message' ||
+        !sessionId ||
+        event.session_id !== sessionId
+      ) {
+        return;
+      }
+
+      const raw = event.message;
+      if (!raw || typeof raw !== 'object') {
+        return;
+      }
+
+      const role =
+        raw.role === 'user' || raw.role === 'system'
+          ? raw.role
+          : 'assistant';
+      const message: Message = {
+        ...raw,
+        id:
+          typeof raw.id === 'string'
+            ? raw.id
+            : `coordinator-${String(event.source_event_id ?? Date.now())}`,
+        role,
+        content: typeof raw.content === 'string' ? raw.content : '',
+        timestamp:
+          typeof raw.timestamp === 'string'
+            ? raw.timestamp
+            : new Date().toISOString(),
+      };
+
+      setRealtimeMessages((current) =>
+        current.some((item) => item.id === message.id)
+          ? current
+          : [...current, message],
+      );
+      isNearBottomRef.current = true;
+    },
+    [sessionId],
+  );
+
+  useWebSocket(handleWebSocketMessage);
+
+  const visibleMessages = useMemo(() => {
+    const persistedIds = new Set(messages.map((message) => message.id));
+    return [
+      ...messages,
+      ...realtimeMessages.filter((message) => !persistedIds.has(message.id)),
+    ];
+  }, [messages, realtimeMessages]);
 
   const checkIfNearBottom = useCallback(() => {
     const container = messagesContainerRef.current;
@@ -25,7 +95,7 @@ export const MessageList: React.FC<MessageListProps> = ({
   }, []);
 
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    messagesEndRef.current?.scrollIntoView?.({ behavior: 'smooth' });
   }, []);
 
   const handleScroll = useCallback(() => {
@@ -36,7 +106,7 @@ export const MessageList: React.FC<MessageListProps> = ({
     if (!loading && isNearBottomRef.current) {
       scrollToBottom();
     }
-  }, [messages, loading, scrollToBottom]);
+  }, [visibleMessages, loading, scrollToBottom]);
 
   return (
     <div
@@ -51,7 +121,7 @@ export const MessageList: React.FC<MessageListProps> = ({
         </div>
       ) : (
         <>
-          {messages.map((msg) => (
+          {visibleMessages.map((msg) => (
             <ChatMessage key={msg.id} message={msg} />
           ))}
           <div ref={messagesEndRef} />

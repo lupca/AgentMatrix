@@ -5,11 +5,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { api } from '../lib/api';
 import { useTaskEvents, type UseTaskEventsResult } from './useTaskEvents';
+import { useWebSocket } from './useWebSocket';
 
 vi.mock('../lib/api', () => ({
   api: {
     get: vi.fn(),
   },
+}));
+
+vi.mock('./useWebSocket', () => ({
+  useWebSocket: vi.fn(),
 }));
 
 describe('useTaskEvents', () => {
@@ -121,5 +126,46 @@ describe('useTaskEvents', () => {
     expect(secondUrl.searchParams.get('since')).toBe(
       '2026-07-28T09:59:30.000Z',
     );
+  });
+
+  it('receives a claimed decision over WS without changing the polling cursor', async () => {
+    vi.mocked(api.get).mockResolvedValue({
+      events: [],
+      cursor: '2026-07-28T09:59:45.000Z',
+      has_more: false,
+    });
+
+    act(() => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Probe />
+        </QueryClientProvider>,
+      );
+    });
+    await flush();
+
+    const websocketHandler = vi.mocked(useWebSocket).mock.calls.at(-1)?.[0];
+    expect(websocketHandler).toBeTypeOf('function');
+
+    act(() => {
+      websocketHandler?.({
+        type: 'decision-claimed',
+        payload: {
+          task_id: 'CTV2-999',
+          claimed_by_session_id: 'session-B',
+          claimed_by_session_name: 'Session B',
+          event_id: 77,
+        },
+      });
+    });
+
+    expect(result?.latestDecisionToast).toEqual({
+      taskId: 'CTV2-999',
+      claimedBySessionId: 'session-B',
+      claimedBySessionLabel: 'Session B',
+      eventId: 77,
+    });
+    expect(result?.cursor).toBe('2026-07-28T09:59:45.000Z');
+    expect(api.get).toHaveBeenCalledTimes(1);
   });
 });
