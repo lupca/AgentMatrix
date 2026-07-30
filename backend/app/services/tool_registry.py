@@ -595,6 +595,13 @@ def get_group_tool_definitions(group: str) -> list[dict[str, Any]] | None:
     return to_openai_tools(deferred)
 
 
+def get_group_for_tool(tool_name: str) -> str | None:
+    """Return the deferred group containing ``tool_name``, if any."""
+
+    spec = get_spec(tool_name)
+    return spec.group if spec is not None and spec.tier == "deferred" else None
+
+
 def get_mcp_tool_specs() -> list[ToolSpec]:
     """Tools exposed over the MCP projection for the coordinator chat CLI
     (ADR-001 §D5).

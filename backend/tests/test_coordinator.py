@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from unittest.mock import patch
 
 import pytest
 
-from app.db.models import LLMUsage, Session
+from app.db.models import Agent, LLMUsage, Session, Task
 from app.services.coordinator import (
     CoordinatorService,
 )
 from app.services.llm_client import UsageCounts
 from app.services.providers import ProviderResponse
+from app.services.task_orchestration import TaskOrchestrationService
 
 
 @dataclass
@@ -108,6 +111,39 @@ def _service(db_session, openai, **kwargs):
         retry_base_seconds=0,
         **kwargs,
     )
+
+
+def _pending_dispatch_gate(db_session, task_id: str):
+    db_session.add(
+        Agent(
+            id=f"@agent-{task_id.lower()}",
+            name=f"Agent {task_id}",
+            role="executor",
+            cli="codex",
+        )
+    )
+    db_session.add(
+        Task(
+            id=task_id,
+            project=f"missing-project-{task_id.lower()}",
+            title=f"Task {task_id}",
+            status="todo",
+            mode="supervised",
+            acceptance_criteria=["Tests pass"],
+        )
+    )
+    db_session.commit()
+
+    with patch(
+        "app.services.task_orchestration.build_dispatch_command",
+        return_value=("codex exec task", "/tmp", "codex"),
+    ):
+        return TaskOrchestrationService(db_session).request_dispatch(
+            task_id=task_id,
+            agent_id=f"@agent-{task_id.lower()}",
+            actor="@operator",
+            idempotency_key=f"dispatch-{task_id.lower()}",
+        ).gate_record
 
 
 @pytest.mark.asyncio
@@ -235,13 +271,24 @@ async def test_transient_failure_retries_without_duplicate_user_message(db_sessi
 
 
 @pytest.mark.asyncio
-async def test_load_tools_expands_active_set_for_turn_then_resets(db_session):
+async def test_loaded_tool_group_persists_across_turns(db_session):
+    gate_record = _pending_dispatch_gate(db_session, "PERSIST-1")
     script_turn1 = [
         {"tool_calls": [{"id": "c1", "name": "load_tools", "input": {"group": "task_lifecycle"}}]},
-        {"tool_calls": [{"id": "c2", "name": "dispatch_task", "input": {"task_id": "NOPE-1"}}]},
-        {"text": "Done."},
+        {"text": "Tools loaded."},
     ]
-    script_turn2 = [{"text": "Second turn, baseline only."}]
+    script_turn2 = [
+        {
+            "tool_calls": [
+                {
+                    "id": "c2",
+                    "name": "approve_gate",
+                    "input": {"gate_record_id": gate_record.id},
+                }
+            ]
+        },
+        {"text": "Approved."},
+    ]
     provider = _ScriptedToolProvider("openai", script_turn1 + script_turn2)
     service = _service(db_session, provider)
     session = Session(id="session-load-tools", messages=[])
@@ -250,41 +297,56 @@ async def test_load_tools_expands_active_set_for_turn_then_resets(db_session):
 
     result = await service.complete_turn(
         session,
-        "please dispatch NOPE-1",
+        "load task lifecycle tools",
         model="gpt-4o",
         idempotency_key="turn-1",
     )
-    assert result.content == "Done."
+    assert result.content == "Tools loaded."
 
     baseline_names = {t["name"] for t in provider.calls[0]["tools"]}
     assert baseline_names == {"create_task", "get_status", "query_db", "load_tools"}
 
     expanded_names = {t["name"] for t in provider.calls[1]["tools"]}
-    assert "dispatch_task" in expanded_names
+    assert "approve_gate" in expanded_names
     assert expanded_names >= baseline_names
+    assert session.state_payload["loaded_tool_groups"] == ["task_lifecycle"]
 
-    # dispatch_task reached the handler (not blocked by the not-loaded gate);
-    # it errors because the task doesn't exist, not because it wasn't loaded.
-    tool_messages = [m for m in session.messages if m.get("name") == "dispatch_task"]
+    with patch("app.workers.agent_runner.run_agent.send"):
+        result = await service.complete_turn(
+            session,
+            "approve the pending gate",
+            model="gpt-4o",
+            idempotency_key="turn-2",
+        )
+    assert result.content == "Approved."
+
+    turn2_names = {t["name"] for t in provider.calls[2]["tools"]}
+    assert turn2_names == baseline_names | {
+        "dispatch_task", "record_verdict", "approve_gate", "cancel_task",
+        "request_review", "generate_spec_plan", "update_task",
+    }
+    tool_messages = [m for m in session.messages if m.get("name") == "approve_gate"]
     assert len(tool_messages) == 1
+    approval = json.loads(tool_messages[0]["content"])
+    assert approval["action"] == "gate_decision"
+    assert approval["decision"] == "approved"
     assert "not loaded" not in tool_messages[0]["content"]
-    assert "not found" in tool_messages[0]["content"]
-
-    await service.complete_turn(
-        session,
-        "second turn",
-        model="gpt-4o",
-        idempotency_key="turn-2",
-    )
-    turn2_names = {t["name"] for t in provider.calls[-1]["tools"]}
-    assert turn2_names == baseline_names
 
 
 @pytest.mark.asyncio
-async def test_deferred_tool_without_load_tools_returns_guidance_not_crash(db_session):
+async def test_deferred_tool_without_load_tools_auto_loads_and_executes(db_session):
+    gate_record = _pending_dispatch_gate(db_session, "AUTOLOAD-1")
     script = [
-        {"tool_calls": [{"id": "c1", "name": "dispatch_task", "input": {"task_id": "X-1"}}]},
-        {"text": "Understood, let me load the right tools first."},
+        {
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "name": "approve_gate",
+                    "input": {"gate_record_id": gate_record.id},
+                }
+            ]
+        },
+        {"text": "Approved in one iteration."},
     ]
     provider = _ScriptedToolProvider("openai", script)
     service = _service(db_session, provider)
@@ -292,22 +354,26 @@ async def test_deferred_tool_without_load_tools_returns_guidance_not_crash(db_se
     db_session.add(session)
     db_session.commit()
 
-    result = await service.complete_turn(
-        session,
-        "dispatch X-1",
-        model="gpt-4o",
-        idempotency_key="turn-1",
-    )
+    with patch("app.workers.agent_runner.run_agent.send"):
+        result = await service.complete_turn(
+            session,
+            "approve the pending gate",
+            model="gpt-4o",
+            idempotency_key="turn-1",
+        )
 
-    assert result.content == "Understood, let me load the right tools first."
-    tool_messages = [m for m in session.messages if m.get("name") == "dispatch_task"]
+    assert result.content == "Approved in one iteration."
+    tool_messages = [m for m in session.messages if m.get("name") == "approve_gate"]
     assert len(tool_messages) == 1
-    assert "load_tools" in tool_messages[0]["content"]
-    assert "not loaded" in tool_messages[0]["content"]
+    approval = json.loads(tool_messages[0]["content"])
+    assert approval["action"] == "gate_decision"
+    assert approval["decision"] == "approved"
+    assert "not loaded" not in tool_messages[0]["content"]
+    assert session.state_payload["loaded_tool_groups"] == ["task_lifecycle"]
 
 
 @pytest.mark.asyncio
-async def test_stream_turn_load_tools_expands_active_set_then_resets(db_session):
+async def test_stream_turn_loaded_tools_persist_across_turns(db_session):
     script_turn1 = [
         {"tool_calls": [{"id": "c1", "name": "load_tools", "input": {"group": "task_lifecycle"}}]},
         {"tool_calls": [{"id": "c2", "name": "dispatch_task", "input": {"task_id": "NOPE-1"}}]},
@@ -346,7 +412,10 @@ async def test_stream_turn_load_tools_expands_active_set_then_resets(db_session)
     ):
         pass
     turn2_names = {t["name"] for t in provider.calls[-1]["tools"]}
-    assert turn2_names == baseline_names
+    assert turn2_names == baseline_names | {
+        "dispatch_task", "record_verdict", "approve_gate", "cancel_task",
+        "request_review", "generate_spec_plan", "update_task",
+    }
 
 
 def test_context_budget_keeps_newest_turns_and_system_prefix(db_session):

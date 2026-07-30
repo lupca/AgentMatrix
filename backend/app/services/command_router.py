@@ -44,6 +44,7 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
     "tasks": {
         "model": Task,
         "filters": {
+            "id": "str",
             "status": "str",
             "project": "str",
             "executor": "str",
@@ -65,7 +66,7 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
     },
     "projects": {
         "model": Project,
-        "filters": {"status": "str"},
+        "filters": {"id": "str", "status": "str"},
         "order_by": Project.id.asc(),
         "serialize": lambda p: {
             "id": p.id,
@@ -76,6 +77,7 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
     "agents": {
         "model": Agent,
         "filters": {
+            "id": "str",
             "role": "str",
             "status": "str",
             "agent_type": "str",
@@ -96,6 +98,7 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
     "sessions": {
         "model": SessionModel,
         "filters": {
+            "id": "str",
             "status": "str",
             "context_level": "str",
             "project_id": "str",
@@ -114,7 +117,7 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
     },
     "knowledge": {
         "model": KnowledgeItem,
-        "filters": {"category": "str", "project": "str", "author": "str"},
+        "filters": {"id": "str", "category": "str", "project": "str", "author": "str"},
         "order_by": KnowledgeItem.updated_at.desc(),
         "serialize": lambda k: {
             "id": k.id,
@@ -126,6 +129,7 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
     "usage": {
         "model": LLMUsage,
         "filters": {
+            "id": "str",
             "session_id": "str",
             "task_id": "str",
             "operation": "str",
@@ -144,7 +148,7 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
     },
     "settings": {
         "model": Setting,
-        "filters": {},
+        "filters": {"id": "str"},
         "order_by": Setting.key.asc(),
         "serialize": lambda s: {
             "key": s.key,
@@ -182,6 +186,36 @@ HELP_COMMAND = {
 class CommandRouter:
     def __init__(self, db_session):
         self.db = db_session
+
+    def _task_snapshot(self, task: Task) -> dict[str, Any]:
+        return {
+            'id': task.id,
+            'status': task.status,
+            'current_gate': task.current_gate,
+            'awaiting_approval': bool(task.awaiting_approval),
+            'approval_prompt': task.approval_prompt,
+            'executor': task.executor,
+            'reviewer': task.reviewer,
+            'error': task.error,
+        }
+
+    def _pending_gate(self, task_id: str) -> GateRecord | None:
+        """Return the newest pending gate that has not been decided."""
+
+        decided_parent_ids = (
+            self.db.query(GateRecord.parent_id)
+            .filter(GateRecord.parent_id.isnot(None))
+        )
+        return (
+            self.db.query(GateRecord)
+            .filter(
+                GateRecord.task_id == task_id,
+                GateRecord.status == 'pending',
+                GateRecord.id.notin_(decided_parent_ids),
+            )
+            .order_by(GateRecord.id.desc())
+            .first()
+        )
     
     def parse(self, message: str) -> Tuple[Optional[str], str]:
         message = message.strip()
@@ -464,7 +498,11 @@ class CommandRouter:
         model = entity_spec['model']
         query = with_archived(self.db, model, include_archived) if hasattr(model, 'archived_at') else self.db.query(model)
         for key, value in filters.items():
-            query = query.filter(getattr(model, key) == value)
+            column = getattr(model, key, None)
+            if column is None and key == 'id':
+                column = getattr(model, 'key', None)
+            if column is not None:
+                query = query.filter(column == value)
         rows = query.order_by(entity_spec['order_by']).offset(offset).limit(limit).all()
 
         return {
@@ -631,6 +669,7 @@ class CommandRouter:
                 'task_id': task_id,
                 'gate_record_id': result.gate_record.id,
                 'status': 'pending',
+                'task': self._task_snapshot(result.task),
             }
 
         run = result.agent_run
@@ -653,9 +692,12 @@ class CommandRouter:
                 actor='system:dispatch-queue',
                 idempotency_key=f'{result.gate_record.idempotency_key}:queue-failure',
             )
-            return {'error': error, 'run_id': run.id}
+            self.db.refresh(task)
+            return {'error': error, 'run_id': run.id, 'task': self._task_snapshot(task)}
         
-        return {'action': 'dispatched', 'task_id': task_id, 'run_id': run.id, 'agent': agent_id}
+        self.db.refresh(task)
+        return {'action': 'dispatched', 'task_id': task_id, 'run_id': run.id, 'agent': agent_id,
+                'task': self._task_snapshot(task)}
 
     async def _handle_request_review(self, args: str, session_id: str) -> dict:
         from app.workers.agent_runner import run_agent
@@ -708,6 +750,7 @@ class CommandRouter:
                 'task_id': task_id,
                 'gate_record_id': result.gate_record.id,
                 'status': 'pending',
+                'task': self._task_snapshot(result.task),
             }
 
         run = result.agent_run
@@ -730,13 +773,15 @@ class CommandRouter:
                 actor='system:dispatch-queue',
                 idempotency_key=f'{result.gate_record.idempotency_key}:queue-failure',
             )
-            return {'error': error, 'run_id': run.id}
+            self.db.refresh(task)
+            return {'error': error, 'run_id': run.id, 'task': self._task_snapshot(task)}
 
         return {
             'action': 'review_requested',
             'task_id': task_id,
             'run_id': run.id,
             'reviewer': reviewer,
+            'task': self._task_snapshot(task),
         }
 
     async def _handle_generate_spec_plan(self, args: str, session_id: str) -> dict:
@@ -839,7 +884,9 @@ class CommandRouter:
         except OrchestrationError as exc:
             return {'error': str(exc)}
         publish_status(run.id, 'cancelled', error=run.error_message)
-        return {'action': 'cancelled', 'task_id': task_id, 'run_id': run.id, 'status': 'cancelled'}
+        self.db.refresh(task)
+        return {'action': 'cancelled', 'task_id': task_id, 'run_id': run.id, 'status': 'cancelled',
+                'task': self._task_snapshot(task)}
 
     async def _handle_verdict(self, args: str, session_id: str) -> dict:
         parts = args.strip().split(maxsplit=2)
@@ -885,6 +932,7 @@ class CommandRouter:
             'new_status': result.task.status,
             'decision_status': result.status,
             'gate_record_id': result.gate_record.id,
+            'task': self._task_snapshot(result.task),
         }
 
     async def _handle_approve_gate(self, args: str, session_id: str) -> dict:
@@ -952,13 +1000,15 @@ class CommandRouter:
                         f'{result.gate_record.idempotency_key}:queue-failure'
                     ),
                 )
-                return {'error': error, 'run_id': run.id}
+                self.db.refresh(result.task)
+                return {'error': error, 'run_id': run.id, 'task': self._task_snapshot(result.task)}
         return {
             'action': 'gate_decision',
             'task_id': result.task.id,
             'decision': result.status,
             'new_status': result.task.status,
             'run_id': run.id if run is not None else None,
+            'task': self._task_snapshot(result.task),
         }
 
     async def _decide_admin_gate(
@@ -1225,6 +1275,7 @@ class CommandRouter:
             if not task:
                 task = self.db.query(Task).filter(Task.id.ilike(f"%{target_id}%")).first()
             if task:
+                pending = self._pending_gate(task.id)
                 return {
                     'status': 'success',
                     'task': {
@@ -1236,7 +1287,13 @@ class CommandRouter:
                         'executor': task.executor,
                         'reviewer': task.reviewer,
                         'mode': task.mode,
-                        'awaiting_approval': task.awaiting_approval,
+                        'awaiting_approval': bool(pending) or bool(task.awaiting_approval),
+                        'approval_prompt': task.approval_prompt,
+                        'pending_gate': {
+                            'gate_record_id': pending.id,
+                            'gate_type': pending.gate_type,
+                            'created_at': pending.created_at.isoformat() if pending.created_at else None,
+                        } if pending else None,
                         'error': task.error,
                     }
                 }
@@ -1252,6 +1309,7 @@ class CommandRouter:
                     task = self.db.query(Task).filter(Task.id == db_session.task_id).first()
             
             if task:
+                pending = self._pending_gate(task.id)
                 return {
                     'status': 'success',
                     'task': {
@@ -1263,7 +1321,13 @@ class CommandRouter:
                         'executor': task.executor,
                         'reviewer': task.reviewer,
                         'mode': task.mode,
-                        'awaiting_approval': task.awaiting_approval,
+                        'awaiting_approval': bool(pending) or bool(task.awaiting_approval),
+                        'approval_prompt': task.approval_prompt,
+                        'pending_gate': {
+                            'gate_record_id': pending.id,
+                            'gate_type': pending.gate_type,
+                            'created_at': pending.created_at.isoformat() if pending.created_at else None,
+                        } if pending else None,
                         'error': task.error,
                     }
                 }

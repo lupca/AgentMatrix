@@ -683,6 +683,149 @@ async def test_query_db_filters_rows_and_caps_limit(db_session):
 
 
 @pytest.mark.asyncio
+async def test_query_db_filters_tasks_by_exact_id(db_session):
+    from app.db.models import Project, Task
+
+    db_session.add(Project(id="proj-id-filter", name="ID Filter Project"))
+    db_session.add_all(
+        [
+            Task(
+                id=f"TASK-ID-{index}",
+                project="proj-id-filter",
+                title=f"Task {index}",
+                status="todo",
+            )
+            for index in range(1, 4)
+        ]
+    )
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    found = await router.execute_tool(
+        "query_db",
+        {"entity": "tasks", "filters": {"id": "TASK-ID-2"}},
+        "session-1",
+    )
+    missing = await router.execute_tool(
+        "query_db",
+        {"entity": "tasks", "filters": {"id": "TASK-ID-404"}},
+        "session-1",
+    )
+
+    assert found["count"] == 1
+    assert found["rows"] == [
+        {
+            "id": "TASK-ID-2",
+            "title": "Task 2",
+            "status": "todo",
+            "project": "proj-id-filter",
+            "executor": None,
+            "reviewer": None,
+            "current_gate": "spec",
+        }
+    ]
+    assert missing["status"] == "success"
+    assert missing["count"] == 0
+    assert missing["rows"] == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_supervised_returns_post_mutation_task_snapshot(db_session):
+    from app.db.models import Agent, Task
+
+    db_session.add(Agent(id="@snapshot-agent", name="Snapshot Agent", role="executor", cli="codex"))
+    db_session.add(
+        Task(
+            id="SNAPSHOT-1",
+            project="missing-snapshot-project",
+            title="Snapshot task",
+            status="todo",
+            mode="supervised",
+            acceptance_criteria=["Tests pass"],
+        )
+    )
+    db_session.commit()
+
+    with patch(
+        "app.services.task_orchestration.build_dispatch_command",
+        return_value=("codex exec task", "/tmp", "codex"),
+    ):
+        result = await CommandRouter(db_session).execute_tool(
+            "dispatch_task",
+            {"task_id": "SNAPSHOT-1", "executor": "@snapshot-agent"},
+            "session-1",
+        )
+
+    task = db_session.get(Task, "SNAPSHOT-1")
+    assert result["action"] == "dispatch_pending"
+    assert result["task"] == {
+        "id": task.id,
+        "status": task.status,
+        "current_gate": task.current_gate,
+        "awaiting_approval": True,
+        "approval_prompt": task.approval_prompt,
+        "executor": task.executor,
+        "reviewer": task.reviewer,
+        "error": task.error,
+    }
+    assert task.awaiting_approval is True
+
+
+@pytest.mark.asyncio
+async def test_get_status_reports_only_unresolved_pending_gate(db_session):
+    from app.db.models import Agent, Task
+
+    db_session.add(Agent(id="@status-agent", name="Status Agent", role="executor", cli="codex"))
+    db_session.add(
+        Task(
+            id="STATUS-GATE-1",
+            project="missing-status-project",
+            title="Status gate task",
+            status="todo",
+            mode="supervised",
+            acceptance_criteria=["Tests pass"],
+        )
+    )
+    db_session.commit()
+    router = CommandRouter(db_session)
+
+    with patch(
+        "app.services.task_orchestration.build_dispatch_command",
+        return_value=("codex exec task", "/tmp", "codex"),
+    ):
+        pending = await router.execute_tool(
+            "dispatch_task",
+            {"task_id": "STATUS-GATE-1", "executor": "@status-agent"},
+            "session-1",
+        )
+
+    before = await router.execute_tool(
+        "get_status", {"task_id": "STATUS-GATE-1"}, "session-1"
+    )
+    assert before["task"]["awaiting_approval"] is True
+    assert before["task"]["pending_gate"] == {
+        "gate_record_id": pending["gate_record_id"],
+        "gate_type": "dispatch",
+        "created_at": before["task"]["pending_gate"]["created_at"],
+    }
+    assert before["task"]["pending_gate"]["created_at"] is not None
+
+    with patch("app.workers.agent_runner.run_agent.send"):
+        approval = await router.execute_tool(
+            "approve_gate",
+            {"gate_record_id": pending["gate_record_id"]},
+            "session-1",
+        )
+    assert approval["decision"] == "approved"
+
+    after = await router.execute_tool(
+        "get_status", {"task_id": "STATUS-GATE-1"}, "session-1"
+    )
+    assert after["task"]["pending_gate"] is None
+    assert after["task"]["awaiting_approval"] is False
+
+
+@pytest.mark.asyncio
 async def test_query_db_via_tool_call_matches_slash_command(db_session):
     from app.db.models import Project, Task
 

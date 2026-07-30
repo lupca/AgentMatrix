@@ -26,7 +26,12 @@ from app.services.cli_dispatcher import (
 )
 from app.services.context_hierarchy import ContextHierarchy, drop_orphan_tool_pairs
 from app.services.command_router import CommandRouter
-from app.services.tool_registry import get_group_tool_definitions, get_spec, resolve_tool_name
+from app.services.tool_registry import (
+    get_group_for_tool,
+    get_group_tool_definitions,
+    get_spec,
+    resolve_tool_name,
+)
 from app.graph.context import invalidate_context_snapshot
 from app.services.providers import CoordinatorProvider, ProviderResponse
 from app.services.providers.cli_provider import CLIProvider
@@ -521,16 +526,15 @@ class CoordinatorService:
         self,
         tool_calls: list[dict[str, Any]],
         db_session: SessionModel,
+        active_tools: list[dict[str, Any]],
         active_tool_names: set[str],
         *,
         duplicate_call_ids: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Execute normalized adapter tool calls and return OpenAI messages.
 
-        Deferred tools not yet loaded into ``active_tool_names`` for this
-        turn (via ``load_tools``) are rejected with a guiding error instead
-        of executed, so a model that calls one before loading its group
-        gets a recoverable message rather than a crashed loop.
+        Deferred tools are loaded on demand when the model calls one before
+        explicitly loading its group, avoiding an unnecessary retry turn.
 
         Pre-emptive duplicate detection: calls whose IDs appear in
         ``duplicate_call_ids`` return a DUPLICATE_CALL error instead of
@@ -557,12 +561,19 @@ class CoordinatorService:
                     ),
                 }
             elif spec is not None and spec.tier == "deferred" and canonical_name not in active_tool_names:
-                result = {
-                    "error": (
-                        f"Tool '{name}' is not loaded for this turn. Call "
-                        f"load_tools(group=\"{spec.group}\") first, then retry."
+                group = get_group_for_tool(canonical_name)
+                if group is None:
+                    result = {"error": f"Unknown deferred tool: {name}"}
+                else:
+                    self._load_tool_group(
+                        db_session, group, active_tools=active_tools, active_tool_names=active_tool_names
                     )
-                }
+                    logger.info("auto-loaded group %s for tool %s", group, canonical_name)
+                    result = await router.execute_tool(
+                        name,
+                        self._tool_arguments(tool_call),
+                        db_session.id,
+                    )
             else:
                 result = await router.execute_tool(
                     name,
@@ -579,11 +590,40 @@ class CoordinatorService:
             )
         return results
 
+    def _load_tool_group(
+        self,
+        db_session: SessionModel,
+        group: str,
+        active_tools: list[dict[str, Any]] | None,
+        active_tool_names: set[str],
+    ) -> None:
+        """Load a deferred group into the current turn and persist it."""
+
+        definitions = get_group_tool_definitions(group)
+        if definitions is None:
+            return
+        if active_tools is not None:
+            for schema in definitions:
+                if schema["name"] not in active_tool_names:
+                    active_tools.append(schema)
+                    active_tool_names.add(schema["name"])
+        else:
+            active_tool_names.update(schema["name"] for schema in definitions)
+
+        state = dict(db_session.state_payload or {})
+        groups = list(state.get("loaded_tool_groups") or [])
+        if group not in groups:
+            groups.append(group)
+            state["loaded_tool_groups"] = groups
+            db_session.state_payload = state
+            self.db.commit()
+
     def _merge_loaded_tools(
         self,
         active_tools: list[dict[str, Any]],
         active_tool_names: set[str],
         tool_calls: list[dict[str, Any]],
+        db_session: SessionModel,
     ) -> None:
         """Fold groups requested via ``load_tools`` into this turn's active set.
 
@@ -597,10 +637,7 @@ class CoordinatorService:
             if resolve_tool_name(str(tool_call.get("name", ""))) != "load_tools":
                 continue
             group = str(self._tool_arguments(tool_call).get("group", "")).strip()
-            for schema in get_group_tool_definitions(group) or []:
-                if schema["name"] not in active_tool_names:
-                    active_tools.append(schema)
-                    active_tool_names.add(schema["name"])
+            self._load_tool_group(db_session, group, active_tools, active_tool_names)
 
     def _persist_tool_exchange(
         self,
@@ -854,6 +891,8 @@ class CoordinatorService:
             tool_activity = False
             active_tools = ctx.get_tool_definitions()
             active_tool_names = {tool["name"] for tool in active_tools}
+            for group in (db_session.state_payload or {}).get("loaded_tool_groups", []):
+                self._load_tool_group(db_session, group, active_tools, active_tool_names)
             for attempt in range(self.max_retries + 1):
                 try:
                     if getattr(agent.agent_type, "value", agent.agent_type) == "api":
@@ -937,11 +976,12 @@ class CoordinatorService:
                                 }
                             )
                             self._merge_loaded_tools(
-                                active_tools, active_tool_names, response.tool_calls
+                                active_tools, active_tool_names, response.tool_calls, db_session
                             )
                             tool_results = await self._execute_tools(
                                 response.tool_calls,
                                 db_session,
+                                active_tools,
                                 active_tool_names,
                                 duplicate_call_ids=duplicate_call_ids,
                             )
@@ -1104,6 +1144,8 @@ class CoordinatorService:
             tool_activity = False
             active_tools = ctx.get_tool_definitions()
             active_tool_names = {tool["name"] for tool in active_tools}
+            for group in (db_session.state_payload or {}).get("loaded_tool_groups", []):
+                self._load_tool_group(db_session, group, active_tools, active_tool_names)
             for attempt in range(self.max_retries + 1):
                 response: ProviderResponse | None = None
                 try:
@@ -1189,7 +1231,7 @@ class CoordinatorService:
                                 }
                             )
                             self._merge_loaded_tools(
-                                active_tools, active_tool_names, response.tool_calls
+                                active_tools, active_tool_names, response.tool_calls, db_session
                             )
                             for position, tool_call in enumerate(response.tool_calls):
                                 yield {
@@ -1203,6 +1245,7 @@ class CoordinatorService:
                             tool_results = await self._execute_tools(
                                 response.tool_calls,
                                 db_session,
+                                active_tools,
                                 active_tool_names,
                                 duplicate_call_ids=duplicate_call_ids,
                             )
