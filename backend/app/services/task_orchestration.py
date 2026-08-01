@@ -259,6 +259,7 @@ class TaskOrchestrationService:
                 agent,
                 project,
                 effort=resolved_effort,
+                db=self.db,
             )
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc
@@ -395,6 +396,7 @@ class TaskOrchestrationService:
                 project,
                 base_ref,
                 head_ref,
+                db=self.db,
             )
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc

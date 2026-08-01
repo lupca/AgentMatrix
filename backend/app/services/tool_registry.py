@@ -710,6 +710,49 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             required_role="executor",
         ),
         ToolSpec(
+            name="save_project_context",
+            description=(
+                "Save generated project context (context_md) and up to 5 scoped "
+                "rules for a project. Used after scanning a repo to persist "
+                "conventions/boundaries that get injected into future dispatch "
+                "and review prompts."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project_id": {"type": "string", "description": "Project id"},
+                    "context_md": {
+                        "type": "string",
+                        "description": "Markdown project context, max 150 lines",
+                    },
+                    "rules": {
+                        "type": "array",
+                        "description": "Up to 5 scoped rules",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "globs": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "content": {"type": "string"},
+                            },
+                            "required": ["name", "content"],
+                        },
+                    },
+                },
+                "required": ["project_id", "context_md"],
+            },
+            handler="save_project_context",
+            tier="deferred",
+            permission="write",
+            entity="projects",
+            slash_alias=None,
+            group="task_lifecycle",
+            required_role="executor",
+        ),
+        ToolSpec(
             name="load_tools",
             description=(
                 "Load additional tool schemas for the rest of this turn. Call "
