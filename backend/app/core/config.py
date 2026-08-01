@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     MCP_API_TOKEN: str = ""
     MCP_TOKEN_SECRET: str = ""
     MCP_NATIVE_URL: str = "http://localhost:8100/mcp"
+    MCP_NATIVE_ENABLED: bool = False
     CT_API_URL: str = "http://localhost:8000"
 
     class Config:

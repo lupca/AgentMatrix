@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.services.process_manager import ProcessManager, ProcessResult, ProcessStatus
+from app.core.config import settings
 
 
 SUPPORTED_CLIS = {"agy", "claude", "codex"}
@@ -234,7 +235,9 @@ def write_instruction_files(workspace: str, source_path: str | None = None) -> d
     return written
 
 
-def write_mcp_config(api_url: str, token: str) -> str:
+def write_mcp_config(
+    api_url: str, token: str, *, native_url: str | None = None, role: str = "coordinator"
+) -> str:
     """Write a one-shot MCP config file for a single CLI spawn.
 
     Every coordinator chat turn starts a fresh CLI process (see module
@@ -246,7 +249,7 @@ def write_mcp_config(api_url: str, token: str) -> str:
     fd, path = tempfile.mkstemp(prefix="ct-mcp-", suffix=".json")
     try:
         with os.fdopen(fd, "w") as fh:
-            json.dump(build_mcp_config(api_url, token), fh)
+            json.dump(build_mcp_config(api_url, token, native_url=native_url, role=role), fh)
     except BaseException:
         os.unlink(path)
         raise
@@ -304,9 +307,18 @@ class CLIDispatcher:
         async generator forwards each output item to the event loop.
         """
 
-        mcp_config_path = (
-            write_mcp_config(self.api_url, self.mcp_token) if self.mcp_token else None
-        )
+        native_url = settings.MCP_NATIVE_URL if settings.MCP_NATIVE_ENABLED else None
+        if self.mcp_token:
+            mcp_config_path = (
+                write_mcp_config(
+                    self.api_url, self.mcp_token, native_url=native_url,
+                    role="coordinator",
+                )
+                if native_url
+                else write_mcp_config(self.api_url, self.mcp_token)
+            )
+        else:
+            mcp_config_path = None
         command = build_cli_command(cli, model, prompt, mcp_config_path)
         process_manager = self._new_process_manager()
         loop = asyncio.get_running_loop()

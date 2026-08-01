@@ -3,13 +3,63 @@
 from __future__ import annotations
 
 import os
+import json
 import shlex
+import tempfile
 from typing import Optional
 
 from app.db.models import Agent, Project, Task
+from app.core.config import settings
+from app.services.cli_dispatcher import build_mcp_config
 
 SUPPORTED_CLIS = {"agy", "codex", "claude"}
 _EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
+
+
+def _native_mcp_config(task_id: str, role: str) -> str | None:
+    """Create a short-lived CLI config when native MCP is enabled.
+
+    The executor token is scoped to the task. The shell trap in
+    :func:`_attach_mcp_config` removes the config after the CLI exits.
+    """
+
+    if not settings.MCP_NATIVE_ENABLED:
+        return None
+    if not settings.MCP_TOKEN_SECRET:
+        raise ValueError("MCP_TOKEN_SECRET is required when native MCP is enabled")
+    # Lazy import avoids the command_builder -> CommandRouter -> command_builder
+    # import cycle during application startup.
+    from app.mcp_native import issue_token
+
+    token = issue_token(settings.MCP_TOKEN_SECRET, role=role, task_id=task_id)
+    handle = tempfile.NamedTemporaryFile(
+        prefix="ct-mcp-", suffix=".json", mode="w", encoding="utf-8", delete=False
+    )
+    try:
+        with handle:
+            json.dump(
+                build_mcp_config(
+                    settings.CT_API_URL,
+                    token,
+                    native_url=settings.MCP_NATIVE_URL,
+                    role=role,
+                ),
+                handle,
+            )
+        os.chmod(handle.name, 0o600)
+        return handle.name
+    except BaseException:
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+        raise
+
+
+def _attach_mcp_config(command: str, config_path: str | None) -> str:
+    if not config_path:
+        return command
+    return f"trap 'rm -f -- {config_path}' EXIT; {command}"
 
 
 def _model_has_effort_suffix(model: str | None) -> bool:
@@ -49,12 +99,15 @@ def build_dispatch_command(
     resolved_effort = effort or agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
     prompt = _task_prompt(task, review_result_path(repo_root, task.id))
+    mcp_config_path = _native_mcp_config(task.id, "executor")
     if cli == "codex":
         argv = ["codex", "exec"]
         if agent.model:
             argv.extend(["-m", agent.model])
         if not model_has_effort:
             argv.extend(["-c", f"model_reasoning_effort={resolved_effort}"])
+        if mcp_config_path:
+            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["--dangerously-bypass-approvals-and-sandbox", prompt])
     elif cli == "claude":
         argv = ["claude"]
@@ -62,6 +115,8 @@ def build_dispatch_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
+        if mcp_config_path:
+            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
     else:
         argv = ["agy"]
@@ -69,9 +124,11 @@ def build_dispatch_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
+        if mcp_config_path:
+            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["--print", prompt, "--dangerously-skip-permissions"])
 
-    return shlex.join(argv), repo_root, cli
+    return _attach_mcp_config(shlex.join(argv), mcp_config_path), repo_root, cli
 
 
 def build_review_command(
@@ -108,6 +165,7 @@ def build_review_command(
     prompt = _review_prompt(
         task, base_ref, head_ref, review_result_path(repo_root, task.id)
     )
+    mcp_config_path = _native_mcp_config(task.id, "executor")
     resolved_effort = agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
     if cli == "codex":
@@ -116,6 +174,8 @@ def build_review_command(
             argv.extend(["-m", agent.model])
         if not model_has_effort:
             argv.extend(["-c", f"model_reasoning_effort={resolved_effort}"])
+        if mcp_config_path:
+            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["--dangerously-bypass-approvals-and-sandbox", prompt])
     elif cli == "claude":
         argv = ["claude"]
@@ -123,6 +183,8 @@ def build_review_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
+        if mcp_config_path:
+            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
     else:
         argv = ["agy"]
@@ -130,9 +192,11 @@ def build_review_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
+        if mcp_config_path:
+            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["--print", prompt, "--dangerously-skip-permissions"])
 
-    return shlex.join(argv), repo_root, cli
+    return _attach_mcp_config(shlex.join(argv), mcp_config_path), repo_root, cli
 
 
 def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -> str:
