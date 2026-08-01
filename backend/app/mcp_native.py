@@ -241,6 +241,10 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
                 GateRecord.status == "pending",
                 GateRecord.id.notin_(decided_task),
                 Task.archived_at.is_(None),
+                # A gate on a finished task is moot — e.g. the driver's
+                # auto re-dispatch gate orphaned when the replan went a
+                # different way and the task still reached done (CTV2-246).
+                Task.status.notin_(["done", "cancelled"]),
             )
             .order_by(GateRecord.created_at.asc())
             .limit(5)
