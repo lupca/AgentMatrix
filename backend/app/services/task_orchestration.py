@@ -1460,6 +1460,17 @@ class TaskOrchestrationService:
                 raise PrerequisiteError("result_ref is required before review")
             self._require_independent(task.executor, reviewer)
             run_id = str(uuid.uuid4())
+            # A cancelled/failed earlier review keeps its (round, kind,
+            # attempt) slot — uq_agent_runs_round_kind_attempt — so a
+            # re-ordered review must claim the next attempt number, not 1.
+            prior_attempts = (
+                self.db.query(func.coalesce(func.max(AgentRun.attempt), 0))
+                .filter(
+                    AgentRun.task_round_id == task.current_round_id,
+                    AgentRun.kind == "review",
+                )
+                .scalar()
+            )
             run = AgentRun(
                 id=run_id,
                 task_id=task.id,
@@ -1472,6 +1483,7 @@ class TaskOrchestrationService:
                 timeout_seconds=int(payload["timeout_seconds"]),
                 idempotency_key=idempotency_key,
                 task_round_id=task.current_round_id,
+                attempt=int(prior_attempts) + 1,
             )
             self.db.add(run)
             task.reviewer = reviewer
