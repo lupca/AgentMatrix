@@ -1408,3 +1408,60 @@ def test_advance_task_wakes_dependents_when_it_fails(driver_db):
 
     assert outcome == "escalated_missing_ac"
     mocked_advance.send.assert_called_once_with("ADV-DOWN4", "dependency_closed")
+
+
+def _dead_message(run_id="run-001", message_id="msg-dead-1", traceback="boom: RuntimeError"):
+    return {
+        "message_id": message_id,
+        "args": (run_id, "RUN-001", "echo test", "/tmp", 900),
+        "kwargs": {},
+        "options": {"traceback": traceback},
+    }
+
+
+def test_dead_letter_fails_run_and_escalates_task(worker_db):
+    outcome = runner.run_agent_dead_letter.fn(
+        _dead_message(), {"retries": 3, "max_retries": 3}
+    )
+
+    assert outcome == "handled"
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    task = db.get(Task, "RUN-001")
+    assert run.status == "failed"
+    assert "dead-lettered after 3/3 retries" in run.error_message
+    assert "boom: RuntimeError" in run.error_message
+    assert task.status == "todo"
+    db.close()
+
+
+def test_dead_letter_is_idempotent_on_redelivery(worker_db):
+    first = runner.run_agent_dead_letter.fn(
+        _dead_message(), {"retries": 3, "max_retries": 3}
+    )
+    second = runner.run_agent_dead_letter.fn(
+        _dead_message(), {"retries": 3, "max_retries": 3}
+    )
+
+    assert first == "handled"
+    assert second == "discarded_resolved"
+    db = worker_db()
+    assert db.get(AgentRun, "run-001").status == "failed"
+    db.close()
+
+
+def test_dead_letter_ignores_message_for_unknown_run(worker_db):
+    outcome = runner.run_agent_dead_letter.fn(
+        _dead_message(run_id="missing-run"), {"retries": 1, "max_retries": 1}
+    )
+
+    assert outcome == "discarded_orphan"
+
+
+def test_dead_letter_ignores_message_with_no_run_id(worker_db):
+    dead_message = _dead_message()
+    dead_message["args"] = ()
+
+    outcome = runner.run_agent_dead_letter.fn(dead_message, {"retries": 1, "max_retries": 1})
+
+    assert outcome == "discarded_no_run_id"
