@@ -14,6 +14,16 @@ if [[ -z "${MCP_TOKEN_SECRET:-}" ]]; then
 fi
 
 cd "$(dirname "$0")/../backend"
+
+# Use the same interpreter the backend runs with — system python3 lacks fastmcp.
+if [[ -x "venv/bin/python" ]]; then
+  PYTHON="venv/bin/python"
+elif [[ -x "../.venv/bin/python" ]]; then
+  PYTHON="../.venv/bin/python"
+else
+  PYTHON="python3"
+fi
+
 args=(--role "$role")
 if [[ -n "$task_id" ]]; then
   args+=(--task-id "$task_id")
@@ -21,4 +31,4 @@ fi
 if [[ -n "$ttl" ]]; then
   args+=(--ttl "$ttl")
 fi
-PYTHONPATH=. python3 -m app.mcp_native_issue_token "${args[@]}"
+PYTHONPATH=. "$PYTHON" -m app.mcp_native_issue_token "${args[@]}"
