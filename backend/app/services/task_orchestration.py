@@ -518,6 +518,7 @@ class TaskOrchestrationService:
 
         run: AgentRun | None = None
         output_ref: str | None = None
+        self._deferred_landing_event = None
         if effective_decision == "approved":
             run, output_ref = self._apply_gate(
                 task,
@@ -539,9 +540,22 @@ class TaskOrchestrationService:
             error_message=reason,
             parent_id=pending.id,
         )
-        task.awaiting_approval = False
-        task.approval_prompt = None
+        if getattr(self, "_deferred_landing_event", None) is None:
+            task.awaiting_approval = False
+            task.approval_prompt = None
+        elif self._deferred_landing_event[0] == "landed":
+            task.awaiting_approval = False
+            task.approval_prompt = None
         self._audit(task, record, reason=reason)
+        landing_event = getattr(self, "_deferred_landing_event", None)
+        self._deferred_landing_event = None
+        if landing_event is not None:
+            emit_task_event(
+                task_id=task.id,
+                event_type=landing_event[0],
+                payload=landing_event[1],
+                db=self.db,
+            )
         emit_task_event(
             task_id=task.id,
             event_type="gate_passed" if effective_decision == "approved" else "gate_rejected",
@@ -1596,11 +1610,13 @@ class TaskOrchestrationService:
                     )
                     task.error = f"landing_failed: {landing.error}"
                     self._record_verdict_on_round(task, verdict=verdict, now=now)
-                    emit_task_event(
-                        task_id=task.id,
-                        event_type="landing_failed",
-                        payload={"result_ref": task.result_ref, "error": landing.error},
-                        db=self.db,
+                    # emit_task_event COMMITS internally; the deferred
+                    # done-verdict trigger and the not-yet-inserted decision
+                    # row make any mid-apply commit here fatal. decide_gate
+                    # emits this after the ledger record.
+                    self._deferred_landing_event = (
+                        "landing_failed",
+                        {"result_ref": task.result_ref, "error": landing.error},
                     )
                     return None, verdict
                 self._cas_status(task, "done")
@@ -1609,14 +1625,12 @@ class TaskOrchestrationService:
                 task.final_verdict = verdict
                 if landing.landed_ref:
                     task.landed_ref = landing.landed_ref
-                    emit_task_event(
-                        task_id=task.id,
-                        event_type="landed",
-                        payload={
+                    self._deferred_landing_event = (
+                        "landed",
+                        {
                             "landed_ref": landing.landed_ref,
                             "result_ref": task.result_ref,
                         },
-                        db=self.db,
                     )
             else:
                 self._cas_status(task, "changes-requested")
