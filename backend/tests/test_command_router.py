@@ -448,6 +448,100 @@ async def test_request_review_refuses_when_no_independent_reviewer_available(
     assert task.status == "awaiting-review"  # never downgraded to a same-agent reviewer
 
 
+@pytest.mark.asyncio
+async def test_request_review_rejects_disabled_reviewer_with_valid_suggestions(db_session):
+    from app.db.models import Agent, Project, Task
+
+    db_session.add(Project(id="proj-disabled-review", name="Review", repo_root="/tmp"))
+    db_session.add_all([
+        Agent(id="@review-executor", name="Executor", role="executor", cli="codex"),
+        Agent(
+            id="@review-disabled",
+            name="Disabled",
+            role="reviewer",
+            cli="codex",
+            status="disabled",
+        ),
+        Agent(id="@review-valid-1", name="Valid 1", role="reviewer", cli="codex"),
+        Agent(id="@review-valid-2", name="Valid 2", role="reviewer", cli="codex"),
+    ])
+    db_session.add(
+        Task(
+            id="TASK-REV-DISABLED",
+            project="proj-disabled-review",
+            title="Disabled reviewer",
+            status="awaiting-review",
+            mode="supervised",
+            executor="@review-executor",
+            result_ref="base..head",
+        )
+    )
+    db_session.commit()
+
+    result = await CommandRouter(db_session).execute_tool(
+        "request_review",
+        {"task_id": "TASK-REV-DISABLED", "reviewer": "@review-disabled"},
+        "session-1",
+    )
+
+    assert "status 'disabled'" in result["error"]
+    assert "Valid reviewer suggestions:" in result["error"]
+    assert "@review-valid-1" in result["error"]
+    assert "@review-valid-2" in result["error"]
+    assert db_session.get(Task, "TASK-REV-DISABLED").reviewer is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_valid_reviewer_survives_review_gate_approval(db_session):
+    from app.db.models import Agent, GateRecord, Project, Task
+
+    db_session.add(Project(id="proj-explicit-review", name="Review", repo_root="/tmp"))
+    db_session.add_all([
+        Agent(id="@explicit-executor", name="Executor", role="executor", cli="codex"),
+        Agent(id="@explicit-reviewer", name="Reviewer", role="reviewer", cli="codex"),
+    ])
+    db_session.add(
+        Task(
+            id="TASK-REV-EXPLICIT",
+            project="proj-explicit-review",
+            title="Explicit reviewer",
+            status="awaiting-review",
+            mode="supervised",
+            executor="@explicit-executor",
+            result_ref="base..head",
+        )
+    )
+    db_session.commit()
+    router = CommandRouter(db_session)
+
+    pending = await router.execute_tool(
+        "request_review",
+        {"task_id": "TASK-REV-EXPLICIT", "reviewer": "@explicit-reviewer"},
+        "session-1",
+    )
+    gate = db_session.get(GateRecord, pending["gate_record_id"])
+    reason = gate.input_payload["selection_reason"]
+    assert gate.input_payload["reviewer"] == "@explicit-reviewer"
+    assert "Reviewer đề xuất: @explicit-reviewer" in gate.input_payload["approval_prompt"]
+
+    with (
+        patch("app.workers.agent_runner.run_agent.send") as run_send,
+        patch("app.workers.agent_runner.advance_task.send"),
+    ):
+        run_send.return_value = MagicMock(message_id="msg-explicit-review")
+        approved = await router.execute_tool(
+            "approve_gate",
+            {"gate_record_id": gate.id, "decision": "approved"},
+            "session-1",
+        )
+
+    assert approved["reviewer"] == "@explicit-reviewer"
+    assert approved["selection_reason"] == reason
+    task = db_session.get(Task, "TASK-REV-EXPLICIT")
+    assert task.status == "in-review"
+    assert task.reviewer == "@explicit-reviewer"
+
+
 def test_concurrent_dispatch_with_same_idempotency_key_creates_one_run(tmp_path):
     """AC: two concurrent calls with identical args in the same cycle must
     only ever create a single AgentRun, relying on the existing DB

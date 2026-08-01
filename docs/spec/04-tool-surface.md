@@ -17,11 +17,11 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 | `update_task` | Patch cho: `raw_input` (replace semantics), `acceptance_criteria`, `plan`, `priority`, `tags`; dependency edits giữ nguyên. Dùng `raw_input` để ghi câu trả lời human trước khi regenerate spec. KHÔNG nhận files/tests/risk/mode. |
 | `generate_spec_plan` | `{task_id, agent_id}` — chỉ agent CLI; API agent bị từ chối rõ ràng. CLI chạy với `cwd=Project.repo_root` và bắt buộc đọc read-only README/docs/entry points/source liên quan trước khi plan. Prompt nhận FULL raw_input + project context/rules, giữ Scope in/out + bước verb-first + AC objectively-verifiable. Strict output v1.1 bắt buộc `spec_clarity` + `open_questions`; retry 1 lần khi JSON sai. Còn câu hỏi hoặc clarity != high → `spec_questions_pending`, task escalation và approval prompt liệt kê đủ câu hỏi. High + rỗng → clear escalation, `spec_plan_generated`. Mỗi generate ghi metric clarity + question count. |
 | `dispatch_task` | `{task_id, agent_id?}` — đòi status todo + có AC (hoặc legacy_no_ac), đồng thời chặn execute khi `open_questions` còn phần tử. Supervised → gate pending. agent_id bị matcher ghi đè khi approve (CTV2-228). |
-| `request_review` | Chỉ khi awaiting-review VÀ chưa có gate review_order mở (driver thường tạo sẵn — approve cái đó thay vì gọi tool này). |
+| `request_review` | Chỉ khi awaiting-review VÀ chưa có gate review_order mở (driver thường tạo sẵn — approve cái đó thay vì gọi tool này). Reviewer chỉ định được giữ nguyên; nếu không tồn tại/disabled/trùng executor thì fail kèm 2–3 gợi ý hợp lệ, không âm thầm thay. |
 | `record_verdict` | CHỈ reviewer của review run thành công mới được gọi; coordinator không tự verdict hộ. |
 | `approve_gate` | `{gate_record_id | task_id | "admin:<id>", decision: approved|rejected}` — xem 03. |
 | `cancel_task`, `archive_task` | archive lọc khỏi mọi mặt tiền + đóng luôn gate/escalation của nó. |
-| `wait_for_task` | Long-poll (timeout 5–120s, cursor `since_event_id`): trả `{task, changed, events, cursor, latest_run}` ngay khi status đổi / terminal / awaiting_approval / có event mới. Thay cho polling get_status 15s. |
+| `wait_for_task` | Long-poll (timeout 5–120s, cursor `since_event_id`): bỏ cursor → snapshot `MAX(TaskEvent.id)` lúc vào và chỉ event phát sinh sau đó mới đánh thức; cursor tường minh (kể cả `0`) giữ replay semantics cũ. Trả `{task, changed, events, cursor, latest_run}` ngay khi status đổi / terminal / awaiting_approval / có event mới; timeout không đổi trả `changed=false` với effective cursor. Thay cho polling get_status 15s. |
 | `get_status` | Không id → list gần nhất. Báo cáo NGUYÊN VĂN — failed là failed. |
 | `get_task_events`, `get_run_output` | Event cursor / output chunks replayable. |
 

@@ -1123,6 +1123,52 @@ def test_advance_task_awaiting_review_picks_independent_reviewer(driver_db):
     run_agent_mock.send.assert_called_once()
 
 
+def test_advance_task_review_gate_explains_reviewer_selection(driver_db):
+    factory, run_agent_mock = driver_db
+    db = factory()
+    db.add(
+        Agent(
+            id="@disabled-reviewer",
+            name="Disabled Reviewer",
+            role="reviewer",
+            cli="codex",
+            status="disabled",
+            capabilities=["general"],
+        )
+    )
+    db.commit()
+    db.close()
+    _driver_task(
+        factory,
+        "ADV-REVIEW-PROMPT",
+        status="awaiting-review",
+        mode="supervised",
+        executor="@executor",
+        acceptance_criteria=["Tests pass"],
+        result_ref="base123..head456",
+    )
+
+    outcome = runner.advance_task.fn("ADV-REVIEW-PROMPT", "manual")
+
+    assert outcome == "gate_pending"
+    db = factory()
+    task = db.get(Task, "ADV-REVIEW-PROMPT")
+    gate = db.query(GateRecord).filter_by(
+        task_id=task.id, gate_type="review_order", status="pending"
+    ).one()
+    reason = gate.input_payload["selection_reason"]
+    assert gate.input_payload["reviewer"] == "@reviewer"
+    assert "capability match=" in reason
+    assert "success_rate=" in reason
+    assert "@executor (four-eyes)" in reason
+    assert "@disabled-reviewer (disabled)" in reason
+    assert task.approval_prompt == gate.input_payload["approval_prompt"]
+    assert "Reviewer đề xuất: @reviewer" in task.approval_prompt
+    assert reason in task.approval_prompt
+    db.close()
+    run_agent_mock.send.assert_not_called()
+
+
 def test_advance_task_awaiting_review_waits_for_result_ref(driver_db):
     factory, run_agent_mock = driver_db
     _driver_task(

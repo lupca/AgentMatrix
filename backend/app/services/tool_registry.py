@@ -363,7 +363,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                     "task_id": {"type": "string"},
                     "since_event_id": {
                         "type": "integer",
-                        "description": "Event cursor from the previous call; also returns any event newer than this.",
+                        "description": (
+                            "Event cursor from the previous call; returns any event newer "
+                            "than this. Omit it to start watching after the latest event "
+                            "that already exists when the call begins."
+                        ),
                     },
                     "timeout_seconds": {
                         "type": "integer",
@@ -438,7 +442,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "range. If reviewer is omitted, one is auto-selected and is "
                 "always independent from the executor (four-eyes); if no "
                 "independent reviewer is available this fails rather than "
-                "lowering the bar."
+                "lowering the bar. An explicitly requested invalid reviewer "
+                "is rejected with valid alternatives and is never silently replaced."
             ),
             parameters={
                 "type": "object",

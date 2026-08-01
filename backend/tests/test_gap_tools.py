@@ -3,6 +3,7 @@ suggest_agents, query_db entities agent_runs/audit, knowledge content on
 point lookup, update_task dependency edits, and the manage_agent api_key
 write-only path (pre-encrypted before the admin-gate ledger)."""
 
+import asyncio
 import json
 
 import pytest
@@ -71,6 +72,88 @@ async def test_get_task_events_cursor(seeded):
     # kind filter crosses tasks.
     result = await router.execute_tool("get_task_events", {"kind": "decision"}, "s1")
     assert [e["task_id"] for e in result["events"]] == ["T-2"]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_without_cursor_ignores_old_events_until_timeout(seeded):
+    task = seeded.get(Task, "T-1")
+    task.status = "dispatched"
+    seeded.add_all([
+        TaskEvent(task_id="T-1", event_type="dispatched", kind="info", payload={}),
+        TaskEvent(task_id="T-1", event_type="progress", kind="info", payload={}),
+    ])
+    seeded.commit()
+    expected_cursor = (
+        seeded.query(TaskEvent.id)
+        .filter(TaskEvent.task_id == "T-1")
+        .order_by(TaskEvent.id.desc())
+        .limit(1)
+        .scalar()
+    )
+
+    result = await CommandRouter(seeded).execute_tool(
+        "wait_for_task", {"task_id": "T-1", "timeout_seconds": 5}, "s1"
+    )
+
+    assert result["waited_seconds"] >= 4
+    assert result["changed"] is False
+    assert result["events"] == []
+    assert result["cursor"] == expected_cursor
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_without_cursor_returns_only_event_created_during_wait(seeded):
+    task = seeded.get(Task, "T-1")
+    task.status = "dispatched"
+    old_event = TaskEvent(
+        task_id="T-1", event_type="dispatched", kind="info", payload={"old": True}
+    )
+    seeded.add(old_event)
+    seeded.commit()
+
+    async def emit_new_event() -> None:
+        await asyncio.sleep(1)
+        seeded.add(
+            TaskEvent(
+                task_id="T-1",
+                event_type="progress",
+                kind="info",
+                payload={"new": True},
+            )
+        )
+        seeded.commit()
+
+    emitter = asyncio.create_task(emit_new_event())
+    result = await CommandRouter(seeded).execute_tool(
+        "wait_for_task", {"task_id": "T-1", "timeout_seconds": 5}, "s1"
+    )
+    await emitter
+
+    assert result["changed"] is True
+    assert result["waited_seconds"] < 5
+    assert [event["event_type"] for event in result["events"]] == ["progress"]
+    assert result["events"][0]["payload"] == {"new": True}
+    assert result["cursor"] > old_event.id
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_explicit_zero_cursor_replays_old_events(seeded):
+    task = seeded.get(Task, "T-1")
+    task.status = "dispatched"
+    seeded.add(
+        TaskEvent(task_id="T-1", event_type="dispatched", kind="info", payload={})
+    )
+    seeded.commit()
+
+    result = await CommandRouter(seeded).execute_tool(
+        "wait_for_task",
+        {"task_id": "T-1", "since_event_id": 0, "timeout_seconds": 5},
+        "s1",
+    )
+
+    assert result["changed"] is True
+    assert result["waited_seconds"] == 0
+    assert [event["event_type"] for event in result["events"]] == ["dispatched"]
 
 
 @pytest.mark.asyncio

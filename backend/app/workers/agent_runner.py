@@ -1433,15 +1433,32 @@ def _advance_awaiting_review(
     if not brake.allowed:
         return f"brake:{brake.code}"
 
-    executor_norm = (task.executor or "").strip().casefold()
-    suggestions = AgentMatcher(db).suggest_agents(task, top_n=5)
-    independent = [
-        s for s in suggestions if s.agent_id.strip().casefold() != executor_norm
-    ]
-    if not independent:
+    scoring = AgentMatcher(db).score_candidates(
+        task, top_n=3, exclude_agent_id=task.executor
+    )
+    if not scoring.suggestions:
         _escalate(db, task, f"no independent reviewer available for task {task.id}")
         return "escalated_no_reviewer"
-    reviewer = independent[0].agent_id
+    reviewer = scoring.suggestions[0].agent_id
+    selected = next(
+        candidate
+        for candidate in scoring.candidates
+        if candidate.agent_id == reviewer
+    )
+    matched = ", ".join(selected.matched_skills) or "no keyword overlap"
+    exclusions: list[str] = []
+    for candidate in scoring.candidates:
+        rejection = (candidate.rejection_reason or "").lower()
+        if "four-eyes" in rejection:
+            exclusions.append(f"{candidate.agent_id} (four-eyes)")
+        elif "status is disabled" in rejection:
+            exclusions.append(f"{candidate.agent_id} (disabled)")
+    exclusion_text = ", ".join(exclusions) or "none"
+    selection_reason = (
+        f"{reviewer} selected by matcher: score={selected.final_score:.2f}, "
+        f"capability match={matched}, success_rate={selected.performance:.0%}; "
+        f"excluded={exclusion_text}"
+    )
 
     round_ = service.changes_round_count(task.id)
     try:
@@ -1450,6 +1467,7 @@ def _advance_awaiting_review(
             reviewer=reviewer,
             actor="system:orchestration-driver",
             idempotency_key=f"advance:{task.id}:review:r{round_}",
+            selection_reason=selection_reason,
         )
     except OrchestrationError as exc:
         _escalate(db, task, f"review request failed: {exc}")

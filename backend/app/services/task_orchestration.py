@@ -128,6 +128,7 @@ class TaskOrchestrationService:
     # exhausted, so a persisted "failed" status only means dead once
     # ``attempt >= max_attempts`` — see `_reject_if_stale_dispatch_record`.
     _DEAD_RUN_STATUSES = {"success", "timeout", "cancelled"}
+    _UNAVAILABLE_REVIEWER_STATUSES = {"disabled", "offline", "deprecated"}
 
     @dataclass(frozen=True)
     class AutonomyPolicy:
@@ -382,6 +383,7 @@ class TaskOrchestrationService:
         reviewer: str,
         actor: str,
         idempotency_key: str,
+        selection_reason: str | None = None,
         timeout_seconds: int | None = None,
         expected_status: str = "awaiting-review",
     ) -> TransitionResult:
@@ -390,6 +392,31 @@ class TaskOrchestrationService:
             raise PrerequisiteError("result_ref is required before review")
         if not reviewer or not reviewer.strip():
             raise PrerequisiteError("reviewer is required")
+        reviewer = reviewer.strip()
+        if not task.executor or not task.executor.strip():
+            raise PrerequisiteError("executor is required")
+        agent = self.db.get(Agent, reviewer)
+        invalid_reason: str | None = None
+        if self._principal(task.executor) == self._principal(reviewer):
+            invalid_reason = (
+                "violates four-eyes; reviewer must differ from executor "
+                f"{task.executor!r}"
+            )
+        elif agent is None:
+            invalid_reason = "does not exist"
+        elif (agent.status or "").strip().lower() in self._UNAVAILABLE_REVIEWER_STATUSES:
+            invalid_reason = f"has status {agent.status!r}"
+        if invalid_reason is not None:
+            suggestions = AgentMatcher(self.db).suggest_agents(
+                task, top_n=3, exclude_agent_id=task.executor
+            )
+            suggestion_text = ", ".join(item.agent_id for item in suggestions)
+            if not suggestion_text:
+                suggestion_text = "none currently available"
+            raise PrerequisiteError(
+                f"Requested reviewer {reviewer!r} is invalid: {invalid_reason}. "
+                f"Valid reviewer suggestions: {suggestion_text}"
+            )
         self._require_independent(task.executor, reviewer)
         base_ref, head_ref = _split_result_range(task.result_ref)
         if not base_ref or not head_ref:
@@ -397,9 +424,6 @@ class TaskOrchestrationService:
                 "result_ref must be a recorded base..head range before review "
                 "(the review boundary is never inferred)"
             )
-        agent = self.db.get(Agent, reviewer)
-        if agent is None:
-            raise PrerequisiteError(f"Agent {reviewer} not found")
         project = self.db.get(Project, task.project)
         resolved_timeout = timeout_seconds or self.run_timeout_seconds
         try:
@@ -429,6 +453,11 @@ class TaskOrchestrationService:
                 "repo_root": repo_root,
                 "cli": cli,
                 "timeout_seconds": resolved_timeout,
+                "selection_reason": (
+                    selection_reason.strip()
+                    if selection_reason and selection_reason.strip()
+                    else f"{reviewer} was explicitly requested by {actor}"
+                ),
             },
         )
 
@@ -1216,6 +1245,15 @@ class TaskOrchestrationService:
             "expected_status": expected_status,
             "gate_type": gate_type,
         }
+        if gate_type == "review_order":
+            reviewer = str(request_payload.get("reviewer") or "").strip()
+            selection_reason = str(
+                request_payload.get("selection_reason") or "not provided"
+            ).strip()
+            request_payload["approval_prompt"] = (
+                f"Reviewer đề xuất: {reviewer} — lý do: "
+                f"{selection_reason}. Approve?"
+            )
         input_hash = self._input_hash(request_payload)
         existing = self._idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
@@ -1289,7 +1327,7 @@ class TaskOrchestrationService:
                 payload=request_payload,
             )
             task.awaiting_approval = True
-            task.approval_prompt = (
+            task.approval_prompt = request_payload.get("approval_prompt") or (
                 f"Approve {gate_type} gate for task {task.id} "
                 f"(request {idempotency_key})?"
             )

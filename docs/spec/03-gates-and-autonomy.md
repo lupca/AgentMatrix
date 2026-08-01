@@ -7,7 +7,10 @@ create_task → [spec/plan: generate_spec_plan hoặc update_task đổ plan+AC]
 → dispatch_task ──(supervised)── gate task:dispatch pending → approve_gate
 → dispatched → run_agent (execute, worktree, commit lên ct-run/<run_id>)
 → awaiting-review — driver TỰ tạo gate review_order pending (approve chính nó,
-  đừng gọi request_review nữa kẻo tạo gate trùng — CTV2-230)
+  đừng gọi request_review nữa kẻo tạo gate trùng — CTV2-230). Payload gate ghi
+  `reviewer`, `selection_reason` từ matcher (capability/success rate và ứng viên
+  bị loại bởi four-eyes/disabled); `approval_prompt` và `pending_approvals.prompt`
+  đều nêu reviewer + lý do để human thấy trước khi approve.
 → in-review → run_agent (review, read-only, viết JSON vào .ct/review-<task>.json)
 → reviewer submit verdict → gate task:verdict pending → approve_gate
 → verdict pass → done   |   verdict fail → changes-requested
@@ -70,6 +73,10 @@ verdict approved tồn tại — vì vậy KHÔNG được emit event giữa ch�
 - Approve dispatch/review_order = REPLAY payload đã ghi trong gate → tạo AgentRun.
   `agent_id`/`executor`/`reviewer` chỉ định được tôn trọng (CTV2-228 đã sửa —
   mapping nhận cả alias `agent_id`); matcher chỉ chạy khi không chỉ định.
+  Reviewer chỉ định không tồn tại, disabled, hoặc trùng executor bị từ chối rõ
+  ràng kèm tối đa 3 reviewer hợp lệ, tuyệt đối không tự thay bằng agent khác.
+  Kết quả approve `review_order` trả lại `reviewer` + `selection_reason` từ
+  payload bất biến của gate.
 - Verdict fail → changes-requested → `dispatch_task` chấp nhận re-dispatch
   thẳng từ đó (vòng replan, CTV2-234 đã sửa — constraint terminal chỉ còn
   áp cho done, migration 037).
