@@ -28,6 +28,12 @@ checkout ở repo_root, ghi merge commit vào `task.landed_ref`, xóa các branc
   landing skip, done như cũ (giữ fixture test và data import sống).
 Coordinator vẫn bị cấm tự chạy `git merge` — rule giữ nguyên.
 
+Bẫy liên quan (đã dính khi build landing): `emit_task_event` COMMIT nội bộ,
+và `trg_tasks_done_verdict` là DEFERRED trigger (chạy lúc commit) đòi record
+verdict approved tồn tại — vì vậy KHÔNG được emit event giữa chừng
+`_apply_gate` trước khi `_ledger_record` ghi row quyết định; event landing
+được stash và phát trong `decide_gate` sau ledger record.
+
 ## Mode
 
 - **supervised**: mỗi gate cần human `approve_gate`.
