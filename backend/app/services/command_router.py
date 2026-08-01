@@ -478,12 +478,16 @@ class CommandRouter:
                 return {'error': 'file is required'}
             command_args = file
         elif canonical_name == 'save_project_context':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
             project_id = str(args.get('project_id', '')).strip()
             if not project_id:
                 return {'error': 'project_id is required'}
             if 'context_md' not in args:
                 return {'error': 'context_md is required'}
             command_args = json.dumps({
+                'task_id': task_id,
                 'project_id': project_id,
                 'context_md': args.get('context_md'),
                 'rules': args.get('rules') or [],
@@ -813,6 +817,10 @@ class CommandRouter:
         except (json.JSONDecodeError, TypeError):
             return {'error': 'Invalid arguments for save_project_context'}
 
+        task_id = str(payload.get('task_id', '')).strip()
+        if not task_id:
+            return {'error': 'task_id is required'}
+
         project_id = str(payload.get('project_id', '')).strip()
         if not project_id:
             return {'error': 'project_id is required'}
@@ -841,6 +849,7 @@ class CommandRouter:
             return {'error': f'rules must contain at most 5 entries, got {len(rules)}'}
 
         parsed_rules: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
         for idx, rule in enumerate(rules):
             if not isinstance(rule, Mapping):
                 return {'error': f'rule at index {idx} must be an object'}
@@ -848,6 +857,9 @@ class CommandRouter:
             content = rule.get('content')
             if not name:
                 return {'error': f'rule at index {idx} is missing a name'}
+            if name in seen_names:
+                return {'error': f"duplicate rule name '{name}'; rule names must be unique"}
+            seen_names.add(name)
             if not isinstance(content, str) or not content.strip():
                 return {'error': f"rule '{name}' is missing content"}
             globs = rule.get('globs') or []
@@ -876,6 +888,7 @@ class CommandRouter:
 
         return {
             'status': 'success',
+            'task_id': task_id,
             'project_id': project_id,
             'context_lines': len(context_lines),
             'rules_count': len(parsed_rules),

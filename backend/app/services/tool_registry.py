@@ -720,6 +720,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             parameters={
                 "type": "object",
                 "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": (
+                            "Task id this context-generation run is scoped to "
+                            "(required for executor tokens to pass task-scope check)"
+                        ),
+                    },
                     "project_id": {"type": "string", "description": "Project id"},
                     "context_md": {
                         "type": "string",
@@ -742,7 +749,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         },
                     },
                 },
-                "required": ["project_id", "context_md"],
+                "required": ["task_id", "project_id", "context_md"],
             },
             handler="save_project_context",
             tier="deferred",

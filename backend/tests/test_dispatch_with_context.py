@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from app.db.models import Agent, Project, ProjectRule, Task
-from app.services.command_builder import build_dispatch_command
+from app.services.command_builder import build_dispatch_command, build_review_command
 from app.services.task_orchestration import PrerequisiteError, TaskOrchestrationService
 
 
@@ -59,6 +59,62 @@ class TestDispatchWithContext:
         assert cli == "claude"
         assert repo_root == "/tmp"
         assert "Execute task task-3: Update API" in command
+        assert "[Project Context]" in command
+        assert "FastAPI + Postgres" in command
+        assert "Never break production" in command
+        assert "Use type hints" in command
+        assert "Never use any" not in command
+
+    def test_build_review_command_injects_context_and_matching_rules(self, db_session):
+        project = Project(
+            id="proj-full-ctx-review",
+            name="Full Context Project",
+            repo_root="/tmp",
+            context_md="# Stack\nFastAPI + Postgres",
+        )
+        rule_all = ProjectRule(
+            id="r-all-review",
+            project_id="proj-full-ctx-review",
+            name="Global Boundary",
+            globs=[],
+            content="Never break production",
+            priority=10,
+        )
+        rule_py = ProjectRule(
+            id="r-py-review",
+            project_id="proj-full-ctx-review",
+            name="Python Rule",
+            globs=["*/**/*.py", "*.py"],
+            content="Use type hints",
+            priority=5,
+        )
+        rule_ts = ProjectRule(
+            id="r-ts-review",
+            project_id="proj-full-ctx-review",
+            name="Typescript Rule",
+            globs=["*/**/*.ts", "*.ts"],
+            content="Never use any",
+            priority=5,
+        )
+        task = Task(
+            id="task-review-3",
+            project="proj-full-ctx-review",
+            title="Update API",
+            status="in-review",
+            legacy_no_ac=True,
+            files=["app/main.py"],
+        )
+        agent = Agent(id="agent-reviewer-1", name="Reviewer Agent", role="reviewer", model="claude-sonnet")
+        db_session.add_all([project, rule_all, rule_py, rule_ts, task, agent])
+        db_session.flush()
+
+        command, repo_root, cli = build_review_command(
+            task, agent, project, base_ref="main", head_ref="ct-run/task-review-3", db=db_session
+        )
+
+        assert cli == "claude"
+        assert repo_root == "/tmp"
+        assert "Review task task-review-3: Update API" in command
         assert "[Project Context]" in command
         assert "FastAPI + Postgres" in command
         assert "Never break production" in command

@@ -91,8 +91,9 @@ class TestContextChecker:
 
 
 class TestSaveProjectContext:
-    async def _call(self, router, project_id, context_md, rules=None):
+    async def _call(self, router, project_id, context_md, rules=None, task_id="task-save-1"):
         args = json.dumps({
+            "task_id": task_id,
             "project_id": project_id,
             "context_md": context_md,
             "rules": rules or [],
@@ -114,6 +115,7 @@ class TestSaveProjectContext:
         )
 
         assert result["status"] == "success"
+        assert result["task_id"] == "task-save-1"
         assert result["project_id"] == "proj-save-1"
         assert result["context_lines"] == 2
         assert result["rules_count"] == 1
@@ -166,6 +168,32 @@ class TestSaveProjectContext:
         assert rules[0].name == "new-rule"
         names = [r.name for r in rules]
         assert "old-rule" not in names
+
+    @pytest.mark.asyncio
+    async def test_save_rejects_duplicate_rule_names(self, db_session):
+        project = Project(id="proj-save-4", name="Dup Test")
+        db_session.add(project)
+        db_session.flush()
+
+        router = CommandRouter(db_session)
+        result = await self._call(
+            router,
+            "proj-save-4",
+            "# Context",
+            rules=[
+                {"name": "dup-rule", "globs": [], "content": "content a"},
+                {"name": "dup-rule", "globs": [], "content": "content b"},
+            ],
+        )
+
+        assert "error" in result
+        assert "dup-rule" in result["error"]
+
+        db_session.refresh(project)
+        assert project.context_md is None
+        assert project.context_generated is False
+        rules = db_session.query(ProjectRule).filter_by(project_id="proj-save-4").all()
+        assert len(rules) == 0
 
 
 
