@@ -1,6 +1,7 @@
 """Real spec/plan generation: one LLM call, grounded in research-tool evidence.
 
-Produces `SpecPlanResult` (acceptance_criteria/plan/files/tests/risk) for a
+Produces `SpecPlanResult` (acceptance_criteria/plan/files/tests/risk plus
+spec_clarity/open_questions) for a
 freshly created `Task`. `files` proposed by the LLM that the code graph
 cannot confirm are annotated rather than trusted outright, and `flows` come
 exclusively from `get_affected_flows` (the LLM never invents flow names).
@@ -57,6 +58,11 @@ def _build_prompt(
         f"Project: {task.project}\n\n"
         f"{details_block}"
         f"{context_block}"
+        "Bạn đang đứng TRONG repo của project. Hãy ĐỌC (read-only, không sửa gì) "
+        "các file liên quan tới task — bắt đầu từ README/docs/entry points rồi "
+        "lần theo — TRƯỚC KHI viết plan. Dựa trên những gì đã đọc: nếu spec còn "
+        "mơ hồ (auth dùng gì, liên kết module nào, convention nào...) thì đặt câu "
+        "hỏi cụ thể vào open_questions và chấm spec_clarity tương ứng.\n\n"
         "Files the code graph reports as relevant to this area (prefer these; "
         "you may name others but they will be marked unconfirmed):\n"
         f"{candidates}\n"
@@ -73,10 +79,13 @@ def _build_prompt(
         "files or commands; end with \"Open questions:\" (max 3, or 'none')\n"
         '  "files": list of file paths this task will likely touch\n'
         '  "tests": list of test file paths/commands that verify this task\n'
-        '  "risk": one of "low", "medium", "high"\n\n'
-        "Base the plan ONLY on the information above — if the description is "
-        "too thin to plan responsibly, put what you need to know into Open "
-        "questions instead of inventing scope.\n"
+        '  "risk": one of "low", "medium", "high"\n'
+        '  "spec_clarity": one of "high", "medium", "low"\n'
+        '  "open_questions": list of specific unanswered questions (empty only '
+        'when the researched spec is clear enough to execute)\n\n'
+        "Base the plan on the task input, project context, graph hints, and the "
+        "repository source you read. Ask questions after reading instead of "
+        "inventing scope.\n"
     )
 
 
@@ -117,6 +126,18 @@ async def generate_spec_plan(
         raise ConfigurationError(
             "Spec/plan generation requires an explicitly configured agent."
         )
+    agent_type = getattr(getattr(agent, "agent_type", None), "value", None) or getattr(
+        agent, "agent_type", ""
+    )
+    if str(agent_type).strip().lower() == "api":
+        raise ConfigurationError(
+            "Spec/plan research requires a CLI agent that can read the repository; "
+            f"{getattr(agent, 'id', '<unknown>')} is API-backed."
+        )
+    if not repo_root:
+        raise ConfigurationError(
+            "Spec/plan research requires a configured project repo_root for the CLI agent."
+        )
 
     graph_candidates: list[str] = []
     if repo_root:
@@ -152,6 +173,7 @@ async def generate_spec_plan(
             # before emitting the JSON; 1200 truncated them mid-thought.
             max_tokens=4096,
             temperature=0.3,
+            cwd=repo_root,
         )
         content = response.text
         try:

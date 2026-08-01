@@ -461,11 +461,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="generate_spec_plan",
             description=(
-                "Run the spec/plan gate for a 'todo' task: one LLM call, "
-                "grounded by research-tool graph queries, produces "
-                "acceptance_criteria/plan/files/tests/risk and writes them "
-                "onto the task. A task cannot be dispatched until this has "
-                "run (or the task is exempted via legacy_no_ac)."
+                "Run the research-first spec/plan gate for a 'todo' task with "
+                "a CLI agent inside the project repo. Persists spec_clarity "
+                "and open_questions; dispatch remains blocked until clarity "
+                "is high and all questions are answered."
             ),
             parameters={
                 "type": "object",
@@ -665,7 +664,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="update_task",
             description=(
-                "Edit a task's plan, acceptance criteria, priority, tags, or "
+                "Edit a task's raw input, plan, acceptance criteria, priority, tags, or "
                 "dependencies. Does not change task status — use "
                 "dispatch_task, record_verdict, or approve_gate for status "
                 "transitions."
@@ -677,7 +676,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                     "patch": {
                         "type": "object",
                         "description": (
-                            "Fields to update: plan, acceptance_criteria, "
+                            "Fields to update: raw_input (replace semantics), plan, acceptance_criteria, "
                             "priority, tags. Dependency edits: "
                             "add_depends_on / remove_depends_on (arrays of "
                             "task ids; cycles are rejected)."

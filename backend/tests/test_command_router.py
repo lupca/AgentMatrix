@@ -770,6 +770,8 @@ async def test_dispatch_supervised_returns_post_mutation_task_snapshot(db_sessio
         "result_ref": task.result_ref,
         "landed_ref": task.landed_ref,
         "error": task.error,
+        "spec_clarity": task.spec_clarity,
+        "open_questions": [],
     }
     assert task.awaiting_approval is True
 
@@ -1103,15 +1105,24 @@ async def test_update_task_edits_plan_and_rejects_status(db_session):
     router = CommandRouter(db_session)
     result = await router.execute_tool(
         "update_task",
-        {"task_id": "TASK-400", "patch": {"plan": "Do the thing", "priority": "high"}},
+        {
+            "task_id": "TASK-400",
+            "patch": {
+                "plan": "Do the thing",
+                "priority": "high",
+                "raw_input": "Answers replace the previous task description.",
+            },
+        },
         "session-1",
     )
     assert result["action"] == "updated"
     assert result["plan"] == "Do the thing"
     assert result["priority"] == "high"
+    assert result["raw_input"] == "Answers replace the previous task description."
 
     task = db_session.query(Task).filter(Task.id == "TASK-400").first()
     assert task.status == "todo"
+    assert task.raw_input == "Answers replace the previous task description."
 
     rejected = await router.execute_tool(
         "update_task",
@@ -1295,23 +1306,29 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
             title="Needs a spec",
             status="todo",
             acceptance_criteria=[],
+            spec_clarity="low",
+            open_questions=["Old unanswered question?"],
+            awaiting_approval=True,
+            approval_prompt="Old prompt",
         )
     )
     db_session.commit()
 
     fake_result = SpecPlanResult(
-        schema_version="1.0",
+        schema_version="1.1",
         acceptance_criteria=["Does the thing"],
         plan="Do the thing.",
         files=["backend/app/thing.py"],
         tests=["backend/tests/test_thing.py"],
         risk="low",
+        spec_clarity="high",
+        open_questions=[],
     )
 
     with patch(
         "app.services.spec_plan_generator.generate_spec_plan",
         new=AsyncMock(return_value=(fake_result, ["thing-flow"])),
-    ):
+    ), patch("app.services.tool_metrics.record_tool_metric") as mock_metric:
         result = await CommandRouter(db_session).execute(
             "generate_spec_plan", "TASK-SPEC @spec-agent", "session-1"
         )
@@ -1323,6 +1340,85 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     task = db_session.get(Task, "TASK-SPEC")
     assert task.acceptance_criteria == ["Does the thing"]
     assert task.current_gate == "plan"
+    assert task.open_questions == []
+    assert task.spec_clarity == "high"
+    assert task.awaiting_approval is False
+    assert task.approval_prompt is None
+    mock_metric.assert_called_once_with(
+        tool="spec_plan",
+        source="spec_plan_generator",
+        ok=True,
+        task_id="TASK-SPEC",
+        result_count=0,
+        payload={"spec_clarity": "high", "task_id": "TASK-SPEC"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_returns_questions_and_escalates(db_session):
+    from app.db.models import Agent, Project, Task
+    from app.schemas.task import SpecPlanResult
+
+    db_session.add(Project(id="proj-questions", name="Questions", repo_root="/tmp"))
+    db_session.add(
+        Agent(
+            id="@question-planner",
+            name="Question Planner",
+            role="coordinator",
+            cli="codex",
+            capabilities=["coordinator"],
+        )
+    )
+    db_session.add(
+        Task(
+            id="TASK-QUESTIONS",
+            project="proj-questions",
+            title="Needs clarification",
+            status="todo",
+            acceptance_criteria=[],
+        )
+    )
+    db_session.commit()
+
+    fake_result = SpecPlanResult(
+        schema_version="1.1",
+        acceptance_criteria=["Authentication behavior is covered by tests"],
+        plan="Confirm auth convention, then implement.",
+        files=["backend/app/auth.py"],
+        tests=["backend/tests/test_auth.py"],
+        risk="medium",
+        spec_clarity="medium",
+        open_questions=[
+            "Which existing authentication convention should this use?",
+            "Should anonymous callers receive 401 or 403?",
+        ],
+    )
+
+    with patch(
+        "app.services.spec_plan_generator.generate_spec_plan",
+        new=AsyncMock(return_value=(fake_result, [])),
+    ):
+        result = await CommandRouter(db_session).execute_tool(
+            "generate_spec_plan",
+            {"task_id": "TASK-QUESTIONS", "agent_id": "@question-planner"},
+            "session-questions",
+        )
+
+    assert result["action"] == "spec_questions_pending"
+    assert result["spec_clarity"] == "medium"
+    assert result["open_questions"] == fake_result.open_questions
+    assert result["awaiting_approval"] is True
+    assert "1) Which existing authentication convention should this use?" in result[
+        "approval_prompt"
+    ]
+    assert "2) Should anonymous callers receive 401 or 403?" in result[
+        "approval_prompt"
+    ]
+
+    task = db_session.get(Task, "TASK-QUESTIONS")
+    assert task.open_questions == fake_result.open_questions
+    assert task.spec_clarity == "medium"
+    assert task.awaiting_approval is True
 
 
 @pytest.mark.asyncio
@@ -1364,12 +1460,14 @@ async def test_generate_spec_plan_auto_suggests_agent_when_not_provided(db_sessi
     db_session.commit()
 
     fake_result = SpecPlanResult(
-        schema_version="1.0",
+        schema_version="1.1",
         acceptance_criteria=["Does the thing"],
         plan="Do the thing.",
         files=[],
         tests=[],
         risk="low",
+        spec_clarity="high",
+        open_questions=[],
     )
 
     with patch(
@@ -1383,6 +1481,7 @@ async def test_generate_spec_plan_auto_suggests_agent_when_not_provided(db_sessi
     assert result["action"] == "spec_plan_generated"
     used_agent = mock_generate.call_args.args[2]
     assert used_agent.id == "@auto-spec-agent"
+    assert mock_generate.call_args.args[1] == "/tmp"
 
 
 @pytest.mark.asyncio

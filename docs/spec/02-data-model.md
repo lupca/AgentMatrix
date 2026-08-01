@@ -23,6 +23,9 @@ Cột đáng chú ý:
 - `verdict`/`final_verdict`: chỉ được set qua verdict gate từ review run thật;
   trigger DB `trg_tasks_done_verdict` đòi verdict='pass' khi done.
 - `awaiting_approval` + `approval_prompt`: cờ escalation/gate chờ human.
+- `spec_clarity` (`high|medium|low`, nullable cho task legacy) + `open_questions`
+  (JSON, nullable): kết quả SpecPlanResult v1.1. Danh sách còn phần tử chặn
+  execute-dispatch cho tới khi coordinator cập nhật `raw_input` và regenerate.
 - `archived_at`: soft-delete toàn cục (ArchivableMixin) — mọi query mặt tiền
   phải lọc `archived_at IS NULL` (pending_approvals đã từng quên — đã sửa).
 - `legacy_no_ac`: task import cũ, miễn yêu cầu acceptance_criteria khi dispatch.

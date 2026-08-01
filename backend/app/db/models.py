@@ -63,6 +63,8 @@ class Task(ArchivableMixin, Base):
     mode = Column(String(20), nullable=False, default="supervised")
     priority = Column(String(10), nullable=True)
     risk = Column(String(10), nullable=True)
+    spec_clarity = Column(String(10), nullable=True)
+    open_questions = Column(JSON, nullable=True)
     executor = Column(String(50), nullable=True)
     reviewer = Column(String(50), nullable=True)
     acceptance_criteria = Column(JSON, default=list)

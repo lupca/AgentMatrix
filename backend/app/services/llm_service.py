@@ -109,6 +109,7 @@ class LLMService:
         stream: bool = False,
         max_tokens: int = 2048,
         temperature: float = 0.7,
+        cwd: str | None = None,
     ) -> ProviderResponse:
         """Complete a request through the provider selected by ``agent``."""
 
@@ -124,6 +125,7 @@ class LLMService:
                 provider=getattr(agent, "provider", None),
                 cli=getattr(agent, "cli", None),
                 effort=getattr(agent, "effort", None),
+                cwd=cwd,
             )
         return await provider.complete(
             messages,
