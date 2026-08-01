@@ -55,6 +55,11 @@ Chi tiết từng vấn đề ở dạng task file tại `~/projects/control-tow
 - CTV2-230 (med): driver và request_review mỗi bên tạo một gate review_order → gate mồ côi ám reminder (đã reject 2 gate trùng bằng child-row system:cleanup).
 - CTV2-231 (high): review run bị watchdog cancel ("no progress") để task kẹt in-review — cancel phải đi qua record_review_failure như failure; đã phải phẫu thuật SQL gỡ CTV2-227.
 - Đã sửa tại chỗ (kèm test xanh 499): `_cas_status` flush ORM trước raw UPDATE (verdict supervised không land được done); review re-order lấy max(attempt)+1 (đụng uq_agent_runs_round_kind_attempt).
+- CTV2-217 (DONE qua dispatch): dead-letter callback `on_retry_exhausted` — merge 08aa3a4, suite 503.
+- CTV2-232 (high): watchdog no-progress giết oan CLI im lặng (`claude -p` không stream) — tạm nới `max_no_progress_seconds=2400` (admin:15); fix chuẩn = heartbeat theo PID sống.
+- CTV2-233 (critical, ĐÃ SỬA ac34bf0): schema `approve_gate` không có trường `decision` → mọi human REJECT qua MCP bị ghi thành approve (quan sát live: reject verdict rubber-stamp làm task done). Dev cần: test e2e reject + rà các tool khác cùng pattern mapping-vứt-arg.
+- CTV2-234 (med): không có đường chính thống `changes-requested` → re-dispatch (dispatch_task đòi todo) — vòng replan phải SQL về todo.
+- Bằng chứng mới cho CTV2-220/223: agy reviewer rubber-stamp CTV2-227 vòng 2 (pass 4/4, 0 findings trong khi F1 HIGH còn nguyên) — agy không đáng tin cả vai reviewer, matcher vẫn tự chọn nó (CTV2-228).
 
 ## P2 — Bước 3 + backlog tồn đọng
 
