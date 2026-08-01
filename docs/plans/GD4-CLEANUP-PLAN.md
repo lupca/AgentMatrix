@@ -46,6 +46,12 @@ Chi tiết từng vấn đề ở dạng task file tại `~/projects/control-tow
 10. CTV2-225 (med): tái hiện result_ref đường bypass sau các fix trên; còn thì điều tra tiếp.
 11. CTV2-226 (med): gỡ `wake_coordinator` dead path (gộp vào P1 xóa FastAPI/coordinator cũ).
 
+**Phát hiện thêm 2026-08-01 (chiều, sau P1):**
+- CTV2-228 (high): `approve_gate` bỏ qua `agent_id` coordinator yêu cầu khi dispatch — matcher tự chọn lại lúc replay (quan sát 2 lần: sonnet-medium→sonnet-low, luna-high→sonnet-high). Human approve một đằng hệ chạy một nẻo.
+- CTV2-229 (done): migrate_md_to_db từng clear `agents` (mất api_key qua CASCADE agent_accounts, reset điểm đo) và reset `next_task_seq` (create_task sinh id trùng) — đã sửa: agents upsert giữ key/điểm, re-seed counter sau import.
+- Reminder `pending_approvals` từng dính task đã archive (đã sửa: lọc `archived_at IS NULL` cả hai ledger + escalation).
+- CTV2-227 (đang chạy qua dispatch): nối lại flow Project Context & Rules — tool `save_project_context` + inject context/rules vào prompt (test cũ là test rỗng, chưa từng có injection).
+
 ## P2 — Bước 3 + backlog tồn đọng
 
 ### Code chết & mồ côi
