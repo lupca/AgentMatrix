@@ -123,6 +123,7 @@ class LLMService:
             kwargs.update(
                 provider=getattr(agent, "provider", None),
                 cli=getattr(agent, "cli", None),
+                effort=getattr(agent, "effort", None),
             )
         return await provider.complete(
             messages,

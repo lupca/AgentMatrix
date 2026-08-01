@@ -281,3 +281,19 @@ async def test_dispatcher_reads_mcp_env_defaults(monkeypatch):
     dispatcher = CLIDispatcher(working_directory="/tmp")
 
     assert dispatcher.mcp_secret == "env-secret"
+
+
+def test_cli_commands_forward_configured_effort():
+    # agy: gemini-3.6-flash REQUIRES --effort; exits 1 without it.
+    agy = build_cli_command("agy", "gemini-3.6-flash", "hi", effort="high")
+    assert "--effort high --print hi" in agy
+    # model names already carrying an effort suffix must not get the flag twice
+    suffixed = build_cli_command("agy", "gemini-3.6-flash-high", "hi", effort="high")
+    assert "--effort" not in suffixed
+    # no configured effort -> unchanged (some models reject the flag)
+    plain = build_cli_command("agy", "gemini-2.5-pro", "hi")
+    assert "--effort" not in plain
+    claude = build_cli_command("claude", "claude-sonnet-5", "hi", effort="low")
+    assert "--effort low" in claude
+    codex = build_cli_command("codex", "gpt-5.6-luna", "hi", effort="high")
+    assert "model_reasoning_effort=high" in codex

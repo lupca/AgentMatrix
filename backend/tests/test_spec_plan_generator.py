@@ -119,3 +119,17 @@ async def test_generate_spec_plan_uses_the_passed_agent():
 async def test_generate_spec_plan_requires_an_agent():
     with pytest.raises(ConfigurationError):
         await generate_spec_plan(_task(), None, None)
+
+
+def test_parse_json_strips_reasoning_think_block():
+    from app.services.spec_plan_generator import _parse_json
+
+    wrapped = '<think>let me reason\nabout this</think>{"a": 1}'
+    assert _parse_json(wrapped) == {"a": 1}
+
+
+def test_parse_json_extracts_object_from_surrounding_prose():
+    from app.services.spec_plan_generator import _parse_json
+
+    prose = 'Here is the plan you asked for:\n{"a": [1, 2]}\nHope it helps!'
+    assert _parse_json(prose) == {"a": [1, 2]}

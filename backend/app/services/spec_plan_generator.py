@@ -9,6 +9,7 @@ exclusively from `get_affected_flows` (the LLM never invents flow names).
 from __future__ import annotations
 
 import json
+import re
 
 from pydantic import ValidationError
 
@@ -53,11 +54,22 @@ def _build_prompt(task: Task, graph_candidates: list[str], *, retry_reason: str 
 
 def _parse_json(content: str) -> dict:
     text = content.strip()
+    # Reasoning models (DeepSeek, GLM, ...) arrive through the OpenAI adapter
+    # as '<think>...</think>{json}' — strip the reasoning block first, or
+    # json.loads dies at char 0 on perfectly good output.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
     if "```" in text:
         text = text.split("```")[1]
         if text.startswith("json"):
             text = text[4:]
-    return json.loads(text.strip())
+    text = text.strip()
+    # Last resort: models that ignore "ONLY JSON" and add prose around the
+    # object. Take the outermost {...} span instead of failing outright.
+    if not text.startswith("{"):
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            text = text[start : end + 1]
+    return json.loads(text)
 
 
 async def generate_spec_plan(
@@ -100,7 +112,9 @@ async def generate_spec_plan(
         response = await llm.complete(
             agent,
             [{"role": "user", "content": prompt}],
-            max_tokens=1200,
+            # Reasoning models spend most of the budget on the <think> block
+            # before emitting the JSON; 1200 truncated them mid-thought.
+            max_tokens=4096,
             temperature=0.3,
         )
         content = response.text

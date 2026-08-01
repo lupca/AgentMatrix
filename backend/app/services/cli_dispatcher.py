@@ -134,8 +134,19 @@ def format_history_as_prompt(messages: list[dict[str, Any]]) -> str:
     return "\n\n".join(sections)
 
 
+_EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
+
+
+def _model_carries_effort(model: str) -> bool:
+    return (model or "").strip().lower().endswith(_EFFORT_SUFFIXES)
+
+
 def build_cli_command(
-    cli: str, model: str, prompt: str, mcp_config_path: str | None = None
+    cli: str,
+    model: str,
+    prompt: str,
+    mcp_config_path: str | None = None,
+    effort: str | None = None,
 ) -> str:
     """Build a shell-safe command for one coordinator invocation.
 
@@ -143,6 +154,11 @@ def build_cli_command(
     projection (ADR-001 §D5) with the CLI so the turn can call CT tools. It
     is always placed before the prompt-carrying flag so the prompt — which
     may contain arbitrary text — stays the final argument.
+
+    ``effort`` is forwarded when the agent configures one and the model name
+    does not already carry an effort suffix. Some agy models *require* it
+    (gemini-3.6-flash exits 1 with "invalid model selection" without it),
+    while others reject the flag — so it is only ever sent when configured.
     """
 
     normalized_cli = (cli or "").strip().lower()
@@ -152,18 +168,31 @@ def build_cli_command(
             f"Supported CLIs: {', '.join(sorted(SUPPORTED_CLIS))}"
         )
 
+    effort = (effort or "").strip().lower() or None
+    if effort and _model_carries_effort(model):
+        effort = None
+
     if normalized_cli == "claude":
         argv = ["claude", "--model", model]
+        if effort:
+            argv += ["--effort", effort]
         if mcp_config_path:
             argv += ["--mcp-config", mcp_config_path]
         argv += ["-p", prompt]
     elif normalized_cli == "agy":
         # --model (not --agent, which selects an agent profile, not a model).
         # --mcp-config is not supported by agy; MCP config is omitted.
-        argv = ["agy", "--model", model, "--print", prompt]
+        # The prompt must directly follow --print (CTV2-211).
+        argv = ["agy", "--model", model]
+        if effort:
+            argv += ["--effort", effort]
+        argv += ["--print", prompt]
     else:
         # --mcp-config is not supported by codex exec.
-        argv = ["codex", "exec", "-m", model, prompt]
+        argv = ["codex", "exec", "-m", model]
+        if effort:
+            argv += ["-c", f"model_reasoning_effort={effort}"]
+        argv += [prompt]
     return shlex.join(argv)
 
 
@@ -273,6 +302,7 @@ class CLIDispatcher:
         cli: str,
         model: str,
         prompt: str,
+        effort: str | None = None,
     ) -> AsyncIterator[str]:
         """Spawn a CLI and yield stdout chunks until it exits.
 
@@ -281,7 +311,7 @@ class CLIDispatcher:
         async generator forwards each output item to the event loop.
         """
 
-        base_command = build_cli_command(cli, model, prompt)
+        base_command = build_cli_command(cli, model, prompt, effort=effort)
         from app.services.mcp_attach import attach_mcp
 
         command, extra_env, cleanup_paths = attach_mcp(

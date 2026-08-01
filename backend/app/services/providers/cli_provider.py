@@ -38,6 +38,7 @@ class CLIProvider:
         *,
         provider: str | None = None,
         cli: str | None = None,
+        effort: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
         tools: list[dict[str, Any]] | None = None,
@@ -59,7 +60,9 @@ class CLIProvider:
 
         async def chunks() -> AsyncIterator[str]:
             output_tokens = 0
-            async for chunk in self.dispatcher.spawn(selected_cli, model, prompt):
+            async for chunk in self.dispatcher.spawn(
+                selected_cli, model, prompt, effort=effort
+            ):
                 output_tokens += _estimate_tokens(chunk)
                 yield chunk
             response.usage = UsageCounts(

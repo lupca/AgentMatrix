@@ -99,7 +99,7 @@ class _FakeCLIDispatcher:
     replies: dict[str, str]
     calls: list[tuple[str, str, str]] = field(default_factory=list)
 
-    async def spawn(self, cli, model, prompt):
+    async def spawn(self, cli, model, prompt, effort=None):
         self.calls.append((cli, model, prompt))
         yield self.replies[model]
 
