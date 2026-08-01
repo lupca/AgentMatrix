@@ -25,6 +25,7 @@ from fastmcp.tools.function_tool import FunctionTool
 
 from app.core.config import settings
 from app.db.base import SessionLocal
+from app.graph.context import invalidate_context_snapshot
 from app.services.command_router import CommandRouter
 from app.services.tool_registry import ToolSpec, get_mcp_tool_specs
 
@@ -64,15 +65,13 @@ def issue_token(
 
 
 def authenticate_token(
-    presented: str | None, *, secret: str, legacy_token: str = ""
+    presented: str | None, *, secret: str
 ) -> TokenClaims | None:
-    """Validate a signed token, accepting the old static token as coordinator."""
+    """Validate a signed HMAC token."""
 
     value = (presented or "").removeprefix("Bearer ").strip()
     if not value:
         return None
-    if legacy_token and hmac.compare_digest(value, legacy_token):
-        return TokenClaims(role="coordinator", token_id="legacy")
     match = TOKEN_PATTERN.match(value)
     if not match or not secret:
         return None
@@ -108,8 +107,7 @@ async def _claims_from_context(context: Context | None, default_token: str = "")
     return authenticate_token(
         authorization or default_token,
         secret=settings.MCP_TOKEN_SECRET,
-        legacy_token=settings.MCP_API_TOKEN,
-    ) or (TokenClaims(role="coordinator", token_id="native-static") if default_token and not authorization else None)
+    )
 
 
 def _task_scope_ok(claims: TokenClaims, arguments: Mapping[str, Any]) -> bool:
@@ -173,6 +171,9 @@ def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
         db = SessionLocal()
         try:
             result = await CommandRouter(db).execute_tool(spec.name, kwargs, claims.token_id or "mcp")
+            # Native calls bypass the REST endpoint, so invalidate the same
+            # context cache the old /api/mcp/tools/call path invalidated.
+            invalidate_context_snapshot(db, project_id=None)
             return envelope(result, next_step=_next_step(result))
         except Exception as exc:  # boundary: MCP must always return structured JSON
             return {"ok": False, "data": None, "error": {"code": "internal_error", "message": str(exc)}}
@@ -203,12 +204,18 @@ def build_http_app(*, default_token: str = ""):
     server = build_server(default_token=default_token)
     app = server.http_app()
 
+    async def health(_request):
+        return JSONResponse({"status": "ok"})
+
+    app.add_route("/health", health, methods=["GET"])
+
     class MCPAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request, call_next):
+            if request.url.path.rstrip("/") == "/health":
+                return await call_next(request)
             claims = authenticate_token(
                 request.headers.get("authorization") or (default_token if default_token else None),
                 secret=settings.MCP_TOKEN_SECRET,
-                legacy_token=settings.MCP_API_TOKEN,
             )
             if claims is None:
                 return JSONResponse(

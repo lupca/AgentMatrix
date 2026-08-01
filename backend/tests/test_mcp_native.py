@@ -12,10 +12,8 @@ def test_role_token_round_trip_and_task_scope_claim():
     assert authenticate_token(token, secret="wrong") is None
 
 
-def test_legacy_token_is_coordinator():
-    claims = authenticate_token("legacy", secret="secret", legacy_token="legacy")
-    assert claims is not None
-    assert claims.role == "coordinator"
+def test_unsigned_or_legacy_token_is_rejected():
+    assert authenticate_token("legacy", secret="secret") is None
 
 
 def test_native_envelope_structures_transition_error_and_hint():
@@ -26,6 +24,9 @@ def test_native_envelope_structures_transition_error_and_hint():
 
 
 def test_native_envelope_includes_next_for_task_state():
-    result = envelope({"task": {"id": "task-1", "status": "awaiting-review"}})
+    result = envelope(
+        {"task": {"id": "task-1", "status": "awaiting-review"}},
+        next_step="Gọi request_review để bắt đầu review độc lập.",
+    )
     assert result["ok"] is True
     assert result["next"] == "Gọi request_review để bắt đầu review độc lập."

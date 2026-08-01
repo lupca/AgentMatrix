@@ -11,7 +11,6 @@ import asyncio
 import json
 import os
 import shlex
-import sys
 import tempfile
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
@@ -175,27 +174,14 @@ def build_mcp_config(
     api_url: str, token: str, *, native_url: str | None = None,
     role: str = "coordinator",
 ) -> dict[str, Any]:
-    """MCP config registering the Control Tower projection (ADR-001 §D5).
+    """Build the native streamable-HTTP MCP config for any supported CLI."""
 
-    Uses the ``mcpServers`` shape shared by claude/codex/agy: a stdio server
-    started with ``python -m app.mcp_server``, given the API URL and scoped
-    token so its handlers can call ``POST /api/mcp/tools/call``.
-    """
-
-    if native_url:
-        return {"mcpServers": {"control-tower": {
-            "type": "http", "url": native_url,
-            "headers": {"Authorization": f"Bearer {token}", "X-CT-Role": role},
-        }}}
-    return {
-        "mcpServers": {
-            "control-tower": {
-                "command": sys.executable,
-                "args": ["-m", "app.mcp_server", "--api-url", api_url],
-                "env": {"CT_MCP_TOKEN": token},
-            }
-        }
-    }
+    del api_url  # retained in the signature for callers migrating from GĐ2
+    return {"mcpServers": {"control-tower": {
+        "type": "http",
+        "url": native_url or settings.MCP_NATIVE_URL,
+        "headers": {"Authorization": f"Bearer {token}", "X-CT-Role": role},
+    }}}
 
 
 def build_instruction_text(source: str) -> str:
@@ -240,10 +226,8 @@ def write_mcp_config(
 ) -> str:
     """Write a one-shot MCP config file for a single CLI spawn.
 
-    Every coordinator chat turn starts a fresh CLI process (see module
-    docstring), so the config is regenerated per spawn rather than cached;
-    the caller is responsible for deleting the returned path once the
-    process exits.
+    Every coordinator chat turn starts a fresh CLI process, so the config is
+    regenerated per spawn rather than cached.
     """
 
     fd, path = tempfile.mkstemp(prefix="ct-mcp-", suffix=".json")
@@ -280,15 +264,8 @@ class CLIDispatcher:
         self.timeout_seconds = timeout_seconds
         self.working_directory = working_directory or os.getcwd()
         self.process_manager_factory = process_manager_factory
-        # MCP wiring (ADR-001 §D5, coordinator chat path only — agent_runner's
-        # executor dispatch never touches CLIDispatcher). Defaults come from
-        # the environment so existing callers get MCP tool access for free
-        # once MCP_API_TOKEN is configured; an unset token disables it, which
-        # keeps today's behavior unchanged wherever it isn't.
-        self.api_url = api_url or os.environ.get("CT_API_URL", "http://localhost:8000")
-        self.mcp_token = (
-            mcp_token if mcp_token is not None else os.environ.get("MCP_API_TOKEN", "")
-        )
+        self.api_url = api_url  # deprecated compatibility argument
+        self.mcp_secret = mcp_token or os.environ.get("MCP_TOKEN_SECRET", "")
 
     def _new_process_manager(self) -> ProcessManager:
         factory = self.process_manager_factory or ProcessManager
@@ -307,18 +284,15 @@ class CLIDispatcher:
         async generator forwards each output item to the event loop.
         """
 
-        native_url = settings.MCP_NATIVE_URL if settings.MCP_NATIVE_ENABLED else None
-        if self.mcp_token:
-            mcp_config_path = (
-                write_mcp_config(
-                    self.api_url, self.mcp_token, native_url=native_url,
-                    role="coordinator",
-                )
-                if native_url
-                else write_mcp_config(self.api_url, self.mcp_token)
-            )
-        else:
-            mcp_config_path = None
+        if not self.mcp_secret:
+            raise RuntimeError("MCP_TOKEN_SECRET is required for coordinator MCP")
+        from app.mcp_native import issue_token
+
+        token = issue_token(self.mcp_secret, role="coordinator")
+        mcp_config_path = write_mcp_config(
+            self.api_url, token, native_url=settings.MCP_NATIVE_URL,
+            role="coordinator",
+        )
         command = build_cli_command(cli, model, prompt, mcp_config_path)
         process_manager = self._new_process_manager()
         loop = asyncio.get_running_loop()

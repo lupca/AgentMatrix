@@ -22,7 +22,6 @@ def test_native_mcp_config_uses_streamable_http():
 
 
 def test_executor_command_gets_task_scoped_native_token(monkeypatch, tmp_path):
-    monkeypatch.setattr(settings, "MCP_NATIVE_ENABLED", True)
     monkeypatch.setattr(settings, "MCP_TOKEN_SECRET", "test-secret")
     monkeypatch.setattr(settings, "MCP_NATIVE_URL", "http://localhost:8100/mcp")
     task = Task(id="PHASE2-1", project="p", title="Task", acceptance_criteria=["Pass"])
@@ -31,7 +30,6 @@ def test_executor_command_gets_task_scoped_native_token(monkeypatch, tmp_path):
 
     command, _, _ = build_dispatch_command(task, agent, project)
     argv = shlex.split(command)
-    assert argv[0] == "trap"
     assert "--mcp-config" in argv
     config_path = argv[argv.index("--mcp-config") + 1]
     with open(config_path, encoding="utf-8") as config_file:

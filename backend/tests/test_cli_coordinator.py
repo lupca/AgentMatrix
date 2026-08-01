@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -72,7 +71,7 @@ async def test_cli_dispatcher_forwards_process_output_and_raises_failures(monkey
 
     assert chunks == ["first\n", "second\n"]
     command, cwd = manager.run_with_streaming.call_args.args
-    assert command.startswith("claude --model claude-sonnet-4 -p")
+    assert command.startswith("claude --model claude-sonnet-4 --mcp-config")
     assert cwd == "/tmp"
     manager.terminate.assert_called_once()
 
@@ -156,7 +155,7 @@ async def test_cli_coordinator_rehydrates_history_when_switching_models(db_sessi
     )
 
     second_command = second_manager.run_with_streaming.call_args.args[0]
-    assert second_command.startswith("agy --agent gemini-2.5-pro --print")
+    assert second_command.startswith("agy --agent gemini-2.5-pro --mcp-config")
     assert "USER:\nRemember my name is Ada." in second_command
     assert "ASSISTANT:\nAda remembered" in second_command
     assert "USER:\nWhat is my name?" in second_command
@@ -193,13 +192,16 @@ def test_build_cli_command_places_mcp_config_before_the_prompt(cli, model, expec
     assert command.index("--mcp-config") < command.rindex("the prompt text")
 
 
-def test_build_mcp_config_registers_the_control_tower_stdio_server():
+def test_build_mcp_config_registers_the_native_http_server():
     config = build_mcp_config("http://localhost:8000", "scoped-token")
 
     server = config["mcpServers"]["control-tower"]
-    assert server["command"] == sys.executable
-    assert server["args"] == ["-m", "app.mcp_server", "--api-url", "http://localhost:8000"]
-    assert server["env"] == {"CT_MCP_TOKEN": "scoped-token"}
+    assert server["type"] == "http"
+    assert server["url"] == "http://localhost:8100/mcp"
+    assert server["headers"] == {
+        "Authorization": "Bearer scoped-token",
+        "X-CT-Role": "coordinator",
+    }
 
 
 def test_write_mcp_config_writes_matching_json_to_disk():
@@ -214,10 +216,7 @@ def test_write_mcp_config_writes_matching_json_to_disk():
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_omits_mcp_config_when_no_token_configured(monkeypatch):
-    """Default/unconfigured behavior is unchanged from before this feature."""
-
-    monkeypatch.delenv("MCP_API_TOKEN", raising=False)
+async def test_dispatcher_always_injects_native_mcp_config(monkeypatch):
     manager = MagicMock()
     manager.run_with_streaming.return_value = iter(
         ["ok", ProcessResult(ProcessStatus.COMPLETED, 0, None)]
@@ -228,12 +227,11 @@ async def test_dispatcher_omits_mcp_config_when_no_token_configured(monkeypatch)
     )
 
     dispatcher = CLIDispatcher(working_directory="/tmp")
-    assert dispatcher.mcp_token == ""
     async for _ in dispatcher.spawn("claude", "claude-sonnet-4", "prompt"):
         pass
 
     command, _ = manager.run_with_streaming.call_args.args
-    assert "--mcp-config" not in command
+    assert "--mcp-config" in command
 
 
 @pytest.mark.asyncio
@@ -255,8 +253,8 @@ async def test_dispatcher_injects_mcp_config_when_token_configured(monkeypatch):
     written_paths: list[str] = []
     real_write_mcp_config = write_mcp_config
 
-    def spy_write_mcp_config(api_url, token):
-        path = real_write_mcp_config(api_url, token)
+    def spy_write_mcp_config(api_url, token, **kwargs):
+        path = real_write_mcp_config(api_url, token, **kwargs)
         written_paths.append(path)
         return path
 
@@ -276,10 +274,8 @@ async def test_dispatcher_injects_mcp_config_when_token_configured(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_dispatcher_reads_mcp_env_defaults(monkeypatch):
-    monkeypatch.setenv("CT_API_URL", "http://ct-backend:9000")
-    monkeypatch.setenv("MCP_API_TOKEN", "env-token")
+    monkeypatch.setenv("MCP_TOKEN_SECRET", "env-secret")
 
     dispatcher = CLIDispatcher(working_directory="/tmp")
 
-    assert dispatcher.api_url == "http://ct-backend:9000"
-    assert dispatcher.mcp_token == "env-token"
+    assert dispatcher.mcp_secret == "env-secret"

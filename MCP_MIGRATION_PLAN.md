@@ -1,91 +1,102 @@
-# Plan: Chuyển Control Tower V2 sang Pure MCP Server
+# Plan: Control Tower V2 → Pure Native MCP Server
 
-> Trạng thái: draft đã thống nhất qua bàn bạc (2026-08-01).
-> Chiến lược: **strangler** — không đập đi xây lại. FastAPI chạy song song trong suốt quá trình chuyển, chỉ gỡ khi MCP server đã chứng minh ổn định.
+> Cập nhật 2026-08-01. GĐ1 (`61f5cca`) và GĐ2 (`cbb7328`) đã hoàn thành.
+> Tài liệu này là plan hoàn chỉnh cho **Giai đoạn 3: xóa vĩnh viễn frontend + FastAPI**, chỉ còn `mcp_native` + services + Dramatiq worker.
+> Nhánh `develop` (đứng ở `61f5cca`, còn đầy đủ frontend + API) chỉ là **tài liệu tham khảo** khi cần xem lại logic endpoint cũ để viết tool MCP tương đương — không phải đường lùi. Xóa là xóa hẳn.
 
-## 1. Mục tiêu & bối cảnh
-
-Loại bỏ dần lớp REST/WebSocket (frontend không còn cần thiết). Coordinator là **bất kỳ CLI agent nào** kết nối vào MCP server: Claude Code, Codex CLI, agy (Antigravity CLI)... Con người tương tác qua chat với coordinator, không qua UI.
-
-Kiến trúc đích:
+## Kiến trúc đích
 
 ```
-Database <-> CT MCP Server (streamable HTTP) <-> N coordinator CLIs
-                 |                              + CLI executor agents (do worker spawn)
-            Dramatiq Worker (giữ nguyên)
+Database <-> app/mcp_native.py (streamable HTTP :8100) <-> N coordinator CLIs (claude/codex/agy)
+                    |                                     + executor CLIs (worker spawn)
+             Dramatiq Worker (agent_runner, outbox_publisher — giữ nguyên)
 ```
 
-### Những gì KHÔNG đổi
+`CommandRouter.execute_tool` vẫn là điểm enforcement duy nhất (permission, gate, four-eyes).
 
-- Toàn bộ `app/services/` (CommandRouter, TaskOrchestration, Coordinator, brakes, AgentMatcher...).
-- Dramatiq worker, Redis broker, DB schema, GateRecord append-only, four-eyes constraint.
-- Cơ chế concurrency đã có (xem §5).
+## Các quyết định đã chốt (GĐ1–2, giữ nguyên hiệu lực)
 
-## 2. Các quyết định đã chốt
+1. Streamable HTTP, N client đồng thời; identity = token HMAC `ct1.` có `role` (coordinator/executor) + task scope.
+2. Kênh workflow: `instructions` khi initialize (≤2KB, 512 ký tự đầu tự đủ) → tool description → tool result có `next` → file instruction generate từ `docs/coordinator-rules.md` ra `CLAUDE.md`/`AGENTS.md`/`PROJECT.md` (agy). Không dùng MCP Prompts/Resources.
+3. Luật thật nằm server-side; lỗi trả về có cấu trúc + hint.
+4. Supervised mode: human approve qua chat với coordinator CLI; GateRecord ghi `approved_by: human-via-<token>`.
 
-| # | Quyết định | Lý do |
-|---|---|---|
-| 1 | MCP server mới chạy **streamable HTTP**, không stdio | N client đồng thời (nhiều coordinator + executor agents), 1 điểm enforcement chung |
-| 2 | Tool handler gọi **thẳng in-process** `CommandRouter.execute_tool` (`command_router.py:237`), không forward qua REST như `mcp_server.py` hiện tại | Bỏ hop HTTP thừa nhưng giữ nguyên invariant: mọi enforcement (permission, gate, four-eyes) vẫn ở một chỗ duy nhất |
-| 3 | **Token có role**: `coordinator` (dispatch, approve gate, xem mọi thứ) vs `executor` (báo cáo tiến độ, đọc context task của mình) | Identity nằm ở token, không nằm ở loại client — CLI nào cũng thay được |
-| 4 | **Bỏ MCP Prompts và Resources** làm kênh workflow | Codex không hỗ trợ Prompts; Prompts ở client khác chỉ là slash command user gõ tay; Resources hỗ trợ không đồng đều |
-| 5 | Kênh truyền workflow (theo độ tin cậy): (a) trường **`instructions`** khi initialize — cả Claude Code, Codex, agy đều tự tiêm vào system prompt; (b) **tool description** chứa precondition từng bước; (c) **tool result dẫn đường** — response kèm `next` gợi ý bước kế tiếp; (d) file instruction trong repo (gia cố) | Research đã verify (08/2026). Ràng buộc: instructions ≤ 2KB tổng (Claude Code cắt), 512 ký tự đầu tự đủ nghĩa (cửa sổ hiệu dụng của Codex) |
-| 6 | File instruction generate từ **một nguồn duy nhất** ra: `CLAUDE.md` (Claude Code), `AGENTS.md` (Codex), `PROJECT.md` (agy — đọc PROJECT.md trước, fallback README). Không có GEMINI.md (Gemini CLI đã khai tử) | Tránh drift giữa 3 file |
-| 7 | **Supervised mode**: human approve qua chat với coordinator → coordinator gọi `approve_gate`; GateRecord ghi `approved_by: human-via-<token>` | Không còn UI; giữ audit trail sạch |
-| 8 | **Luật thật nằm server-side.** Tool gọi sai thứ tự / sai trạng thái bị từ chối kèm error message có tính hướng dẫn. Instructions/descriptions chỉ là UX | Agent "không biết" luật vẫn không bypass được |
+---
 
-## 3. Giai đoạn 1 — Dựng CT MCP Server native (song song FastAPI)
+# Giai đoạn 3 — Xóa FE + API
 
-### 3.1. Server mới: `backend/app/mcp_native.py` (module riêng, không đụng `mcp_server.py` cũ)
+Kết quả audit dependency (2026-08-01): `fastapi` chỉ được import trong `app/main.py` + `app/api/*.py`; services/workers/db/graph/schemas hoàn toàn sạch, trừ **một** reverse dependency (`coordinator.py:1429` import `ws_manager`). Việc xóa phần lớn là cơ học, nhưng có **các blocker phải đóng trước** (Bước 1). Làm đúng thứ tự dưới đây.
 
-- FastMCP app, transport streamable HTTP, mount port riêng (vd `:8100`) hoặc mount vào FastAPI app hiện có qua `/mcp` — chọn khi implement, ưu tiên process riêng để sau này gỡ FastAPI dễ.
-- Nguồn tool duy nhất: `get_mcp_tool_specs()` (`tool_registry.py:605`) — vẫn là projection, không phải nguồn sự thật thứ hai.
-- Handler: xác thực bearer token → resolve `(session_id, role)` → gọi `CommandRouter.execute_tool` in-process.
+## Bước 0 — Commit dứt điểm phần đã xóa tay
 
-### 3.2. Auth & role
+- [ ] Commit việc xóa `frontend/` (hiện đang là thay đổi chưa commit trên main).
+- [ ] Xóa kèm: `e2e/`, `playwright.config.ts`, `package.json` ở root (100% phục vụ FE).
 
-- Mở rộng scoped token hiện có: thêm claim `role` (`coordinator` | `executor`) và scope task (cho executor).
-- Registry tool đánh dấu tool nào cần role nào; server từ chối trước khi chạm CommandRouter (defense in depth — CommandRouter vẫn kiểm lại).
-- Lệnh/tool phát hành token coordinator cho người dùng (vd script `scripts/issue-coordinator-token.sh`).
+## Bước 1 — Đóng các blocker (TRƯỚC khi xóa bất kỳ file API nào)
 
-### 3.3. Kênh workflow
+### B1.1 — Bật native làm đường duy nhất (M3 + Q2)
+Phát hiện quan trọng: `MCP_NATIVE_ENABLED` mặc định `False` (`config.py:46`) — **cấu hình mặc định hiện tại vẫn cho executor đi đường stdio-forwarder → REST**. GĐ2 chỉ "xong" khi env bật cờ này.
+- [ ] Xóa hẳn cờ `MCP_NATIVE_ENABLED` và mọi nhánh non-native: `cli_dispatcher.py:192-196, 310-318`, nhánh forwarder trong `write_mcp_config`/`build_mcp_config`, `command_builder.py:26-27`.
+- [ ] `cli_dispatcher` chuyển từ token tĩnh `MCP_API_TOKEN` (đang lọt qua nhánh `legacy_token` ở `mcp_native.py:74-75`) sang `issue_token(role=...)` ký HMAC như `command_builder.py:34` đã làm đúng. Sau đó **xóa nhánh `legacy_token`** trong `mcp_native.py`.
+- [ ] `.env.example`: thêm `MCP_TOKEN_SECRET`, `MCP_NATIVE_URL`, `CT_MCP_PORT`; xóa `MCP_API_TOKEN`, `CT_API_URL` (Q7).
 
-- **`instructions`** (initialize): state machine task (todo→dispatched→awaiting-review→in-review→done), luật four-eyes, quy ước "đọc trường `next` trong mọi tool result". ≤ 2KB, 512 ký tự đầu là bản tóm tắt tự đủ.
-- **Tool description**: mỗi tool ghi rõ precondition ("chỉ hợp lệ khi task ở `awaiting-review`; gọi `list_gates` nếu không chắc"). ≤ 2KB/tool.
-- **Tool result dẫn đường**: chuẩn hóa envelope response `{ok, data, next?, error?}`. `next` là câu hướng dẫn bước kế tiếp do server sinh theo trạng thái thực của task.
-- **Error có cấu trúc**: map `TransitionConflictError` → `{error: {code: "task_already_dispatched", by: "...", hint: "Gọi get_task để xem trạng thái mới."}}` thay vì chuỗi thô (đóng luôn gap #3 ở §5).
+### B1.2 — Vá lỗ context staleness trên đường native (M2 — bug thật, đang tồn tại)
+REST path gọi `invalidate_context_snapshot` sau mỗi tool call (`chat.py:82`); native path **không có** → snapshot context bị stale âm thầm.
+- [ ] Thêm `invalidate_context_snapshot(...)` vào `mcp_native.make_tool_handler` sau khi `execute_tool` trả về, trước `db.close()` (`mcp_native.py:173-180`).
+- [ ] Test: tool call qua native client → snapshot được invalidate.
 
-### 3.4. Instruction files
+### B1.3 — Cắt reverse dependency coordinator → ws (M1)
+- [ ] Xóa block broadcast `ws_manager` trong `coordinator.py:1429-1446` (hiện fail-soft nhưng để lại import chết). Thay thế native: coordinator CLI đọc `TaskEvent`/`get_status` — cơ chế wake CTV2-133 đã có.
 
-- Một nguồn: `docs/coordinator-rules.md` (tool nào có, triết lý four-eyes, "làm theo `next` trong tool result").
-- Generator (mở rộng pattern của `cli_dispatcher.build_mcp_config`, `cli_dispatcher.py:171`) sinh/symlink ra `CLAUDE.md`, `AGENTS.md`, `PROJECT.md` cho workspace của coordinator.
+### B1.4 — Nudge sau gate approval (Q1 — cần test trước khi xóa `dispatch.py`)
+`api/dispatch.py:134-139` gọi `advance_task.send(task_id, "gate_approved")` sau gate decision; `CommandRouter._handle_approve_gate` (`command_router.py:938`) **không** gọi.
+- [ ] Viết test: approve gate không sinh run mới → task có tự advance không. Nếu không → port nudge vào `_handle_approve_gate`.
 
-### 3.5. Test
+### B1.5 — Tool thay thế khả năng quan sát (M4 + Q5)
+- [ ] Thêm tool `get_run_output` vào `tool_registry.py`: đọc `AgentOutputChunk` từ DB (replay bền, đủ cho LLM; không cần stream). Giữ nguyên Redis publish trong worker — publish không subscriber là no-op, và operator vẫn `redis-cli SUBSCRIBE` được khi cần debug live.
+- [ ] Thêm tool `get_stats` (port phần cốt lõi của `api/stats.py`: token usage, cost per task/agent) — `query_db` là fallback nhưng stats có logic pricing không nên bắt LLM tự viết SQL.
 
-- Test MCP server in-process (fastmcp client test) phủ: auth role, gate flow qua tool, envelope `next`, error có cấu trúc, hai coordinator conflict (mượn kịch bản `test_command_router.py::test_concurrent_dispatch`).
-- Giữ nguyên toàn bộ test services hiện có — không sửa services là tiêu chí của giai đoạn này.
+### B1.6 — Launcher & health (M5 — hiện KHÔNG có gì khởi động mcp_native)
+- [ ] `scripts/start-backend.sh`: thay uvicorn `app.main:app` bằng `python -m app.mcp_native --host 0.0.0.0 --port 8100`; giữ nguyên dòng dramatiq. `stop-backend.sh` đổi pattern pkill tương ứng.
+- [ ] Thêm route `/health` không cần auth vào `mcp_native.py` (exempt trong `MCPAuthMiddleware` — hiện middleware 401 mọi request thiếu token nên probe không hoạt động); script/probe curl vào đó.
+- [ ] `backend/Dockerfile`: `CMD alembic upgrade head && python -m app.mcp_native --port 8100`. `docker-compose.yml`: bỏ service `frontend` + `VITE_API_URL`; giữ `db`, `redis`; thêm service `mcp` + `worker`.
 
-**Definition of done GĐ1**: một phiên Claude Code kết nối `:8100` bằng token coordinator, đi trọn flow todo→done (kể cả supervised approve qua chat) mà không chạm REST API.
+### B1.7 — DDL & test harness (M6 + M0)
+- [ ] Xác nhận alembic phủ toàn bộ DDL (main.py:21 `create_all` chỉ là belt-and-braces). `tests/conftest.py` tự lo `create_all` cho test DB nếu đang dựa gián tiếp vào import `app.main`.
+- [ ] Sửa `tests/conftest.py:12-14,71-77`: bỏ `TestClient` + `from app.main import app` + fixture `client` (import module-scope → nếu không sửa, xóa `main.py` làm chết **toàn bộ** suite). Làm trong cùng commit với Bước 2.
+- [ ] Load-check nhẹ cho `SessionLocal()` per tool call trong `mcp_native` (Q4) — N coordinator đồng thời; chỉnh pool_size nếu cần.
 
-## 4. Giai đoạn 2 — Chuyển client sang server mới
+### B1.8 — Chứng minh flow người dùng trước khi chặt cầu (Q3)
+- [ ] Chạy thật một phiên coordinator CLI (Claude Code hoặc agy) nối `:8100`: tạo task → dispatch (supervised, human approve qua chat) → review → done, **không chạm REST**. Đây là điều kiện tiên quyết để sang Bước 2.
 
-1. Trỏ MCP config của CLI executor agents (`build_mcp_config`) sang server native (streamable HTTP thay stdio-forwarder), token role `executor`.
-2. Chạy coordinator hằng ngày bằng Claude Code / Codex / agy trên server mới; FastAPI vẫn sống làm đường lùi.
-3. Bổ sung dần những gì client thực sự hỗ trợ tốt (vd notifications) — không cam kết trước.
-4. Sau vài tuần ổn định → quyết định số phận FastAPI + frontend (ngoài phạm vi plan này). Lúc đó `app/api/` gần như chỉ là vỏ để xóa; `mcp_server.py` (stdio forwarder) retire.
+## Bước 2 — Xóa (một PR, sau khi Bước 1 xanh)
 
-## 5. Concurrency — đã có sẵn, kèm backlog
+Xóa hẳn:
+- [ ] `backend/app/api/` toàn bộ (lưu ý: `ws.py` subscriber đã là dead code — không ai publish `TASK_EVENTS_CHANNEL`; `project_rules.py` chưa từng được include vào router).
+- [ ] `backend/app/main.py`.
+- [ ] `backend/app/mcp_server.py` (stdio forwarder) — chết cùng endpoint `/api/mcp/tools/call` trong `chat.py`.
+- [ ] Tests REST: `test_api_*.py` (7 file), `tests/integration/test_api_dispatch.py`, `test_dispatch_flow.py`, `test_full_flow.py`, `test_streaming.py`, `test_mcp_server.py`.
+- [ ] `requirements.txt`: bỏ `fastapi`; **giữ `uvicorn`** (mcp_native dùng), bỏ `httpx` nếu sau khi xóa `mcp_server.py` không còn ai dùng.
 
-Đã verify (CTV2-204, CTV2-088, CTV2-133): `Task.version` + CAS trong `_cas_status` (`task_orchestration.py:1978`), idempotency key + unique constraint trên GateRecord/AgentRun, `SELECT FOR UPDATE` trên Postgres, claim-event cho coordinator wakeup. Hai coordinator dispatch cùng task → kẻ đến sau nhận `TransitionConflictError`; `test_concurrent_dispatch` phủ đúng kịch bản. **Không xây mới.**
+Viết lại (chuyển từ TestClient sang gọi service trực tiếp qua `db_session`):
+- [ ] `test_coordinator.py:539`, `tests/integration/test_chat_context.py`, `test_tool_chat.py` (đang monkeypatch `app.api.chat.CoordinatorService` → patch `CoordinatorService` trực tiếp; `run_turn_programmatic` là entry point còn sống).
+- [ ] `test_agent_matcher.py`, `test_context_generator.py`, `test_dispatch_with_context.py`, `test_token_telemetry.py`.
 
-Backlog (không chặn GĐ1):
+Ghi chú: `CoordinatorService` KHÔNG chết theo `chat.py` — đường `run_turn_programmatic` (worker wake, CTV2-133, `agent_runner.py:508`) vẫn là driver chính. `stream_turn`/`validate_selection` thành code không ai gọi → dọn ở Bước 3.
 
-- [ ] **Supervised duplicate gate**: `_request_gate` (`task_orchestration.py:1218`) không qua CAS → hai coordinator tạo được hai pending gate cho một task (không chạy đôi, nhưng để gate mồ côi). Fix: CAS hoặc unique partial index trên pending gate per (task, gate_type).
-- [ ] **Brake race**: `check_brakes` không race-safe giữa các task khác nhau khi `active=0` — hai spawn đồng thời có thể vượt `max_concurrent_runs`. Fix: advisory lock hoặc đếm bằng conditional UPDATE trên counter.
-- [x] **Conflict error thô** → giải quyết trong GĐ1 (§3.3, error có cấu trúc).
+## Bước 3 — Dọn sau
 
-## 6. Rủi ro & đường lùi
+- [ ] Xóa schemas mồ côi: `schemas/stats.py`, `events.py`, `audit.py`, `knowledge.py`, `session.py`, `project_rule.py` (chỉ router đã xóa dùng). Kiểm tra `task.py`/`agent.py`/`project.py` với services trước khi đụng.
+- [ ] Dọn method chết trong `coordinator.py` (`stream_turn`, `validate_selection`, `completed_turn`).
+- [ ] Cập nhật `CLAUDE.md` (bỏ sơ đồ FE/REST, lệnh npm), `README.md`, `docs/coordinator-rules.md`.
+- [ ] Xử lý alembic `032_add_project_rules.py` + `schemas/project_rule.py` + `api/project_rules.py` (feature chưa wire — quyết giữ dạng tool MCC hay bỏ).
 
-- Client hỗ trợ MCP không đều (notifications, resources) → thiết kế chỉ dựa vào tools + instructions, phần còn lại là bonus.
-- FastAPI giữ nguyên đến hết GĐ2 → mọi thời điểm đều có đường lùi, không có giai đoạn hệ thống chết.
-- `mcp_server.py` cũ giữ nguyên đến khi executor agents chuyển xong.
+## Definition of Done
+
+1. `grep -r fastapi backend/app` = 0 kết quả; `pytest backend/tests/` xanh toàn bộ.
+2. Một phiên coordinator CLI đi trọn todo→done qua `:8100`, gồm supervised approve và đọc output run bằng `get_run_output`.
+3. `docker-compose up` chỉ dựng `db + redis + mcp + worker`, không còn uvicorn `app.main`.
+
+## Giữ nguyên — không đụng
+
+`mcp_native.py`, `mcp_native_issue_token.py`, toàn bộ `services/` (trừ block ws trong coordinator), toàn bộ `workers/` (kể cả `output_streamer.py` — vẫn là publisher + cơ chế cancel-key mà `command_router.py:852-886` và `agent_runner.py:1358` dùng), `db/`, `graph/`, `alembic/`, `scripts/issue-coordinator-token.sh`.

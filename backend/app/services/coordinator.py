@@ -1404,7 +1404,7 @@ class CoordinatorService:
         *,
         source_event_id: int,
     ) -> CoordinatorResult:
-        """Run a complete non-SSE turn and notify open UIs in real time."""
+        """Run a complete non-SSE turn for a worker wake-up event."""
 
         result = await self.complete_turn(
             db_session,
@@ -1414,34 +1414,4 @@ class CoordinatorService:
         if result.cached:
             return result
 
-        assistant = next(
-            (
-                item
-                for item in reversed(list(db_session.messages or []))
-                if item.get("id") == result.message_id
-            ),
-            {
-                "id": result.message_id,
-                "role": "assistant",
-                "content": result.content,
-            },
-        )
-        try:
-            from app.api.ws import ws_manager
-
-            await ws_manager.broadcast(
-                {
-                    "type": "coordinator_message",
-                    "session_id": db_session.id,
-                    "source_event_id": source_event_id,
-                    "message": assistant,
-                }
-            )
-        except Exception:
-            logger.warning(
-                "Failed to broadcast programmatic turn for session=%s event=%s",
-                db_session.id,
-                source_event_id,
-                exc_info=True,
-            )
         return result

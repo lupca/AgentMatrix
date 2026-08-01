@@ -7,10 +7,12 @@ from typing import Any, Tuple, Optional
 from app.db.models import (
     Agent,
     AgentRun,
+    AgentOutputChunk,
     AuditLog,
     GateRecord,
     KnowledgeItem,
     LLMUsage,
+    RunResourceUsage,
     Project,
     Setting,
     Task,
@@ -267,6 +269,22 @@ class CommandRouter:
                 command_args += ' --depends-on ' + ','.join(str(d) for d in depends_on)
         elif canonical_name == 'get_status':
             command_args = str(args.get('task_id', '') or '')
+        elif canonical_name == 'get_run_output':
+            task_id = str(args.get('task_id', '')).strip()
+            run_id = str(args.get('run_id', '')).strip()
+            if not task_id or not run_id:
+                return {'error': 'task_id and run_id are required'}
+            command_args = json.dumps({
+                'task_id': task_id,
+                'run_id': run_id,
+                'offset': args.get('offset', 0),
+                'limit': args.get('limit', 20),
+            }, ensure_ascii=False)
+        elif canonical_name == 'get_stats':
+            command_args = json.dumps({
+                'task_id': args.get('task_id'),
+                'agent_id': args.get('agent_id'),
+            }, ensure_ascii=False)
         elif canonical_name == 'query_db':
             entity = str(args.get('entity', '')).strip()
             if not entity:
@@ -376,6 +394,78 @@ class CommandRouter:
     
     async def _handle_show_help(self, args: str, session_id: str) -> dict:
         return {'commands': dump_registry() + [HELP_COMMAND]}
+
+    async def _handle_get_run_output(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+            task_id = str(payload.get('task_id', '')).strip()
+            run_id = str(payload.get('run_id', '')).strip()
+            offset = max(0, int(payload.get('offset', 0)))
+            limit = min(100, max(1, int(payload.get('limit', 20))))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {'error': 'Invalid get_run_output arguments'}
+        if not task_id or not run_id:
+            return {'error': 'task_id and run_id are required'}
+        run = self.db.query(AgentRun).filter(
+            AgentRun.id == run_id, AgentRun.task_id == task_id
+        ).first()
+        if run is None:
+            return {'error': f'Run {run_id} not found for task {task_id}'}
+        chunks = (
+            self.db.query(AgentOutputChunk)
+            .filter(AgentOutputChunk.run_id == run_id)
+            .order_by(AgentOutputChunk.chunk_index.asc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
+        return {
+            'task_id': task_id,
+            'run_id': run_id,
+            'status': run.status,
+            'offset': offset,
+            'limit': limit,
+            'chunks': [
+                {'index': chunk.chunk_index, 'content': chunk.content,
+                 'timestamp': chunk.timestamp.isoformat() if chunk.timestamp else None}
+                for chunk in chunks
+            ],
+            'has_more': len(chunks) == limit,
+        }
+
+    async def _handle_get_stats(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {'error': 'Invalid get_stats arguments'}
+        task_id = str(payload.get('task_id') or '').strip() or None
+        agent_id = str(payload.get('agent_id') or '').strip() or None
+        usage_query = self.db.query(LLMUsage)
+        if task_id:
+            usage_query = usage_query.filter(LLMUsage.task_id == task_id)
+        if agent_id:
+            usage_query = usage_query.join(AgentRun, LLMUsage.agent_run_id == AgentRun.id).filter(
+                AgentRun.agent_id == agent_id
+            )
+        usage = usage_query.all()
+        resources = self.db.query(RunResourceUsage)
+        if task_id or agent_id:
+            resources = resources.join(AgentRun, RunResourceUsage.agent_run_id == AgentRun.id)
+            if task_id:
+                resources = resources.filter(AgentRun.task_id == task_id)
+            if agent_id:
+                resources = resources.filter(AgentRun.agent_id == agent_id)
+        return {
+            'task_id': task_id,
+            'agent_id': agent_id,
+            'calls': len(usage),
+            'input_tokens': sum(row.input_tokens or 0 for row in usage),
+            'output_tokens': sum(row.output_tokens or 0 for row in usage),
+            'cached_tokens': sum(row.cached_tokens or 0 for row in usage),
+            'cost_usd': round(sum(float(row.cost_usd or 0) for row in usage), 8),
+            'runs': resources.count(),
+            'run_cost_usd': round(sum(float(row.estimated_cost_usd or 0) for row in resources), 8),
+        }
 
     async def _handle_load_tools(self, args: str, session_id: str) -> dict:
         group = args.strip()
@@ -936,7 +1026,7 @@ class CommandRouter:
         }
 
     async def _handle_approve_gate(self, args: str, session_id: str) -> dict:
-        from app.workers.agent_runner import run_agent
+        from app.workers.agent_runner import advance_task, run_agent
 
         parts = args.strip().split()
         if not parts:
@@ -1002,6 +1092,14 @@ class CommandRouter:
                 )
                 self.db.refresh(result.task)
                 return {'error': error, 'run_id': run.id, 'task': self._task_snapshot(result.task)}
+        if result.applied:
+            # The REST endpoint nudges the orchestration driver after an
+            # approval. Native MCP approvals must wake it as well; the
+            # idempotent driver safely ignores a duplicate run enqueue.
+            try:
+                advance_task.send(result.task.id, "gate_approved")
+            except Exception:
+                pass
         return {
             'action': 'gate_decision',
             'task_id': result.task.id,

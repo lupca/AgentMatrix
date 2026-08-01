@@ -36,15 +36,11 @@ class Settings(BaseSettings):
     MAX_TOOL_CALLS_PER_RUN: int = 200
     MAX_NO_PROGRESS_SECONDS: int = 300
 
-    # MCP projection (ADR-001 §D5): scoped token the mcp_server.py handlers
-    # use to authenticate against POST /api/mcp/tools/call, and the base URL
-    # the coordinator chat CLI's MCP subprocess reaches this API on. Empty
-    # token means the endpoint stays closed (fail-closed default).
-    MCP_API_TOKEN: str = ""
+    # Native MCP is the only coordinator/executor transport. Tokens are
+    # issued from this secret and validated by app.mcp_native.
     MCP_TOKEN_SECRET: str = ""
     MCP_NATIVE_URL: str = "http://localhost:8100/mcp"
-    MCP_NATIVE_ENABLED: bool = False
-    CT_API_URL: str = "http://localhost:8000"
+    CT_MCP_PORT: int = 8100
 
     class Config:
         env_file = ".env"

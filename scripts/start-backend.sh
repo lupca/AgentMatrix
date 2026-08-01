@@ -61,8 +61,8 @@ echo "Running migrations..."
 alembic upgrade head
 
 # Start backend
-echo "Starting backend on port 8001..."
-nohup uvicorn app.main:app --host 0.0.0.0 --port 8001 > "$LOG_FILE" 2>&1 &
+echo "Starting native MCP server on port 8100..."
+nohup python -m app.mcp_native --host 0.0.0.0 --port 8100 > "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 
 # Start worker
@@ -73,13 +73,13 @@ echo $! > "$WORKER_PID_FILE"
 sleep 3
 # Retry health check a few times
 for i in 1 2 3 4 5; do
-    if curl -s http://localhost:8001/health > /dev/null; then
+    if curl -s http://localhost:8100/health > /dev/null; then
         break
     fi
     sleep 1
 done
 
-if curl -s http://localhost:8001/health > /dev/null; then
+if curl -s http://localhost:8100/health > /dev/null; then
     echo "Backend started successfully (PID: $(cat $PID_FILE))"
     echo "Worker started successfully (PID: $(cat $WORKER_PID_FILE))"
     echo "Log: $LOG_FILE"

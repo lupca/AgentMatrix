@@ -23,7 +23,7 @@ if [ -f "$PID_FILE" ]; then
     rm "$PID_FILE"
 else
     echo "No backend PID file found. Checking for orphan processes..."
-    pkill -f "uvicorn app.main:app.*8001" && echo "Killed orphan backend process" || echo "No backend process found"
+    pkill -f "python -m app.mcp_native.*8100" && echo "Killed orphan MCP process" || echo "No MCP process found"
 fi
 
 if [ -f "$WORKER_PID_FILE" ]; then

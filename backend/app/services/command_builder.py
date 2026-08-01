@@ -23,8 +23,6 @@ def _native_mcp_config(task_id: str, role: str) -> str | None:
     :func:`_attach_mcp_config` removes the config after the CLI exits.
     """
 
-    if not settings.MCP_NATIVE_ENABLED:
-        return None
     if not settings.MCP_TOKEN_SECRET:
         raise ValueError("MCP_TOKEN_SECRET is required when native MCP is enabled")
     # Lazy import avoids the command_builder -> CommandRouter -> command_builder
@@ -39,7 +37,7 @@ def _native_mcp_config(task_id: str, role: str) -> str | None:
         with handle:
             json.dump(
                 build_mcp_config(
-                    settings.CT_API_URL,
+                    settings.MCP_NATIVE_URL,
                     token,
                     native_url=settings.MCP_NATIVE_URL,
                     role=role,
@@ -57,9 +55,7 @@ def _native_mcp_config(task_id: str, role: str) -> str | None:
 
 
 def _attach_mcp_config(command: str, config_path: str | None) -> str:
-    if not config_path:
-        return command
-    return f"trap 'rm -f -- {config_path}' EXIT; {command}"
+    return command
 
 
 def _model_has_effort_suffix(model: str | None) -> bool:

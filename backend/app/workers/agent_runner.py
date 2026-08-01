@@ -204,6 +204,23 @@ def _json_line(line: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _cleanup_mcp_config(command: str) -> None:
+    """Remove the per-run native MCP config containing the scoped token."""
+    try:
+        argv = shlex.split(command)
+        marker = argv.index("--mcp-config")
+        path = argv[marker + 1]
+    except (ValueError, IndexError, TypeError):
+        return
+    if path.startswith(tempfile.gettempdir() + os.sep) and path.startswith(
+        os.path.join(tempfile.gettempdir(), "ct-mcp-")
+    ):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 def _vendor_event(event_type: str, payload: dict[str, Any], timestamp: datetime | None = None) -> dict:
     if event_type not in AGENT_EVENT_TYPES:
         return {}
@@ -968,6 +985,7 @@ def run_agent(
         return None
     finally:
         process_manager.terminate()
+        _cleanup_mcp_config(command)
         if worktree_manager is not None and worktree_path is not None:
             worktree_manager.remove(worktree_path)
         if review_git_dir is not None:

@@ -17,23 +17,40 @@ services:
       timeout: 5s
       retries: 5
 
-  # Backend runs locally (not in Docker) to access authenticated CLI tools
-  # Use ./scripts/start-backend.sh and ./scripts/stop-backend.sh
-  # backend:
-  #   build: ./backend
-  #   ...
-
-  frontend:
-    build: ./frontend
-    container_name: control_tower_frontend
-    restart: always
+  mcp:
+    build: ./backend
+    container_name: control_tower_mcp
+    restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT:-3000}:80"
-    # Backend runs on host, frontend needs to reach it
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "${MCP_PORT:-8100}:8100"
     environment:
-      - VITE_API_URL=http://host.docker.internal:8001
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ct}:${DB_PASSWORD:-secret}@db:5432/${POSTGRES_DB:-control_tower}
+      REDIS_URL: redis://redis:6379/0
+      MCP_TOKEN_SECRET: ${MCP_TOKEN_SECRET:?MCP_TOKEN_SECRET is required}
+      MCP_NATIVE_URL: ${MCP_NATIVE_URL:-http://localhost:8100/mcp}
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8100/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: ./backend
+    container_name: control_tower_worker
+    restart: unless-stopped
+    command: ["dramatiq", "app.workers.agent_runner", "app.workers.outbox_publisher"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ct}:${DB_PASSWORD:-secret}@db:5432/${POSTGRES_DB:-control_tower}
+      REDIS_URL: redis://redis:6379/0
+      MCP_TOKEN_SECRET: ${MCP_TOKEN_SECRET:?MCP_TOKEN_SECRET is required}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   redis:
     image: redis:7-alpine

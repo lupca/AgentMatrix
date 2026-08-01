@@ -4,15 +4,19 @@ import subprocess
 os.environ["TESTING"] = "1"
 
 import pytest
+from app.core.config import settings
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.db.base import Base
-from app.db.base import get_db
-from fastapi.testclient import TestClient
-from app.main import app
 
 TEST_DB = 'postgresql://ct:secret@localhost:5433/control_tower_test'
+
+
+@pytest.fixture(autouse=True)
+def native_mcp_test_secret(monkeypatch):
+    monkeypatch.setenv("MCP_TOKEN_SECRET", "test-secret")
+    monkeypatch.setattr(settings, "MCP_TOKEN_SECRET", "test-secret")
 
 
 @pytest.fixture
@@ -63,14 +67,3 @@ def db_session():
         session.close()
         Base.metadata.drop_all(engine)
         engine.dispose()
-
-
-@pytest.fixture
-def client(db_session):
-    def override_db():
-        yield db_session
-
-    app.dependency_overrides[get_db] = override_db
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()

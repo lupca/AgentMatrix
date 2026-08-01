@@ -92,6 +92,51 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             required_role="executor",
         ),
         ToolSpec(
+            name="get_run_output",
+            description=(
+                "Read persisted output chunks for an executor run. Use this to "
+                "inspect progress or a completed run; output is replayable and "
+                "does not depend on a live stream."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task scope."},
+                    "run_id": {"type": "string", "description": "Agent run id."},
+                    "offset": {"type": "integer", "default": 0},
+                    "limit": {"type": "integer", "default": 20},
+                },
+                "required": ["task_id", "run_id"],
+            },
+            handler="get_run_output",
+            tier="eager",
+            permission="read",
+            entity="agent_runs",
+            slash_alias=None,
+            group="query",
+            required_role="executor",
+        ),
+        ToolSpec(
+            name="get_stats",
+            description=(
+                "Return server-computed token usage, cost, and run statistics. "
+                "Use task_id or agent_id to narrow the report."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                },
+            },
+            handler="get_stats",
+            tier="eager",
+            permission="read",
+            entity="usage",
+            slash_alias=None,
+            group="query",
+        ),
+        ToolSpec(
             name="query_db",
             description=(
                 "Read-only lookup across Control Tower entities not already "
