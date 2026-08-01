@@ -538,11 +538,79 @@ def _publish(run_id: str, payload: dict) -> None:
 
 @dramatiq.actor(
     broker=redis_broker,
+    max_retries=0,
+    time_limit=30_000,
+)
+def run_agent_dead_letter(dead_message: dict, retry_info: dict) -> str:
+    """Callback dramatiq's `Retries` middleware invokes (`on_retry_exhausted`
+    on `run_agent`, below) once a `run_agent` message has exhausted every
+    retry attempt. Without this the message is simply dropped and its
+    AgentRun is left "queued"/"running" forever with no worker left to move
+    it -- CTV2-217, previously required a manual XQ flush (see B1.8).
+
+    `dead_message` is `Message.asdict()` for the failed message (so
+    `dead_message["args"][0]` is the `run_id` `run_agent` was called with);
+    `retry_info` is `{"retries": int, "max_retries": int}`, both supplied by
+    dramatiq itself.
+    """
+    args = dead_message.get("args") or ()
+    run_id = args[0] if args else None
+    message_id = dead_message.get("message_id", "unknown")
+    retries = retry_info.get("retries")
+    max_retries = retry_info.get("max_retries")
+    last_error = (dead_message.get("options") or {}).get("traceback") or "no traceback recorded"
+    error = f"dead-lettered after {retries}/{max_retries} retries: {last_error}"[:4000]
+
+    if not run_id:
+        logger.warning(
+            "run_agent dead-letter: message %s carries no run_id, discarding as orphan",
+            message_id,
+        )
+        return "discarded_no_run_id"
+
+    db: Session = SessionLocal()
+    try:
+        run = db.get(AgentRun, run_id)
+        if run is None:
+            logger.warning(
+                "run_agent dead-letter: run %s not found, discarding as orphan", run_id
+            )
+            return "discarded_orphan"
+        if run.status not in {"queued", "running"}:
+            logger.info(
+                "run_agent dead-letter: run %s already resolved (%s), discarding",
+                run_id,
+                run.status,
+            )
+            return "discarded_resolved"
+
+        service = TaskOrchestrationService(db)
+        try:
+            service.record_dispatch_queue_failure(
+                run_id=run_id,
+                error=error,
+                actor="system:dead-letter",
+                idempotency_key=f"deadletter:{message_id}",
+            )
+        except OrchestrationError:
+            logger.exception(
+                "run_agent dead-letter: could not transition run %s / its task out "
+                "of its in-flight status",
+                run_id,
+            )
+        return "handled"
+    finally:
+        db.close()
+
+
+@dramatiq.actor(
+    broker=redis_broker,
     max_retries=3,
     min_backoff=30_000,
     max_backoff=300_000,
     time_limit=900_000,
     notify_shutdown=True,
+    on_retry_exhausted="run_agent_dead_letter",
 )
 def run_agent(
     run_id: str,
