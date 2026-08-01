@@ -10,7 +10,7 @@ Vòng done duy nhất đến giờ là vòng agy vượt rào (xem `REVIEW-GD3-B
 - [x] `./scripts/init-coordinator-workdir.sh ~/ct-coordinator 28800` → chạy coordinator từ đó (KHÔNG phải trong repo này).
 - [x] Đi trọn P1 của `B18-TEST-SCRIPT.md` trên project/repo test thật (ct-demo): CTDE-001, CTDE-003, CTDE-011 đều todo→done trọn vòng 2026-08-01, four-eyes giữ, verdict từ review run thật. (Phải sửa 4 bug chặn đường trước — xem mục "Kết quả test B1.8" dưới.)
 - [x] Guardrail đạt: coordinator báo `failed` nguyên văn, thử approve bị từ chối thì dừng đề xuất, không Bash-vào-DB (một lần curl thẳng endpoint MCP — vẫn qua auth + gate, chấp nhận được).
-- [ ] Cảnh cuối còn thiếu: dispatch **supervised** với human approve qua chat (gate `dispatch_pending` → "y"). Đang chờ approve `admin:11` (autonomy=supervised) rồi chạy một task mới. Lưu ý CTV2-222: nút chỉnh là setting `autonomy`, KHÔNG phải `default_mode`.
+- [x] Cảnh cuối: dispatch **supervised** với human approve — hoàn thành 2026-08-01 chiều bằng CTV2-216 (todo→done trọn vòng, human approve cả 3 gate dispatch/review_order/verdict, four-eyes sonnet-high/sonnet-low, suite 499 xanh). Phải sửa 2 bug chặn đường: flush trước CAS (ck_tasks_terminal_not_awaiting_approval) và attempt slot cho re-review (ccaf39f, 215f9fc).
 
 ## P1 — Bước 2: xóa hẳn lớp FastAPI (một PR)
 
@@ -51,6 +51,10 @@ Chi tiết từng vấn đề ở dạng task file tại `~/projects/control-tow
 - CTV2-229 (done): migrate_md_to_db từng clear `agents` (mất api_key qua CASCADE agent_accounts, reset điểm đo) và reset `next_task_seq` (create_task sinh id trùng) — đã sửa: agents upsert giữ key/điểm, re-seed counter sau import.
 - Reminder `pending_approvals` từng dính task đã archive (đã sửa: lọc `archived_at IS NULL` cả hai ledger + escalation).
 - CTV2-227 (đang chạy qua dispatch): nối lại flow Project Context & Rules — tool `save_project_context` + inject context/rules vào prompt (test cũ là test rỗng, chưa từng có injection).
+- CTV2-216 (DONE qua dispatch): reaper cho run running PID chết — merge 4084fb7.
+- CTV2-230 (med): driver và request_review mỗi bên tạo một gate review_order → gate mồ côi ám reminder (đã reject 2 gate trùng bằng child-row system:cleanup).
+- CTV2-231 (high): review run bị watchdog cancel ("no progress") để task kẹt in-review — cancel phải đi qua record_review_failure như failure; đã phải phẫu thuật SQL gỡ CTV2-227.
+- Đã sửa tại chỗ (kèm test xanh 499): `_cas_status` flush ORM trước raw UPDATE (verdict supervised không land được done); review re-order lấy max(attempt)+1 (đụng uq_agent_runs_round_kind_attempt).
 
 ## P2 — Bước 3 + backlog tồn đọng
 
