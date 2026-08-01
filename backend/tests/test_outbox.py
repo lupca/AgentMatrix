@@ -7,6 +7,7 @@ from app.db.models import Agent, AgentRun, OutboxEvent, Project, Task
 from app.services.outbox import (
     MAX_PUBLISH_ATTEMPTS,
     publish_pending_events,
+    reap_dead_running_runs,
     reconcile_orphaned_runs,
 )
 
@@ -194,3 +195,90 @@ def test_reconcile_orphaned_runs_ignores_recently_queued_runs(seeded):
 
     assert reconciled == 0
     assert seeded.query(OutboxEvent).count() == 0
+
+
+def test_reap_fails_dead_running_run_and_frees_the_task(seeded):
+    """A `running` run whose worker died (dead PID, past the min age) is
+    marked failed with a clear error, and the task escapes `dispatched`
+    through the normal execution-failure service call (CTV2-216)."""
+    old = datetime.now(timezone.utc) - timedelta(seconds=300)
+    run = _run(seeded, status="running", pid=99999, started_at=old)
+
+    with patch("app.services.outbox._process_is_alive", return_value=False) as mock_alive:
+        reaped = reap_dead_running_runs(seeded, min_age_seconds=120)
+
+    mock_alive.assert_called_once_with(99999)
+    assert reaped == 1
+    seeded.refresh(run)
+    assert run.status == "failed"
+    assert run.pid is None
+    assert run.error_message == "reaped: worker process 99999 is dead"
+
+    task = seeded.get(Task, "OUTBOX-T1")
+    # The run leaving {queued, running} is itself the freed concurrency slot.
+    assert task.status == "failed"
+    assert task.error == run.error_message
+
+
+def test_reap_skips_running_run_with_a_live_pid(seeded):
+    old = datetime.now(timezone.utc) - timedelta(seconds=300)
+    run = _run(seeded, status="running", pid=12345, started_at=old)
+
+    with patch("app.services.outbox._process_is_alive", return_value=True):
+        reaped = reap_dead_running_runs(seeded, min_age_seconds=120)
+
+    assert reaped == 0
+    seeded.refresh(run)
+    assert run.status == "running"
+    assert run.pid == 12345
+
+
+def test_reap_skips_running_run_younger_than_the_age_threshold(seeded):
+    """A run that just started must never be reaped, even with a dead-looking
+    PID -- this is also the PID-reuse mitigation (the OS may have already
+    handed that PID to an unrelated process by the time we'd check it)."""
+    run = _run(
+        seeded, status="running", pid=99999, started_at=datetime.now(timezone.utc)
+    )
+
+    with patch("app.services.outbox._process_is_alive", return_value=False) as mock_alive:
+        reaped = reap_dead_running_runs(seeded, min_age_seconds=120)
+
+    assert reaped == 0
+    mock_alive.assert_not_called()
+    seeded.refresh(run)
+    assert run.status == "running"
+
+
+def test_reap_uses_record_review_failure_for_review_runs(seeded):
+    task = seeded.query(Task).filter(Task.id == "OUTBOX-T1").first()
+    task.status = "in-review"
+    task.result_ref = "abcdef012345..fedcba543210"
+    seeded.commit()
+
+    old = datetime.now(timezone.utc) - timedelta(seconds=300)
+    run = _run(seeded, status="running", pid=99999, started_at=old, kind="review")
+
+    with patch("app.services.outbox._process_is_alive", return_value=False):
+        reaped = reap_dead_running_runs(seeded, min_age_seconds=120)
+
+    assert reaped == 1
+    seeded.refresh(run)
+    assert run.status == "failed"
+
+    seeded.refresh(task)
+    assert task.status == "failed"
+    assert task.awaiting_approval is True
+
+
+def test_reap_ignores_running_runs_with_no_recorded_pid(seeded):
+    old = datetime.now(timezone.utc) - timedelta(seconds=300)
+    run = _run(seeded, status="running", pid=None, started_at=old)
+
+    with patch("app.services.outbox._process_is_alive") as mock_alive:
+        reaped = reap_dead_running_runs(seeded, min_age_seconds=120)
+
+    mock_alive.assert_not_called()
+    assert reaped == 0
+    seeded.refresh(run)
+    assert run.status == "running"

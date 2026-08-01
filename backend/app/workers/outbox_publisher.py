@@ -17,7 +17,11 @@ import os
 import dramatiq
 
 from app.db.base import SessionLocal
-from app.services.outbox import publish_pending_events, reconcile_orphaned_runs
+from app.services.outbox import (
+    publish_pending_events,
+    reap_dead_running_runs,
+    reconcile_orphaned_runs,
+)
 from app.workers import redis_broker
 
 logger = logging.getLogger(__name__)
@@ -45,18 +49,29 @@ def outbox_publisher() -> dict[str, int]:
 
 
 @dramatiq.actor(broker=redis_broker, max_retries=0, time_limit=30_000)
-def reconcile_orphaned_agent_runs() -> int:
+def reconcile_orphaned_agent_runs() -> dict[str, int]:
+    """Recover orphaned `queued` runs and reap `running` runs behind a dead PID.
+
+    Both backstops share this poll tick (CTV2-216) rather than each keeping
+    its own schedule: they're both last-resort sweeps over stuck AgentRun
+    rows, so one cadence is enough and it halves the idle DB polling.
+    """
     db = SessionLocal()
     try:
-        count = reconcile_orphaned_runs(db)
-        if count:
+        reconciled = reconcile_orphaned_runs(db)
+        if reconciled:
             logger.warning(
-                "reconcile_orphaned_agent_runs: recovered %s orphaned run(s)", count
+                "reconcile_orphaned_agent_runs: recovered %s orphaned run(s)", reconciled
             )
-        return count
+        reaped = reap_dead_running_runs(db)
+        if reaped:
+            logger.warning(
+                "reconcile_orphaned_agent_runs: reaped %s dead running run(s)", reaped
+            )
+        return {"reconciled": reconciled, "reaped": reaped}
     except Exception:
         logger.exception("reconcile_orphaned_agent_runs: poll failed")
-        return 0
+        return {"reconciled": 0, "reaped": 0}
     finally:
         db.close()
         reconcile_orphaned_agent_runs.send_with_options(delay=RECONCILE_POLL_INTERVAL_MS)
