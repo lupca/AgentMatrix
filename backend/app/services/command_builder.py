@@ -153,6 +153,15 @@ def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -
     sections = [
         f"/code-review --from {base_ref} --to {head_ref}",
         f"Review task {task.id}: {task.title}",
+        # ADR-009 review toolchain: extra analyzers are opportunistic — a
+        # missing binary must never block the review (chỉ ghi nhận và bỏ qua).
+        "Review toolchain:\n"
+        "If this repo contains .claude/review-toolchain.md, run each tool it "
+        f"lists against the range {base_ref}..{head_ref} (e.g. `ocr review "
+        f"--from {base_ref} --to {head_ref} --format json`) and fold their "
+        "findings into your own, mapped to AC items where relevant. A tool "
+        "that is not installed or exits with an error is NOT a review "
+        "failure: note it in evidence and continue without it.",
     ]
     if task.acceptance_criteria:
         sections.append(

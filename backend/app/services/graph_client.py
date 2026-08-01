@@ -3,6 +3,7 @@ import time
 from typing import Any, Dict, List, Optional, Union
 from app.services.mcp import MCPClient
 from app.core.compression import compress_for_prompt
+from app.services.tool_metrics import record_tool_metric
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,20 @@ def clear_graph_cache() -> None:
     graph_cache.clear()
 
 
+def _observe(tool: str, started: float, ok: bool, result=None, cached=False, error=None) -> None:
+    """One tool_metrics row per graph call — success, failure, or cache hit."""
+    record_tool_metric(
+        tool=tool,
+        source="graph_client",
+        ok=ok,
+        cache_hit=cached,
+        duration_ms=int((time.monotonic() - started) * 1000),
+        result_count=(len(result) if isinstance(result, (list, dict)) else None),
+        bytes_out=(len(str(result)) if result is not None else None),
+        error=error,
+    )
+
+
 def _make_cache_key(func_name: str, repo_root: str, **kwargs) -> str:
     sorted_args = sorted(kwargs.items())
     return f"{func_name}:{repo_root}:{sorted_args}"
@@ -66,10 +81,13 @@ async def get_impact_radius(
     Args:
         compress_output: If True, return compressed string for prompt usage.
     """
+    started = time.monotonic()
+    _tool_name = "get_impact_radius"
     cache_key = _make_cache_key("get_impact_radius", repo_root, file=file)
     if use_cache and not raise_on_error:
         cached = graph_cache.get(cache_key)
         if cached is not None:
+            _observe(_tool_name, started, True, cached, cached=True)
             return compress_for_prompt(cached) if compress_output else cached
 
     try:
@@ -103,9 +121,11 @@ async def get_impact_radius(
             graph_cache.set(cache_key, result)
         if raise_on_error and raw is None:
             raise GraphClientError("MCP returned no response; graph may not be built")
+        _observe(_tool_name, started, True, result)
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("get_impact_radius failed with fallback to []: %s", e)
+        _observe("get_impact_radius", started, False, error=str(e))
         if raise_on_error:
             if isinstance(e, GraphClientError):
                 raise
@@ -127,10 +147,13 @@ async def semantic_search(
     Args:
         compress_output: If True, return compressed string for prompt usage.
     """
+    started = time.monotonic()
+    _tool_name = "semantic_search"
     cache_key = _make_cache_key("semantic_search", repo_root, query=query, limit=limit)
     if use_cache and not raise_on_error:
         cached = graph_cache.get(cache_key)
         if cached is not None:
+            _observe(_tool_name, started, True, cached, cached=True)
             return compress_for_prompt(cached) if compress_output else cached
 
     try:
@@ -156,9 +179,11 @@ async def semantic_search(
             graph_cache.set(cache_key, result)
         if raise_on_error and raw is None:
             raise GraphClientError("MCP returned no response; graph may not be built")
+        _observe(_tool_name, started, True, result)
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("semantic_search failed with fallback to []: %s", e)
+        _observe("semantic_search", started, False, error=str(e))
         if raise_on_error:
             if isinstance(e, GraphClientError):
                 raise
@@ -178,10 +203,13 @@ async def query_tests_for(
     Args:
         compress_output: If True, return compressed string for prompt usage.
     """
+    started = time.monotonic()
+    _tool_name = "query_tests_for"
     cache_key = _make_cache_key("query_tests_for", repo_root, target=target)
     if use_cache:
         cached = graph_cache.get(cache_key)
         if cached is not None:
+            _observe(_tool_name, started, True, cached, cached=True)
             return compress_for_prompt(cached) if compress_output else cached
 
     try:
@@ -210,9 +238,11 @@ async def query_tests_for(
 
         if use_cache:
             graph_cache.set(cache_key, result)
+        _observe(_tool_name, started, True, result)
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("query_tests_for failed with fallback to []: %s", e)
+        _observe("query_tests_for", started, False, error=str(e))
         return compress_for_prompt([]) if compress_output else []
 
 
@@ -228,10 +258,13 @@ async def get_affected_flows(
     Args:
         compress_output: If True, return compressed string for prompt usage.
     """
+    started = time.monotonic()
+    _tool_name = "get_affected_flows"
     cache_key = _make_cache_key("get_affected_flows", repo_root, files=tuple(files))
     if use_cache:
         cached = graph_cache.get(cache_key)
         if cached is not None:
+            _observe(_tool_name, started, True, cached, cached=True)
             return compress_for_prompt(cached) if compress_output else cached
 
     try:
@@ -261,9 +294,11 @@ async def get_affected_flows(
 
         if use_cache:
             graph_cache.set(cache_key, result)
+        _observe(_tool_name, started, True, result)
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("get_affected_flows failed with fallback to []: %s", e)
+        _observe("get_affected_flows", started, False, error=str(e))
         return compress_for_prompt([]) if compress_output else []
 
 
@@ -275,10 +310,13 @@ async def query_graph(
     use_cache: bool = True,
 ) -> Union[List[Dict[str, Any]], List[str]]:
     """Generic query_graph wrapper for predefined patterns."""
+    started = time.monotonic()
+    _tool_name = "query_graph"
     cache_key = _make_cache_key("query_graph", repo_root, pattern=pattern, target=target)
     if use_cache:
         cached = graph_cache.get(cache_key)
         if cached is not None:
+            _observe(_tool_name, started, True, cached, cached=True)
             return cached
 
     try:
@@ -297,7 +335,9 @@ async def query_graph(
 
         if use_cache:
             graph_cache.set(cache_key, result)
+        _observe(_tool_name, started, True, result)
         return result
     except Exception as e:
         logger.warning("query_graph failed with fallback to []: %s", e)
+        _observe("query_graph", started, False, error=str(e))
         return []

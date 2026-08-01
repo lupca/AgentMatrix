@@ -1029,3 +1029,28 @@ class SessionEventCursor(Base):
     last_digest_event_id = Column(Integer, nullable=False, server_default="0", default=0)
 
     session = relationship("Session", back_populates="event_cursor")
+
+
+class ToolMetric(Base):
+    """One row per invocation of a token-saving tool (graph, ocr, review).
+
+    The system was blind: graph failures degraded to [] with only a log
+    line, and nothing recorded whether these tools are used at all, how
+    often they succeed, or how much context they return. Analyzable via
+    query_db (SELECT ... FROM tool_metrics).
+    """
+
+    __tablename__ = "tool_metrics"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    tool = Column(String(50), nullable=False, index=True)
+    source = Column(String(30), nullable=False)
+    task_id = Column(String(50), nullable=True)
+    ok = Column(Boolean, nullable=False)
+    cache_hit = Column(Boolean, nullable=False, default=False)
+    duration_ms = Column(Integer, nullable=True)
+    result_count = Column(Integer, nullable=True)
+    bytes_out = Column(Integer, nullable=True)
+    error = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

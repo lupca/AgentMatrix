@@ -50,6 +50,7 @@ from app.services.process_manager import (
     WorktreeUnsupportedError,
 )
 from app.services.task_event_service import TaskEventService, emit_task_event
+from app.services.tool_metrics import record_tool_metric
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.workers import redis_broker
 from app.workers.output_streamer import (
@@ -162,7 +163,32 @@ def load_review_result(
             expected=expected_count,
             actual=len(result.ac_results),
         )
+    # Persistent telemetry (CTV2-239): what the review toolchain actually
+    # produced — findings volume, AC outcomes, whether tests were run.
+    record_tool_metric(
+        tool="review_result",
+        source="agent_runner",
+        ok=True,
+        task_id=task_id,
+        result_count=len(result.findings),
+        bytes_out=len(raw),
+        payload={
+            "ac_pass": sum(1 for a in result.ac_results if a.status == "pass"),
+            "ac_fail": sum(1 for a in result.ac_results if a.status == "fail"),
+            "findings_by_severity": _findings_by_severity(result),
+            "tests_run": len(result.tests_run),
+            "tests_passed": len(result.tests_passed),
+        },
+    )
     return result
+
+
+def _findings_by_severity(result: ReviewResult) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for finding in result.findings:
+        key = (finding.severity or "unknown").lower()
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 def publish_line(
@@ -951,6 +977,13 @@ def run_agent(
                     # Missing/malformed artifact is never treated as an
                     # implicit pass. The task is escalated to a human rather
                     # than silently advanced or left stuck in "in-review".
+                    record_tool_metric(
+                        tool="review_result",
+                        source="agent_runner",
+                        ok=False,
+                        task_id=task_id,
+                        error=f"{exc.code}: {exc}",
+                    )
                     run.status = ProcessStatus.FAILED.value
                     effective_status = ProcessStatus.FAILED.value
                     run.error_message = str(exc)
