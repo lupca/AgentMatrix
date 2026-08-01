@@ -100,11 +100,22 @@ class TestSaveProjectContext:
         })
         return await router.execute("save_project_context", args, "session-1")
 
+    @staticmethod
+    def _seed_task(db_session, project_id, task_id="task-save-1"):
+        # The handler refuses a cross-project write, so the scoping task must
+        # exist and belong to the target project.
+        db_session.add(Task(
+            id=task_id, title="ctx gen", project=project_id,
+            status="dispatched", legacy_no_ac=True,
+        ))
+        db_session.flush()
+
     @pytest.mark.asyncio
     async def test_save_success(self, db_session):
         project = Project(id="proj-save-1", name="Save Test")
         db_session.add(project)
         db_session.flush()
+        self._seed_task(db_session, "proj-save-1")
 
         router = CommandRouter(db_session)
         result = await self._call(
@@ -132,6 +143,7 @@ class TestSaveProjectContext:
         project = Project(id="proj-save-2", name="Too Long")
         db_session.add(project)
         db_session.flush()
+        self._seed_task(db_session, "proj-save-2")
 
         router = CommandRouter(db_session)
         too_long = "\n".join(f"line {i}" for i in range(151))
@@ -147,6 +159,7 @@ class TestSaveProjectContext:
         project = Project(id="proj-save-3", name="Replace Test")
         db_session.add(project)
         db_session.flush()
+        self._seed_task(db_session, "proj-save-3")
 
         router = CommandRouter(db_session)
         await self._call(
@@ -174,6 +187,7 @@ class TestSaveProjectContext:
         project = Project(id="proj-save-4", name="Dup Test")
         db_session.add(project)
         db_session.flush()
+        self._seed_task(db_session, "proj-save-4")
 
         router = CommandRouter(db_session)
         result = await self._call(
@@ -200,3 +214,38 @@ class TestSaveProjectContext:
 
 
 
+
+    @pytest.mark.asyncio
+    async def test_save_rejects_cross_project_write(self, db_session):
+        db_session.add_all([
+            Project(id="proj-save-5", name="Mine"),
+            Project(id="proj-save-6", name="Theirs"),
+        ])
+        db_session.flush()
+        self._seed_task(db_session, "proj-save-5")
+
+        router = CommandRouter(db_session)
+        result = await self._call(router, "proj-save-6", "# Context")
+
+        assert "error" in result
+        assert "cross-project" in result["error"]
+        victim = db_session.get(Project, "proj-save-6")
+        assert victim.context_md is None
+
+    @pytest.mark.asyncio
+    async def test_save_rejects_non_string_glob(self, db_session):
+        project = Project(id="proj-save-7", name="Bad Glob")
+        db_session.add(project)
+        db_session.flush()
+        self._seed_task(db_session, "proj-save-7")
+
+        router = CommandRouter(db_session)
+        result = await self._call(
+            router,
+            "proj-save-7",
+            "# Context",
+            rules=[{"name": "bad", "globs": [123], "content": "x"}],
+        )
+
+        assert "error" in result
+        assert "list of strings" in result["error"]

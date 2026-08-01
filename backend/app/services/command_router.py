@@ -837,6 +837,21 @@ class CommandRouter:
         if project is None:
             return {'error': f'Project {project_id} not found'}
 
+        # The executor token is scoped to task_id (checked upstream by
+        # _task_scope_ok), but project_id arrives straight from the client:
+        # without this check an executor could overwrite ANY project's
+        # context (round-3 review finding F1, cross-project write).
+        task = self.db.get(Task, task_id)
+        if task is None:
+            return {'error': f'Task {task_id} not found'}
+        if task.project != project_id:
+            return {
+                'error': (
+                    f'Task {task_id} belongs to project {task.project}, '
+                    f'not {project_id}; refusing cross-project context write'
+                )
+            }
+
         context_lines = context_md.splitlines()
         if len(context_lines) > 150:
             return {
@@ -857,14 +872,18 @@ class CommandRouter:
             content = rule.get('content')
             if not name:
                 return {'error': f'rule at index {idx} is missing a name'}
+            if len(name) > 100:
+                return {'error': f"rule name '{name[:40]}...' exceeds 100 characters"}
             if name in seen_names:
                 return {'error': f"duplicate rule name '{name}'; rule names must be unique"}
             seen_names.add(name)
             if not isinstance(content, str) or not content.strip():
                 return {'error': f"rule '{name}' is missing content"}
             globs = rule.get('globs') or []
-            if not isinstance(globs, list):
-                return {'error': f"rule '{name}' globs must be a list"}
+            if not isinstance(globs, list) or not all(
+                isinstance(glob, str) for glob in globs
+            ):
+                return {'error': f"rule '{name}' globs must be a list of strings"}
             parsed_rules.append({
                 'name': name,
                 'globs': list(globs),
