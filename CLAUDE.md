@@ -67,3 +67,9 @@ backend/venv/bin/python -m pytest backend/tests -q
 - **Worktree isolation**: mỗi AgentRun chạy trong git worktree riêng
 - **MCP Native**: Coordinator CLI tương tác 100% qua tool surface FastMCP native
 - **Coordinator Workdir**: Chạy coordinator CLI từ ngoài repo (`~/ct-coordinator`)
+
+## Spec chi tiết
+
+Đặc tả đầy đủ (và luôn phải phản ánh hiện trạng code) ở `docs/spec/01..07`
+— bắt đầu từ `docs/README.md`. Đổi hành vi hệ thống thì cập nhật spec tương ứng
+trong cùng PR. Backlog sống: `docs/plans/GD4-CLEANUP-PLAN.md`.
