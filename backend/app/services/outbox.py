@@ -16,6 +16,7 @@ enqueued".
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
@@ -36,6 +37,14 @@ BACKOFF_MAX_SECONDS = 300
 # outbox row currently tracks it (e.g. the row was hand-deleted, or predates
 # this feature).
 ORPHAN_RUN_AGE_SECONDS = 60
+
+# A "running" AgentRun younger than this is never reaped, however dead its
+# recorded PID looks -- it guards a still-legitimate run whose PID hasn't
+# been persisted/observed yet, and it's the mitigation for PID reuse: the OS
+# can hand a dead run's old PID to an unrelated new process, so a check run
+# immediately after the process died could misjudge liveness either way.
+# Waiting this long makes a same-tick collision implausible.
+REAP_RUN_MIN_AGE_SECONDS = max(1, int(os.getenv("OUTBOX_REAP_MIN_AGE_SECONDS", "120")))
 
 
 def record_run_requested(db: Session, run: AgentRun, repo_root: str) -> OutboxEvent:
@@ -254,3 +263,102 @@ def reconcile_orphaned_runs(
 
     db.commit()
     return reconciled
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists but owned by someone else (e.g. PID reused by a root
+        # process) -- that's still "alive" for our purposes.
+        return True
+    return True
+
+
+def reap_dead_running_runs(
+    db: Session,
+    *,
+    min_age_seconds: int = REAP_RUN_MIN_AGE_SECONDS,
+    now: datetime | None = None,
+) -> int:
+    """Fail AgentRun rows stuck `running` behind a worker process that died.
+
+    Normal completion (success, failure, or retry) always moves a run out of
+    "running" from inside the actor that started it -- `run_agent` reads the
+    subprocess to completion itself. A run only stays "running" forever when
+    the *worker process* running that actor was killed out from under it
+    (OOM, host restart, ...), not the CLI subprocess dying on its own. Its
+    last recorded `pid` is then a dead process: `os.kill(pid, 0)` raises
+    `ProcessLookupError`. `min_age_seconds` (see `REAP_RUN_MIN_AGE_SECONDS`)
+    protects a genuinely young/live run from a false reap.
+
+    Like `reconcile_orphaned_runs`, this locks candidate rows with
+    `skip_locked=True` so concurrent callers (multiple worker processes
+    running this same poll loop) never double-reap the same run.
+    """
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=min_age_seconds)
+    candidates = (
+        db.query(AgentRun)
+        .filter(
+            AgentRun.status == "running",
+            AgentRun.pid.isnot(None),
+            AgentRun.started_at.isnot(None),
+            AgentRun.started_at < cutoff,
+        )
+        .with_for_update(skip_locked=True)
+        .all()
+    )
+
+    reaped = 0
+    for run in candidates:
+        if _process_is_alive(run.pid):
+            continue
+        if _reap_run(db, run, now):
+            reaped += 1
+    return reaped
+
+
+def _reap_run(db: Session, run: AgentRun, now: datetime) -> bool:
+    # Deferred to avoid a task_orchestration <-> outbox import cycle, same as
+    # `_dead_letter` above.
+    from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
+
+    pid = run.pid
+    error = f"reaped: worker process {pid} is dead"
+    run.status = "failed"
+    run.error_message = error
+    run.completed_at = now
+    run.pid = None
+    # Committed on its own, ahead of the task-level transition below, so the
+    # concurrency slot (brakes count status in {queued, running}) is freed
+    # even if that next step fails.
+    db.commit()
+
+    service = TaskOrchestrationService(db)
+    record_failure = (
+        service.record_review_failure
+        if run.kind == "review"
+        else service.record_execution_failure
+    )
+    try:
+        record_failure(
+            task_id=run.task_id,
+            error=error,
+            actor="system:reaper",
+            idempotency_key=f"reap:{run.id}",
+            run_id=run.id,
+        )
+    except OrchestrationError:
+        logger.exception(
+            "outbox: reaped run %s but could not transition task %s out of its "
+            "in-flight status",
+            run.id,
+            run.task_id,
+        )
+    logger.warning(
+        "outbox: reaped dead run %s (task %s, pid %s)", run.id, run.task_id, pid
+    )
+    return True
