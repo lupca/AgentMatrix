@@ -303,6 +303,7 @@ class CLIDispatcher:
         model: str,
         prompt: str,
         effort: str | None = None,
+        cwd: str | None = None,
     ) -> AsyncIterator[str]:
         """Spawn a CLI and yield stdout chunks until it exits.
 
@@ -311,13 +312,14 @@ class CLIDispatcher:
         async generator forwards each output item to the event loop.
         """
 
+        effective_cwd = cwd or self.working_directory
         base_command = build_cli_command(cli, model, prompt, effort=effort)
         from app.services.mcp_attach import attach_mcp
 
         command, extra_env, cleanup_paths = attach_mcp(
             cli=cli,
             command=base_command,
-            workdir=self.working_directory,
+            workdir=effective_cwd,
             role="coordinator",
             timeout_seconds=3600,
             mcp_secret=self.mcp_secret,
@@ -333,7 +335,7 @@ class CLIDispatcher:
             try:
                 stream: Iterable[str | ProcessResult] = process_manager.run_with_streaming(
                     command,
-                    self.working_directory,
+                    effective_cwd,
                     env=extra_env,
                 )
                 for item in stream:

@@ -245,6 +245,8 @@ class CommandRouter:
             'result_ref': task.result_ref,
             'landed_ref': task.landed_ref,
             'error': task.error,
+            'spec_clarity': task.spec_clarity,
+            'open_questions': task.open_questions or [],
         }
 
     def _pending_gate(self, task_id: str) -> GateRecord | None:
@@ -1367,11 +1369,10 @@ class CommandRouter:
                 return {'error': 'No suitable agent found for spec/plan generation'}
             agent = self.db.get(Agent, suggestions[0].agent_id)
 
-        repo_root, _error = self._research_repo_root(session_id)
-
         # Feed the planner the same project context executors get — a
         # planner that ignores the repo's conventions plans against them.
         project = self.db.get(Project, task.project) if task.project else None
+        repo_root = os.path.abspath(project.repo_root) if project and project.repo_root else None
         context_parts: list[str] = []
         if project is not None and (project.context_md or '').strip():
             context_parts.append(project.context_md.strip())
@@ -1389,6 +1390,17 @@ class CommandRouter:
         except (SpecPlanGenerationError, ConfigurationError) as exc:
             return {'error': str(exc)}
 
+        from app.services.tool_metrics import record_tool_metric
+
+        record_tool_metric(
+            tool='spec_plan',
+            source='spec_plan_generator',
+            ok=True,
+            task_id=task_id,
+            result_count=len(result.open_questions),
+            payload={'spec_clarity': result.spec_clarity, 'task_id': task_id},
+        )
+
         service = TaskOrchestrationService(self.db)
 
         try:
@@ -1401,12 +1413,15 @@ class CommandRouter:
                 tests=result.tests,
                 risk=result.risk,
                 flows=flows,
+                spec_clarity=result.spec_clarity,
+                open_questions=result.open_questions,
             )
         except OrchestrationError as exc:
             return {'error': str(exc)}
 
+        questions_pending = bool(updated.open_questions) or updated.spec_clarity != 'high'
         return {
-            'action': 'spec_plan_generated',
+            'action': 'spec_questions_pending' if questions_pending else 'spec_plan_generated',
             'task_id': task_id,
             'acceptance_criteria': updated.acceptance_criteria,
             'plan': updated.plan,
@@ -1415,6 +1430,10 @@ class CommandRouter:
             'risk': updated.risk,
             'flows': updated.flows,
             'repo_root': repo_root,
+            'spec_clarity': updated.spec_clarity,
+            'open_questions': updated.open_questions or [],
+            'awaiting_approval': bool(updated.awaiting_approval),
+            'approval_prompt': updated.approval_prompt,
         }
 
     async def _handle_land_task(self, args: str, session_id: str) -> dict:
@@ -1848,6 +1867,7 @@ class CommandRouter:
             'acceptance_criteria': task.acceptance_criteria,
             'priority': task.priority,
             'tags': task.tags,
+            'raw_input': task.raw_input,
             'depends_on': depends_on,
         }
 

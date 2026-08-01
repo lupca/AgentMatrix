@@ -6,6 +6,7 @@ import pytest
 from app.services.llm_client import UsageCounts, calculate_cost, extract_usage
 from app.services.llm_service import ConfigurationError, LLMService
 from app.services.providers import ProviderResponse
+from app.services.providers.cli_provider import CLIProvider
 
 
 @dataclass
@@ -42,6 +43,42 @@ async def test_llm_service_routes_api_agent_without_environment_fallback():
 async def test_llm_service_rejects_missing_agent():
     with pytest.raises(ConfigurationError, match="No LLM agent configured"):
         await LLMService().complete(None, [{"role": "user", "content": "hello"}])
+
+
+@pytest.mark.asyncio
+async def test_llm_service_forwards_cwd_through_cli_provider_to_spawn():
+    class FakeDispatcher:
+        spawn_kwargs = None
+
+        async def spawn(self, cli, model, prompt, **kwargs):
+            self.spawn_kwargs = {
+                "cli": cli,
+                "model": model,
+                "prompt": prompt,
+                **kwargs,
+            }
+            yield '{"ok": true}'
+
+    dispatcher = FakeDispatcher()
+    service = LLMService(cli_provider=CLIProvider(dispatcher=dispatcher))
+    agent = SimpleNamespace(
+        id="cli-agent",
+        agent_type="cli",
+        provider="openai",
+        cli="codex",
+        model="gpt-5",
+        effort="high",
+    )
+
+    response = await service.complete(
+        agent,
+        [{"role": "user", "content": "Read the repository."}],
+        cwd="/project/repo",
+    )
+
+    assert response.text == '{"ok": true}'
+    assert dispatcher.spawn_kwargs["cwd"] == "/project/repo"
+    assert dispatcher.spawn_kwargs["effort"] == "high"
 
 
 def test_usage_extraction_normalizes_anthropic_cache_tokens():

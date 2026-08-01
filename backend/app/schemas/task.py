@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_v
 
 
 REVIEW_RESULT_SCHEMA_VERSION = "1.0"
-SPEC_PLAN_RESULT_SCHEMA_VERSION = "1.0"
+SPEC_PLAN_RESULT_SCHEMA_VERSION = "1.1"
 
 
 class SpecPlanResult(BaseModel):
@@ -18,6 +18,8 @@ class SpecPlanResult(BaseModel):
     files: list[StrictStr] = Field(default_factory=list)
     tests: list[StrictStr] = Field(default_factory=list)
     risk: Literal["low", "medium", "high"]
+    spec_clarity: Literal["high", "medium", "low"]
+    open_questions: list[StrictStr]
 
 
 class ReviewACResult(BaseModel):
@@ -139,6 +141,8 @@ class TaskState(BaseModel):
     dispatched_at: str | None = None
     completed_at: str | None = None
     risk: str | None = None
+    spec_clarity: str | None = None
+    open_questions: list[str] | None = None
     predicted_success: str | None = None
     prediction_factors: dict[str, Any] | None = None
     audit_trail: list[dict[str, Any]] = Field(default_factory=list)
@@ -207,6 +211,8 @@ class Task(BaseModel):
     mode: str | None = "supervised"
     priority: str | None = None
     risk: str | None = None
+    spec_clarity: str | None = None
+    open_questions: list[str] | None = None
     executor: str | None = None
     reviewer: str | None = None
     acceptance_criteria: list[Any] | None = []

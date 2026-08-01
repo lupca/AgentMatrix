@@ -703,6 +703,8 @@ def test_write_spec_plan_populates_task_and_opens_dispatch_gate(
         tests=["backend/tests/test_foo.py"],
         risk="low",
         flows=["checkout"],
+        spec_clarity="high",
+        open_questions=[],
     )
 
     assert updated.acceptance_criteria == ["Endpoint returns 200", "Unit tests pass"]
@@ -747,7 +749,71 @@ def test_write_spec_plan_rejects_empty_acceptance_criteria(orchestration, db_ses
             tests=[],
             risk="low",
             flows=[],
+            spec_clarity="high",
+            open_questions=[],
         )
+
+
+def test_execute_dispatch_blocks_open_questions_until_clear(orchestration, db_session):
+    task = Task(
+        id="SPEC-QUESTIONS",
+        project="project",
+        title="Ambiguous spec",
+        mode="bypass",
+        acceptance_criteria=[],
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    pending = orchestration.write_spec_plan(
+        task_id=task.id,
+        actor="@coordinator",
+        acceptance_criteria=["Observable result"],
+        plan="Research and implement.",
+        files=[],
+        tests=[],
+        risk="low",
+        flows=[],
+        spec_clarity="medium",
+        open_questions=["Which authentication convention applies?"],
+    )
+    assert pending.awaiting_approval is True
+    assert "1) Which authentication convention applies?" in pending.approval_prompt
+
+    with pytest.raises(
+        PrerequisiteError,
+        match="Spec has 1 unanswered open questions",
+    ):
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="dispatch-with-question",
+        )
+
+    cleared = orchestration.write_spec_plan(
+        task_id=task.id,
+        actor="@coordinator",
+        acceptance_criteria=["Observable result"],
+        plan="Research and implement.",
+        files=[],
+        tests=[],
+        risk="low",
+        flows=[],
+        spec_clarity="high",
+        open_questions=[],
+    )
+    assert cleared.open_questions == []
+    assert cleared.awaiting_approval is False
+    assert cleared.approval_prompt is None
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-after-questions-clear",
+    )
+    assert result.task.status == "dispatched"
 
 
 def test_reopen_for_replan_transitions_changes_requested_to_todo(orchestration, db_session):
@@ -841,6 +907,8 @@ def test_write_spec_plan_requires_todo_status(orchestration, db_session):
             tests=[],
             risk="low",
             flows=[],
+            spec_clarity="high",
+            open_questions=[],
         )
 
 
@@ -1109,6 +1177,8 @@ def test_write_spec_plan_updates_task_mode_by_policy(orchestration, db_session):
         tests=[],
         risk="low",
         flows=[],
+        spec_clarity="high",
+        open_questions=[],
     )
     db_session.refresh(task_low)
     assert task_low.mode == "bypass"
@@ -1123,6 +1193,8 @@ def test_write_spec_plan_updates_task_mode_by_policy(orchestration, db_session):
         tests=[],
         risk="high",
         flows=[],
+        spec_clarity="high",
+        open_questions=[],
     )
     db_session.refresh(task_high)
     assert task_high.mode == "supervised"

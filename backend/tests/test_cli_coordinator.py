@@ -79,6 +79,26 @@ async def test_cli_dispatcher_forwards_process_output_and_raises_failures(monkey
 
 
 @pytest.mark.asyncio
+async def test_cli_dispatcher_spawn_overrides_process_cwd(monkeypatch):
+    manager = MagicMock()
+    manager.run_with_streaming.return_value = iter(
+        [ProcessResult(ProcessStatus.COMPLETED, 0, None)]
+    )
+    monkeypatch.setattr(
+        "app.services.cli_dispatcher.ProcessManager",
+        MagicMock(return_value=manager),
+    )
+
+    async for _ in CLIDispatcher(working_directory="/default").spawn(
+        "codex", "gpt-5", "research", cwd="/project/repo"
+    ):
+        pass
+
+    _command, cwd = manager.run_with_streaming.call_args.args
+    assert cwd == "/project/repo"
+
+
+@pytest.mark.asyncio
 async def test_cli_dispatcher_restores_markdown_line_boundaries(monkeypatch):
     manager = MagicMock()
     manager.run_with_streaming.return_value = iter(

@@ -13,6 +13,25 @@ create_task → [spec/plan: generate_spec_plan hoặc update_task đổ plan+AC]
 → verdict pass → done   |   verdict fail → changes-requested
 ```
 
+## Spec Clarity Loop (CTV2-242)
+
+`generate_spec_plan` là research-first gate: chỉ nhận agent CLI và spawn agent
+với `cwd=Project.repo_root`. Prompt bắt agent đọc read-only README/docs/entry
+points rồi lần source liên quan trước khi lập plan. API-backed agent bị từ chối
+vì không thể đọc repository.
+
+Output strict schema v1.1 bắt buộc có `spec_clarity` (`high|medium|low`) và
+`open_questions` (list, rỗng khi không còn câu hỏi). Nếu còn câu hỏi hoặc clarity
+khác `high`, task giữ `todo` nhưng bật escalation `awaiting_approval`; tool trả
+`action=spec_questions_pending` cùng toàn bộ câu hỏi để coordinator hỏi human
+ngay. Coordinator ghi câu trả lời bằng `update_task.patch.raw_input` (replace),
+rồi chạy lại `generate_spec_plan`. Chỉ kết quả `high` + danh sách rỗng mới clear
+escalation và trả `spec_plan_generated`.
+
+`dispatch_task` execute kiểm tra độc lập cột `open_questions` và từ chối trước
+dispatch nếu còn câu hỏi. Mỗi lần generate ghi metric `spec_plan` gồm clarity và
+số câu hỏi.
+
 **Landing (CTV2-238): done = code ĐÃ ở main.** Khi verdict gate approve với
 pass, HỆ THỐNG (git subprocess thuần trong `services/landing.py` — không LLM,
 không coordinator) merge `--no-ff` head của result_ref vào branch đang
@@ -69,6 +88,9 @@ CTV2-237, đã sửa; update rỗng giờ báo lỗi).
 
 Brake đạp (round limit, cost, review result hỏng...) → task set
 `awaiting_approval=true` + `approval_prompt`, KHÔNG tạo GateRecord (CTV2-221).
+Spec Clarity Loop dùng cùng escalation này khi spec chưa đạt `high` hoặc còn
+`open_questions`; approval prompt liệt kê đủ câu hỏi và yêu cầu generate lại sau
+khi cập nhật `raw_input`.
 Vì vậy `_pending_approvals` (mcp_native) quét thêm nhánh escalation
 (`kind: "task:escalation"`). `auto_max_rounds` (default 3) round
 changes-requested → status `failed` + escalation "human replan".

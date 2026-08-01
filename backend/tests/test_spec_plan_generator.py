@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import ValidationError
 from app.db.models import Task
 from app.services.llm_service import ConfigurationError
 from app.services.providers import ProviderResponse
@@ -18,7 +19,13 @@ def _task() -> Task:
 
 
 def _agent():
-    return SimpleNamespace(id="spec-agent", agent_type="api", provider="openai", model="gpt-4o")
+    return SimpleNamespace(
+        id="spec-agent",
+        agent_type="cli",
+        provider="openai",
+        cli="codex",
+        model="gpt-4o",
+    )
 
 
 def _response(content: str) -> ProviderResponse:
@@ -33,6 +40,8 @@ def _valid_payload(**overrides) -> dict:
         "files": ["backend/app/widget.py", "backend/app/made_up.py"],
         "tests": ["backend/tests/test_widget.py"],
         "risk": "low",
+        "spec_clarity": "high",
+        "open_questions": [],
     }
     payload.update(overrides)
     return payload
@@ -62,12 +71,15 @@ async def test_generate_spec_plan_marks_unconfirmed_files_and_uses_graph_flows()
 
 
 @pytest.mark.asyncio
-async def test_generate_spec_plan_without_repo_root_marks_all_files_unconfirmed():
+async def test_generate_spec_plan_with_no_graph_matches_marks_all_files_unconfirmed():
     with patch(
+        "app.services.spec_plan_generator.semantic_search",
+        new=AsyncMock(return_value=[]),
+    ), patch(
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response(json.dumps(_valid_payload()))),
     ):
-        result, flows = await generate_spec_plan(_task(), None, _agent())
+        result, flows = await generate_spec_plan(_task(), "/tmp/repo", _agent())
 
     assert all(f.endswith("*(chưa xác nhận)*") for f in result.files)
     assert flows == []
@@ -79,7 +91,7 @@ async def test_generate_spec_plan_retries_once_on_invalid_json_then_succeeds():
 
     mock_complete = AsyncMock(side_effect=lambda *_args, **_kwargs: _response(next(responses)))
     with patch("app.services.spec_plan_generator.LLMService.complete", new=mock_complete):
-        result, _flows = await generate_spec_plan(_task(), None, _agent())
+        result, _flows = await generate_spec_plan(_task(), "/tmp/repo", _agent())
 
     assert mock_complete.call_count == 2
     assert result.plan == "1. Build widget. 2. Test widget."
@@ -91,7 +103,7 @@ async def test_generate_spec_plan_raises_after_repeated_schema_failures():
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response("still not json")),
     ), pytest.raises(SpecPlanGenerationError):
-        await generate_spec_plan(_task(), None, _agent())
+        await generate_spec_plan(_task(), "/tmp/repo", _agent())
 
 
 @pytest.mark.asyncio
@@ -100,7 +112,7 @@ async def test_generate_spec_plan_rejects_empty_acceptance_criteria():
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response(json.dumps(_valid_payload(acceptance_criteria=[])))),
     ), pytest.raises(SpecPlanGenerationError):
-        await generate_spec_plan(_task(), None, _agent())
+        await generate_spec_plan(_task(), "/tmp/repo", _agent())
 
 
 @pytest.mark.asyncio
@@ -110,15 +122,57 @@ async def test_generate_spec_plan_uses_the_passed_agent():
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response(json.dumps(_valid_payload()))),
     ) as mock_complete:
-        await generate_spec_plan(_task(), None, agent)
+        await generate_spec_plan(_task(), "/tmp/repo", agent)
 
     assert mock_complete.call_args.args[0] is agent
+    assert mock_complete.call_args.kwargs["cwd"] == "/tmp/repo"
 
 
 @pytest.mark.asyncio
 async def test_generate_spec_plan_requires_an_agent():
     with pytest.raises(ConfigurationError):
-        await generate_spec_plan(_task(), None, None)
+        await generate_spec_plan(_task(), "/tmp/repo", None)
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_requires_repo_root():
+    with pytest.raises(ConfigurationError, match="repo_root"):
+        await generate_spec_plan(_task(), None, _agent())
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_rejects_api_agent_before_llm_call():
+    agent = SimpleNamespace(id="@api-spec", agent_type="api")
+    with patch(
+        "app.services.spec_plan_generator.LLMService.complete", new=AsyncMock()
+    ) as mock_complete, pytest.raises(
+        ConfigurationError,
+        match=(
+            "Spec/plan research requires a CLI agent that can read the repository; "
+            "@api-spec is API-backed"
+        ),
+    ):
+        await generate_spec_plan(_task(), "/tmp/repo", agent)
+    mock_complete.assert_not_awaited()
+
+
+@pytest.mark.parametrize("missing", ["spec_clarity", "open_questions"])
+def test_spec_plan_result_v11_requires_clarity_fields(missing):
+    payload = _valid_payload()
+    payload.pop(missing)
+    with pytest.raises(ValidationError):
+        from app.schemas.task import SpecPlanResult
+
+        SpecPlanResult.model_validate(payload)
+
+
+def test_spec_plan_result_v11_accepts_complete_strict_payload():
+    from app.schemas.task import SpecPlanResult
+
+    result = SpecPlanResult.model_validate(_valid_payload())
+    assert result.schema_version == "1.1"
+    assert result.spec_clarity == "high"
+    assert result.open_questions == []
 
 
 def test_parse_json_strips_reasoning_think_block():
@@ -152,6 +206,9 @@ def test_prompt_includes_description_context_and_quality_bars():
     assert "objectively verifiable" in prompt         # anti-vacuous AC bar
     assert "Open questions" in prompt                 # thin-input escape hatch
     assert "Scope" in prompt
+    assert "ĐỌC (read-only, không sửa gì)" in prompt
+    assert '"spec_clarity"' in prompt
+    assert '"open_questions"' in prompt
 
 
 def test_prompt_without_description_or_context_still_valid():

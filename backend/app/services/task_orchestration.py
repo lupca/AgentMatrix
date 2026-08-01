@@ -121,7 +121,7 @@ class TaskOrchestrationService:
 
     MODES = {"supervised", "plan-only", "bypass"}
     GATED_ACTIONS = {"spec_plan", "dispatch", "review_order", "verdict"}
-    PATCHABLE_FIELDS = {"plan", "acceptance_criteria", "priority", "tags"}
+    PATCHABLE_FIELDS = {"plan", "acceptance_criteria", "priority", "tags", "raw_input"}
     # A run in any of these statuses is unconditionally no longer "in flight".
     # "failed" is deliberately excluded here: the worker retries a failed run
     # in place (status goes back to "queued") until its attempts are
@@ -228,6 +228,12 @@ class TaskOrchestrationService:
         if kind not in {"execute", "review"}:
             raise PrerequisiteError(f"Invalid dispatch kind: {kind}")
         task = self._task(task_id)
+        if kind == "execute" and (task.open_questions or []):
+            question_count = len(task.open_questions)
+            raise PrerequisiteError(
+                f"Spec has {question_count} unanswered open questions; answer them and "
+                "re-run generate_spec_plan before dispatch."
+            )
         if expected_status is None:
             if kind == "review":
                 expected_status = "awaiting-review"
@@ -905,6 +911,8 @@ class TaskOrchestrationService:
         tests: list[str],
         risk: str,
         flows: list[str],
+        spec_clarity: str,
+        open_questions: list[str],
     ) -> Task:
         """Persist the spec/plan gate's LLM output onto a task ('todo' only).
 
@@ -919,12 +927,16 @@ class TaskOrchestrationService:
         self._assert_status(task, "todo")
         if not acceptance_criteria:
             raise PrerequisiteError("acceptance_criteria must not be empty")
+        if spec_clarity not in {"high", "medium", "low"}:
+            raise PrerequisiteError("spec_clarity must be high, medium, or low")
 
         task.acceptance_criteria = acceptance_criteria
         task.plan = plan
         task.files = files
         task.tests = tests
         task.risk = risk
+        task.spec_clarity = spec_clarity
+        task.open_questions = open_questions
         # Existing explicitly governed tasks (notably legacy bypass tasks)
         # retain their mode; newly created tasks start supervised and are
         # resolved from the autonomy policy when their risk is known.
@@ -932,6 +944,20 @@ class TaskOrchestrationService:
             task.mode = self.mode_for_task(task, risk=risk)
         task.flows = flows
         task.current_gate = "plan"
+        if open_questions or spec_clarity != "high":
+            questions = "\n".join(
+                f"{index}) {question}" for index, question in enumerate(open_questions, 1)
+            )
+            task.awaiting_approval = True
+            question_block = f"\n{questions}" if questions else ""
+            task.approval_prompt = (
+                f"Spec chưa đủ rõ (clarity={spec_clarity}). Trả lời các câu hỏi sau "
+                f"rồi chạy lại generate_spec_plan:{question_block}"
+            )
+        else:
+            task.open_questions = []
+            task.awaiting_approval = False
+            task.approval_prompt = None
         task.updated_at = datetime.now(timezone.utc)
         payload = {
             "acceptance_criteria": acceptance_criteria,
@@ -940,7 +966,13 @@ class TaskOrchestrationService:
             "tests": tests,
             "risk": risk,
             "flows": flows,
+            "spec_clarity": spec_clarity,
+            "open_questions": open_questions,
         }
+        # Spec clarity changes the lifecycle projection even though the task
+        # remains todo. Compare-and-set the observed version so two planners
+        # cannot silently overwrite each other's escalation state.
+        self._cas_status(task, task.status)
         record = self._ledger_record(
             task=task,
             gate_type="spec_plan",
@@ -962,6 +994,8 @@ class TaskOrchestrationService:
                     "files": files,
                     "flows": flows,
                     "risk": risk,
+                    "spec_clarity": spec_clarity,
+                    "open_question_count": len(open_questions),
                 },
             )
         )

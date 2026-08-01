@@ -39,6 +39,7 @@ class CLIProvider:
         provider: str | None = None,
         cli: str | None = None,
         effort: str | None = None,
+        cwd: str | None = None,
         max_tokens: int = 2048,
         temperature: float = 0.7,
         tools: list[dict[str, Any]] | None = None,
@@ -60,8 +61,11 @@ class CLIProvider:
 
         async def chunks() -> AsyncIterator[str]:
             output_tokens = 0
+            spawn_kwargs: dict[str, Any] = {"effort": effort}
+            if cwd is not None:
+                spawn_kwargs["cwd"] = cwd
             async for chunk in self.dispatcher.spawn(
-                selected_cli, model, prompt, effort=effort
+                selected_cli, model, prompt, **spawn_kwargs
             ):
                 output_tokens += _estimate_tokens(chunk)
                 yield chunk
