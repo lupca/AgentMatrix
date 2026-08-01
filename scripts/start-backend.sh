@@ -41,9 +41,24 @@ until docker compose exec -T db pg_isready -U ct -d control_tower 2>/dev/null; d
     sleep 1
 done
 
-# Set environment
+# Load project-level env (MCP_TOKEN_SECRET, ...). The server starts from
+# backend/, so pydantic's CWD-relative `.env` lookup misses the root file —
+# it must be exported into the environment here.
+if [ -f "$PROJECT_DIR/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$PROJECT_DIR/.env"
+    set +a
+fi
+
+# Set environment (script-managed values win over .env for local docker ports)
 export DATABASE_URL="postgresql://ct:secret@localhost:5433/control_tower"
 export REDIS_URL="redis://localhost:6380/0"
+
+if [ -z "${MCP_TOKEN_SECRET:-}" ]; then
+    echo "MCP_TOKEN_SECRET is not set (checked environment and $PROJECT_DIR/.env)" >&2
+    exit 1
+fi
 
 # Install deps if needed
 cd "$BACKEND_DIR"
@@ -67,7 +82,11 @@ echo $! > "$PID_FILE"
 
 # Start worker
 echo "Starting Dramatiq worker..."
-nohup dramatiq app.workers.agent_runner app.workers.outbox_publisher > "$WORKER_LOG_FILE" 2>&1 &
+# Cap worker processes: dramatiq defaults to one process per CPU core, and
+# each process holds its own SQLAlchemy pool (up to 15 conns) — on a many-core
+# machine that alone exhausts Postgres max_connections. Concurrency of agent
+# runs is governed by the max_concurrent_runs brake, not worker count.
+nohup dramatiq app.workers.agent_runner app.workers.outbox_publisher --processes 2 --threads 4 > "$WORKER_LOG_FILE" 2>&1 &
 echo $! > "$WORKER_PID_FILE"
 
 sleep 3
