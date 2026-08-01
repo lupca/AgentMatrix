@@ -29,7 +29,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.db.base import SessionLocal
-from app.db.models import Session as SessionModel, Task
+from app.db.models import AdminGateRecord, GateRecord, Session as SessionModel, Task
 from app.graph.context import invalidate_context_snapshot
 from app.services.command_router import CommandRouter
 from app.services.tool_registry import ToolSpec, get_mcp_tool_specs
@@ -57,7 +57,9 @@ SERVER_INSTRUCTIONS = (
     "request_review, record_verdict, approve_gate, cancel_task, archive_task, "
     "update_task; admin via manage_project/manage_agent/manage_knowledge/"
     "update_settings (a pending admin gate returns 'admin:<id>' — pass it to "
-    "approve_gate). Errors are structured with a hint: follow the hint, do "
+    "approve_gate). If a result carries pending_approvals, restate them to "
+    "the human at the END of every reply, as a question, until each is "
+    "decided. Errors are structured with a hint: follow the hint, do "
     "not retry blindly. The verdict belongs to the reviewer: never record a "
     "verdict for a review you did not run, never merge ct-run/* branches "
     "yourself, and report the task status from get_status verbatim — a "
@@ -216,6 +218,57 @@ def envelope(result: Mapping[str, Any], *, next_step: str | None = None) -> dict
     return {"ok": True, "data": dict(result), **({"next": next_step} if next_step else {})}
 
 
+def _pending_approvals(db) -> list[dict[str, Any]]:
+    """Every open human decision, attached to every tool result.
+
+    A pending gate mentioned once and then buried under later reports gets
+    forgotten — the human never learns they owe a decision. Surfacing the
+    open set server-side means the coordinator cannot drop it.
+    """
+    pending: list[dict[str, Any]] = []
+    try:
+        # Both ledgers are append-only: a decision is a CHILD row pointing at
+        # the pending row via parent_id, the parent keeps status="pending"
+        # forever. "Still open" therefore means pending AND childless.
+        decided_task = db.query(GateRecord.parent_id).filter(
+            GateRecord.parent_id.isnot(None)
+        )
+        for row in (
+            db.query(GateRecord)
+            .filter(
+                GateRecord.status == "pending",
+                GateRecord.id.notin_(decided_task),
+            )
+            .order_by(GateRecord.created_at.asc())
+            .limit(5)
+        ):
+            pending.append({
+                "id": row.task_id,
+                "kind": f"task:{row.gate_type}",
+                "waiting_since": row.created_at.isoformat() if row.created_at else None,
+            })
+        decided_admin = db.query(AdminGateRecord.parent_id).filter(
+            AdminGateRecord.parent_id.isnot(None)
+        )
+        for row in (
+            db.query(AdminGateRecord)
+            .filter(
+                AdminGateRecord.status == "pending",
+                AdminGateRecord.id.notin_(decided_admin),
+            )
+            .order_by(AdminGateRecord.created_at.asc())
+            .limit(5)
+        ):
+            pending.append({
+                "id": f"admin:{row.id}",
+                "kind": f"admin:{row.entity}/{row.action}",
+                "waiting_since": row.created_at.isoformat() if row.created_at else None,
+            })
+    except Exception:  # a broken reminder must never break the tool call
+        return []
+    return pending
+
+
 def _ensure_session(db, claims: TokenClaims) -> str:
     """Give every native token a real router session, including executor tokens."""
     session_id = claims.session_id or claims.token_id or "mcp"
@@ -253,7 +306,16 @@ def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
             # Native calls bypass the REST endpoint, so invalidate the same
             # context cache the old /api/mcp/tools/call path invalidated.
             invalidate_context_snapshot(db, project_id=None)
-            return envelope(result, next_step=_next_step(result))
+            response = envelope(result, next_step=_next_step(result))
+            pending = _pending_approvals(db)
+            if pending:
+                response["pending_approvals"] = pending
+                response["pending_approvals_note"] = (
+                    "Các gate này đang CHỜ human quyết định — nhắc lại cho "
+                    "human ở CUỐI mỗi câu trả lời (kèm câu hỏi approve?) cho "
+                    "đến khi chúng được approve/reject qua approve_gate."
+                )
+            return response
         except Exception as exc:  # boundary: MCP must always return structured JSON
             return {"ok": False, "data": None, "error": {"code": "internal_error", "message": str(exc)}}
         finally:
