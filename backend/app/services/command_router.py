@@ -625,7 +625,10 @@ class CommandRouter:
     async def _handle_wait_for_task(self, args: str, session_id: str) -> dict:
         try:
             payload = json.loads(args) if args else {}
-            since_event_id = int(payload.get('since_event_id') or 0)
+            raw_since_event_id = payload.get('since_event_id')
+            since_event_id = (
+                int(raw_since_event_id) if raw_since_event_id is not None else None
+            )
             timeout_seconds = min(120, max(5, int(payload.get('timeout_seconds') or 55)))
         except (TypeError, ValueError, json.JSONDecodeError):
             return {'error': 'Invalid wait_for_task arguments'}
@@ -636,20 +639,41 @@ class CommandRouter:
         _TERMINAL = {'done', 'failed', 'cancelled', 'changes-requested'}
         _POLL_INTERVAL = 2.0
 
+        # An omitted cursor means "start watching now", not "replay the whole
+        # event history".  Keep an explicit 0 backward-compatible for callers
+        # that intentionally want every event.  This read happens before the
+        # initial task snapshot so only events committed after entry wake the
+        # long-poll.
+        self.db.rollback()
+        initial_task = self.db.get(Task, task_id)
+        if initial_task is None:
+            return {'error': f"Task '{task_id}' not found"}
+        effective_cursor = since_event_id
+        if effective_cursor is None:
+            effective_cursor = (
+                self.db.query(TaskEvent.id)
+                .filter(TaskEvent.task_id == task_id)
+                .order_by(TaskEvent.id.desc())
+                .limit(1)
+                .scalar()
+                or 0
+            )
+        initial_status = initial_task.status
+
         def _snapshot() -> tuple[dict | None, list[dict], int]:
             # End the previous transaction so READ COMMITTED shows fresh rows.
             self.db.rollback()
             task = self.db.get(Task, task_id)
             if task is None:
-                return None, [], since_event_id
+                return None, [], effective_cursor
             events = (
                 self.db.query(TaskEvent)
-                .filter(TaskEvent.task_id == task_id, TaskEvent.id > since_event_id)
+                .filter(TaskEvent.task_id == task_id, TaskEvent.id > effective_cursor)
                 .order_by(TaskEvent.id.asc())
                 .limit(20)
                 .all()
             )
-            cursor = events[-1].id if events else since_event_id
+            cursor = events[-1].id if events else effective_cursor
             task_dict = {
                 'id': task.id,
                 'status': task.status,
@@ -667,11 +691,6 @@ class CommandRouter:
                 for e in events
             ]
             return task_dict, event_dicts, cursor
-
-        task_dict, _, _ = _snapshot()
-        if task_dict is None:
-            return {'error': f"Task '{task_id}' not found"}
-        initial_status = task_dict['status']
 
         waited = 0.0
         while True:
@@ -1267,6 +1286,7 @@ class CommandRouter:
             return {'error': f'Task {task_id} not found'}
 
         reviewer = parts[1] if len(parts) > 1 else None
+        selection_reason = None
         if not reviewer:
             suggestions = AgentMatcher(self.db).suggest_agents(
                 task, top_n=1, exclude_agent_id=task.executor
@@ -1281,6 +1301,9 @@ class CommandRouter:
                     'reason': 'no_independent_reviewer',
                 }
             reviewer = suggestions[0].agent_id
+            selection_reason = (
+                f"{reviewer} selected by matcher: {suggestions[0].reason}"
+            )
 
         service = TaskOrchestrationService(self.db)
         try:
@@ -1288,6 +1311,7 @@ class CommandRouter:
                 task_id=task_id,
                 reviewer=reviewer,
                 actor=f"chat:{session_id or 'anonymous'}",
+                selection_reason=selection_reason,
                 idempotency_key=self._command_key(
                     session_id,
                     "request_review",
@@ -1570,6 +1594,8 @@ class CommandRouter:
             if pending is None:
                 return {'error': f'No pending gate found for task {task_id}'}
             gate_record_id = pending.id
+            gate_rec = pending
+        gate_payload = gate_rec.input_payload or {}
         service = TaskOrchestrationService(self.db)
         try:
             result = service.decide_gate(
@@ -1624,7 +1650,7 @@ class CommandRouter:
                 )
             else:
                 nudged = True
-        return {
+        response = {
             'action': 'gate_decision',
             'task_id': result.task.id,
             'decision': result.status,
@@ -1633,6 +1659,12 @@ class CommandRouter:
             'nudged': nudged,
             'task': self._task_snapshot(result.task),
         }
+        if gate_rec.gate_type == 'review_order':
+            response.update({
+                'reviewer': gate_payload.get('reviewer'),
+                'selection_reason': gate_payload.get('selection_reason'),
+            })
+        return response
 
     async def _decide_admin_gate(
         self, raw_id: str, decision: str, session_id: str

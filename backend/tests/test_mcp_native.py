@@ -10,8 +10,9 @@ from sqlalchemy.pool import StaticPool
 
 import app.mcp_native as mcp_native
 from app.db.base import Base
-from app.db.models import Project, Task
+from app.db.models import Agent, Project, Task
 from app.mcp_native import authenticate_token, build_server, envelope, issue_token
+from app.services.task_orchestration import TaskOrchestrationService
 
 
 def test_role_token_round_trip_and_task_scope_claim():
@@ -41,6 +42,44 @@ def test_native_envelope_includes_next_for_task_state():
     )
     assert result["ok"] is True
     assert result["next"] == "Gọi request_review để bắt đầu review độc lập."
+
+
+def test_pending_review_order_includes_the_persisted_approval_prompt(db_session):
+    db_session.add(Project(id="pending-review-project", name="P", repo_root="/tmp"))
+    db_session.add_all([
+        Agent(id="@pending-executor", name="Executor", role="executor", cli="codex"),
+        Agent(id="@pending-reviewer", name="Reviewer", role="reviewer", cli="codex"),
+    ])
+    db_session.add(
+        Task(
+            id="PENDING-REVIEW",
+            title="Review reminder",
+            project="pending-review-project",
+            status="awaiting-review",
+            mode="supervised",
+            executor="@pending-executor",
+            result_ref="base..head",
+        )
+    )
+    db_session.commit()
+    result = TaskOrchestrationService(db_session).request_review(
+        task_id="PENDING-REVIEW",
+        reviewer="@pending-reviewer",
+        actor="system:test",
+        idempotency_key="pending-review-gate",
+        selection_reason="best capability match with 90% success_rate",
+    )
+
+    pending = mcp_native._pending_approvals(db_session)
+
+    assert pending == [{
+        "id": "PENDING-REVIEW",
+        "kind": "task:review_order",
+        "waiting_since": pending[0]["waiting_since"],
+        "prompt": result.gate_record.input_payload["approval_prompt"],
+    }]
+    assert "Reviewer đề xuất: @pending-reviewer" in pending[0]["prompt"]
+    assert "best capability match" in pending[0]["prompt"]
 
 
 @pytest.mark.asyncio

@@ -244,11 +244,15 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
             .order_by(GateRecord.created_at.asc())
             .limit(5)
         ):
-            pending.append({
+            entry = {
                 "id": row.task_id,
                 "kind": f"task:{row.gate_type}",
                 "waiting_since": row.created_at.isoformat() if row.created_at else None,
-            })
+            }
+            if row.gate_type == "review_order":
+                payload = row.input_payload or {}
+                entry["prompt"] = payload.get("approval_prompt")
+            pending.append(entry)
         decided_admin = db.query(AdminGateRecord.parent_id).filter(
             AdminGateRecord.parent_id.isnot(None)
         )
