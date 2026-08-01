@@ -348,7 +348,7 @@ async def test_loaded_tool_group_persists_across_turns(db_session):
     assert result.content == "Tools loaded."
 
     baseline_names = {t["name"] for t in provider.calls[0]["tools"]}
-    assert baseline_names == {"create_task", "get_status", "get_run_output", "get_stats", "query_db", "load_tools"}
+    assert baseline_names == {"create_task", "manage_inbox", "get_status", "get_run_output", "get_stats", "query_db", "load_tools"}
 
     expanded_names = {t["name"] for t in provider.calls[1]["tools"]}
     assert "approve_gate" in expanded_names
@@ -443,7 +443,7 @@ async def test_stream_turn_loaded_tools_persist_across_turns(db_session):
     assert "".join(e for e in events if isinstance(e, str)) == "Done."
 
     baseline_names = {t["name"] for t in provider.calls[0]["tools"]}
-    assert baseline_names == {"create_task", "get_status", "get_run_output", "get_stats", "query_db", "load_tools"}
+    assert baseline_names == {"create_task", "manage_inbox", "get_status", "get_run_output", "get_stats", "query_db", "load_tools"}
 
     expanded_names = {t["name"] for t in provider.calls[1]["tools"]}
     assert "dispatch_task" in expanded_names

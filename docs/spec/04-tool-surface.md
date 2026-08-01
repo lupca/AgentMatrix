@@ -11,6 +11,8 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 
 ## Vòng đời task
 
+| `manage_inbox` | CRUD ý tưởng thô không qua admin gate; `promote` tạo task thật và đánh dấu idea `triaged`. Hỗ trợ add/update/delete/list/promote. |
+
 | Tool | Ghi chú / quirks |
 |---|---|
 | `create_task` | CHỈ nhận `title`, `project`, `depends_on`. Muốn plan/AC/priority/tags → `update_task` sau. Id tự sinh từ counter. |

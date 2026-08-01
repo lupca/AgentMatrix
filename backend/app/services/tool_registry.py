@@ -97,6 +97,24 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             required_role="executor",
         ),
         ToolSpec(
+            name="manage_inbox",
+            description="Capture raw ideas without an admin gate: add, update, delete, list, or promote.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["add", "update", "delete", "list", "promote"]},
+                    "id": {"type": "string"}, "content": {"type": "string"},
+                    "project_id": {"type": ["string", "null"]}, "task_id": {"type": ["string", "null"]},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "status": {"type": "string", "enum": ["open", "triaged", "dropped"]},
+                    "q": {"type": "string"}, "title": {"type": "string"}, "patch": {"type": "object"},
+                },
+                "required": ["action"],
+            },
+            handler="manage_inbox", tier="eager", permission="write", entity="inbox_items",
+            slash_alias=None, group="task_lifecycle",
+        ),
+        ToolSpec(
             name="get_run_output",
             description=(
                 "Read persisted output chunks for an executor run. Use this to "
@@ -150,6 +168,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "Do NOT access the DB directly via other means.\n"
                 "Schema Summary:\n"
                 "- tasks (id, title, status [todo, dispatched, awaiting-review, in-review, done, cancelled, failed], project, executor, reviewer, priority, mode)\n"
+                "- inbox_items (id, content, project_id, task_id, tags, status, created_at)\n"
                 "- projects (id, name, status, repo_root, mode)\n"
                 "- agents (id, name, role [coordinator, executor, reviewer, spec_plan], status, agent_type [cli, api], model)\n"
                 "- sessions (id, title, status, context_level, project_id, task_id)\n"

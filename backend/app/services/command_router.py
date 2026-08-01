@@ -13,6 +13,7 @@ from app.db.models import (
     AuditLog,
     GateRecord,
     KnowledgeItem,
+    InboxItem,
     LLMUsage,
     RunResourceUsage,
     Project,
@@ -51,6 +52,16 @@ from app.services.llm_service import ConfigurationError
 # serializer per entity so responses stay small and never leak secrets
 # (notably Agent.api_key, which is deliberately absent below).
 _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
+    "inbox_items": {
+        "model": InboxItem,
+        "filters": {"id": "str", "status": "str", "project_id": "str", "task_id": "str"},
+        "order_by": InboxItem.created_at.desc(),
+        "serialize": lambda i: {
+            "id": i.id, "content": i.content, "project_id": i.project_id,
+            "task_id": i.task_id, "tags": i.tags or [], "status": i.status,
+            "created_at": i.created_at.isoformat() if i.created_at else None,
+        },
+    },
     "tasks": {
         "model": Task,
         "filters": {
@@ -315,6 +326,11 @@ class CommandRouter:
             command_args = title + (f' --project {project}' if project else '')
             if depends_on:
                 command_args += ' --depends-on ' + ','.join(str(d) for d in depends_on)
+        elif canonical_name == 'manage_inbox':
+            action = str(args.get('action', '')).strip().lower()
+            if not action:
+                return {'error': 'action is required'}
+            command_args = json.dumps(args, ensure_ascii=False)
         elif canonical_name == 'get_status':
             command_args = str(args.get('task_id', '') or '')
         elif canonical_name == 'get_run_output':
@@ -944,6 +960,115 @@ class CommandRouter:
             'rules_count': len(parsed_rules),
         }
 
+    @staticmethod
+    def _inbox_snapshot(item: InboxItem) -> dict[str, Any]:
+        return {
+            'id': item.id, 'content': item.content, 'project_id': item.project_id,
+            'task_id': item.task_id, 'tags': item.tags or [], 'status': item.status,
+            'created_at': item.created_at.isoformat() if item.created_at else None,
+            'updated_at': item.updated_at.isoformat() if item.updated_at else None,
+        }
+
+    async def _handle_manage_inbox(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {'error': 'Invalid manage_inbox payload'}
+        if not isinstance(payload, Mapping):
+            return {'error': 'Payload must be a JSON object'}
+        action = str(payload.get('action', '')).strip().lower()
+        if action not in {'add', 'update', 'delete', 'list', 'promote'}:
+            return {'error': 'action must be one of add, update, delete, list, promote'}
+
+        def validate_links(project_id, task_id):
+            if project_id is not None and self.db.get(Project, project_id) is None:
+                return f"Project '{project_id}' does not exist."
+            if task_id is not None and self.db.get(Task, task_id) is None:
+                return f"Task '{task_id}' does not exist."
+            return None
+
+        if action == 'list':
+            status = payload.get('status', 'open')
+            if status not in {'open', 'triaged', 'dropped'}:
+                return {'error': 'status must be one of open, triaged, dropped'}
+            query = self.db.query(InboxItem).filter(InboxItem.status == status)
+            if payload.get('project_id') is not None:
+                query = query.filter(InboxItem.project_id == payload['project_id'])
+            if payload.get('q'):
+                query = query.filter(InboxItem.content.ilike(f"%{payload['q']}%"))
+            total = query.count()
+            items = query.order_by(InboxItem.created_at.desc()).limit(50).all()
+            return {'action': 'listed', 'count': total, 'items': [self._inbox_snapshot(i) for i in items]}
+
+        item_id = str(payload.get('id', '')).strip()
+        if action in {'update', 'delete', 'promote'} and not item_id:
+            return {'error': 'id is required'}
+        item = self.db.get(InboxItem, item_id) if item_id else None
+        if action in {'update', 'delete', 'promote'} and item is None:
+            return {'error': f"Inbox item '{item_id}' does not exist."}
+
+        if action == 'add':
+            content = payload.get('content')
+            if not isinstance(content, str) or not content.strip():
+                return {'error': 'content is required and must be non-empty'}
+            project_id, task_id = payload.get('project_id'), payload.get('task_id')
+            link_error = validate_links(project_id, task_id)
+            if link_error:
+                return {'error': link_error}
+            tags = payload.get('tags', [])
+            if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
+                return {'error': 'tags must be an array of strings'}
+            item = InboxItem(content=content, project_id=project_id, task_id=task_id, tags=tags)
+            self.db.add(item)
+            self.db.commit()
+            return {'action': 'added', 'item': self._inbox_snapshot(item)}
+
+        if action == 'delete':
+            self.db.delete(item)
+            self.db.commit()
+            return {'action': 'deleted', 'id': item_id}
+
+        if action == 'update':
+            patch = payload.get('patch')
+            fields = dict(patch) if isinstance(patch, Mapping) else {}
+            for field in ('content', 'project_id', 'task_id', 'tags', 'status'):
+                if field in payload and field not in fields:
+                    fields[field] = payload[field]
+            if not fields:
+                return {'error': 'patch is required'}
+            if 'content' in fields and (not isinstance(fields['content'], str) or not fields['content'].strip()):
+                return {'error': 'content must be non-empty'}
+            if 'status' in fields and fields['status'] not in {'open', 'triaged', 'dropped'}:
+                return {'error': 'status must be one of open, triaged, dropped'}
+            if 'tags' in fields and (not isinstance(fields['tags'], list) or not all(isinstance(tag, str) for tag in fields['tags'])):
+                return {'error': 'tags must be an array of strings'}
+            link_error = validate_links(fields.get('project_id', item.project_id), fields.get('task_id', item.task_id))
+            if link_error:
+                return {'error': link_error}
+            for field in ('content', 'project_id', 'task_id', 'tags', 'status'):
+                if field in fields:
+                    setattr(item, field, fields[field])
+            self.db.commit()
+            return {'action': 'updated', 'item': self._inbox_snapshot(item)}
+
+        project_id = payload.get('project_id') or item.project_id
+        if not project_id:
+            return {'error': 'project_id is required to promote an inbox item'}
+        link_error = validate_links(project_id, None)
+        if link_error:
+            return {'error': link_error}
+        title = payload.get('title') or item.content.strip().splitlines()[0][:200]
+        created = await self._handle_create_task(f'{title} --project {project_id}', session_id)
+        if created.get('action') != 'created':
+            return created
+        task = self.db.get(Task, created['task_id'])
+        task.raw_input = item.content
+        item.status = 'triaged'
+        item.project_id = project_id
+        item.task_id = task.id
+        self.db.commit()
+        return {'action': 'promoted', 'item': self._inbox_snapshot(item), 'task_id': task.id}
+
     async def _handle_query_db(self, args: str, session_id: str) -> dict:
         try:
             payload = json.loads(args) if args.strip().startswith('{') else None
@@ -1152,7 +1277,8 @@ class CommandRouter:
         )
         task.mode = TaskOrchestrationService(self.db).mode_for_task(task)
         self.db.add(task)
-        project_row.next_task_seq = seq + 1
+        # The atomic UPDATE above already incremented the counter — bumping
+        # it again here skipped every other id (IDEA-001 -> IDEA-003).
         try:
             self.db.commit()
         except Exception:

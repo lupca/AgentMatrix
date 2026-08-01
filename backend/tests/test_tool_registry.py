@@ -26,10 +26,11 @@ def db_session():
 
 
 def test_registry_has_twenty_three_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 26
+    assert len(TOOL_REGISTRY) == 27
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
+        'manage_inbox',
         'get_run_output',
         'get_stats',
         'query_db',
@@ -99,7 +100,7 @@ def test_get_tool_definitions_is_baseline_eager_set_only():
     tools = get_tool_definitions()
     names = {t['name'] for t in tools}
 
-    assert names == {'create_task', 'get_status', 'get_run_output', 'get_stats', 'query_db', 'load_tools'}
+    assert names == {'create_task', 'manage_inbox', 'get_status', 'get_run_output', 'get_stats', 'query_db', 'load_tools'}
     assert 'pm_create_task' not in names
     assert 'dispatch_task' not in names
     assert not any('defer_loading' in t for t in tools)
