@@ -1997,6 +1997,13 @@ class TaskOrchestrationService:
         hard `TransitionConflictError` instead of silently clobbering a
         state it never observed.
         """
+        # The session runs with autoflush=False: attribute changes made just
+        # before a transition (awaiting_approval=False, verdict, ...) are
+        # only in memory, while the CAS below is a raw UPDATE evaluated
+        # against the DB row. Flush first so row-level constraints (e.g.
+        # ck_tasks_terminal_not_awaiting_approval) see the whole transition,
+        # not the raw status flip against stale column values.
+        self.db.flush()
         expected_status = task.status
         expected_version = task.version
         result = self.db.execute(
