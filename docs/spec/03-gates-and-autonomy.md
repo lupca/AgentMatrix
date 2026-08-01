@@ -13,12 +13,20 @@ create_task → [spec/plan: generate_spec_plan hoặc update_task đổ plan+AC]
 → verdict pass → done   |   verdict fail → changes-requested
 ```
 
-**⚠️ "done" hiện KHÔNG có nghĩa code đã vào main.** Commit của executor nằm
-trên `ct-run/<run_id>`; coordinator bị cấm merge (rule hậu agy-incident) và
-chưa có actor chính thống nào merge thay → admin phải merge tay
-(`git merge --no-ff ct-run/<run_id>`) sau khi done. Đây là gap thiết kế
-CTV2-238 (đề xuất: bước landing do worker thực hiện sau verdict pass, có gate
-merge trong supervised, conflict thì escalate).
+**Landing (CTV2-238): done = code ĐÃ ở main.** Khi verdict gate approve với
+pass, HỆ THỐNG (git subprocess thuần trong `services/landing.py` — không LLM,
+không coordinator) merge `--no-ff` head của result_ref vào branch đang
+checkout ở repo_root, ghi merge commit vào `task.landed_ref`, xóa các branch
+`ct-run/*` đã merge:
+- Merge sạch (hoặc head đã là ancestor — idempotent) → `done` + `landed_ref`
+  + event `landed`.
+- Conflict / cây tracked bẩn / detached HEAD → task KHÔNG done: escalation
+  `awaiting_approval` với lỗi git + event `landing_failed`; sửa repo xong gọi
+  tool `land_task {task_id}` để thử lại (tool này cũng backfill được task done
+  cũ chưa merge).
+- repo_root không phải git repo / result_ref không có head (legacy import) →
+  landing skip, done như cũ (giữ fixture test và data import sống).
+Coordinator vẫn bị cấm tự chạy `git merge` — rule giữ nguyên.
 
 ## Mode
 
