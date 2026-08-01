@@ -88,77 +88,7 @@ class TestContextChecker:
         assert result["has_rules"] is True
 
 
-class TestSaveProjectContextMCP:
-    @pytest.mark.asyncio
-    async def test_save_project_context_tool(self, db_session):
-        project = Project(id="proj-mcp", name="MCP Test", repo_root="/tmp/test")
-        db_session.add(project)
-        db_session.flush()
-
-        router = CommandRouter(db_session)
-        result = await router.execute_tool(
-            "save_project_context",
-            {
-                "project_id": "proj-mcp",
-                "context_md": "# Test Project\n## Stack\nPython + FastAPI",
-                "rules": [
-                    {
-                        "name": "api",
-                        "globs": ["app/api/**/*.py"],
-                        "content": "Use FastAPI routers",
-                    }
-                ],
-            },
-            session_id="test-mcp-session",
-        )
-
-        assert result["status"] == "saved"
-        assert result["rules_count"] == 1
-
-        db_project = db_session.get(Project, "proj-mcp")
-        assert "Test Project" in db_project.context_md
-        assert db_project.context_generated is True
-
-        rules = db_session.query(ProjectRule).filter_by(project_id="proj-mcp").all()
-        assert len(rules) == 1
-        assert rules[0].name == "api"
 
 
-class TestProjectRulesAPI:
-    def test_rules_crud(self, client, db_session):
-        project = Project(id="proj-api", name="API Project")
-        db_session.add(project)
-        db_session.commit()
 
-        # List (empty)
-        res = client.get("/api/projects/proj-api/rules")
-        assert res.status_code == 200
-        assert res.json() == []
 
-        # Create
-        res = client.post(
-            "/api/projects/proj-api/rules",
-            json={
-                "name": "architecture",
-                "description": "Arch rule",
-                "globs": ["backend/**/*.py"],
-                "content": "Keep layers clean",
-                "priority": 10,
-            },
-        )
-        assert res.status_code == 201
-        data = res.json()
-        rule_id = data["id"]
-        assert data["name"] == "architecture"
-
-        # Update
-        res = client.put(
-            f"/api/projects/proj-api/rules/{rule_id}",
-            json={"priority": 20},
-        )
-        assert res.status_code == 200
-        assert res.json()["priority"] == 20
-
-        # Delete
-        res = client.delete(f"/api/projects/proj-api/rules/{rule_id}")
-        assert res.status_code == 204

@@ -297,14 +297,11 @@ async def test_run_turn_programmatic_persists_messages_and_broadcasts(db_session
         },
         sort_keys=True,
     )
-    broadcast = AsyncMock()
-
-    with patch("app.api.ws.ws_manager.broadcast", broadcast):
-        result = await service.run_turn_programmatic(
-            session,
-            status_message,
-            source_event_id=41,
-        )
+    result = await service.run_turn_programmatic(
+        session,
+        status_message,
+        source_event_id=41,
+    )
 
     assert result.content == "Decision handled"
     assert [message["role"] for message in session.messages] == [
@@ -315,12 +312,6 @@ async def test_run_turn_programmatic_persists_messages_and_broadcasts(db_session
     assert "WAKE-1" in session.messages[0]["content"]
     assert "available_actions" in session.messages[0]["content"]
     assert session.messages[1]["idempotency_key"] == "wake-41"
-    broadcast.assert_awaited_once()
-    payload = broadcast.await_args.args[0]
-    assert payload["type"] == "coordinator_message"
-    assert payload["session_id"] == session.id
-    assert payload["source_event_id"] == 41
-    assert payload["message"]["content"] == "Decision handled"
 
 
 @pytest.mark.asyncio
@@ -357,7 +348,7 @@ async def test_loaded_tool_group_persists_across_turns(db_session):
     assert result.content == "Tools loaded."
 
     baseline_names = {t["name"] for t in provider.calls[0]["tools"]}
-    assert baseline_names == {"create_task", "get_status", "query_db", "load_tools"}
+    assert baseline_names == {"create_task", "get_status", "get_run_output", "get_stats", "query_db", "load_tools"}
 
     expanded_names = {t["name"] for t in provider.calls[1]["tools"]}
     assert "approve_gate" in expanded_names
@@ -376,7 +367,7 @@ async def test_loaded_tool_group_persists_across_turns(db_session):
     turn2_names = {t["name"] for t in provider.calls[2]["tools"]}
     assert turn2_names == baseline_names | {
         "dispatch_task", "record_verdict", "approve_gate", "cancel_task",
-        "request_review", "generate_spec_plan", "update_task",
+        "request_review", "generate_spec_plan", "update_task", "archive_task",
     }
     tool_messages = [m for m in session.messages if m.get("name") == "approve_gate"]
     assert len(tool_messages) == 1
@@ -451,7 +442,7 @@ async def test_stream_turn_loaded_tools_persist_across_turns(db_session):
     assert "".join(e for e in events if isinstance(e, str)) == "Done."
 
     baseline_names = {t["name"] for t in provider.calls[0]["tools"]}
-    assert baseline_names == {"create_task", "get_status", "query_db", "load_tools"}
+    assert baseline_names == {"create_task", "get_status", "get_run_output", "get_stats", "query_db", "load_tools"}
 
     expanded_names = {t["name"] for t in provider.calls[1]["tools"]}
     assert "dispatch_task" in expanded_names
@@ -467,7 +458,7 @@ async def test_stream_turn_loaded_tools_persist_across_turns(db_session):
     turn2_names = {t["name"] for t in provider.calls[-1]["tools"]}
     assert turn2_names == baseline_names | {
         "dispatch_task", "record_verdict", "approve_gate", "cancel_task",
-        "request_review", "generate_spec_plan", "update_task",
+        "request_review", "generate_spec_plan", "update_task", "archive_task",
     }
 
 
@@ -529,39 +520,31 @@ def test_context_budget_does_not_reorphan_tool_call_pairs(db_session):
     assert budgeted[-1]["content"] == "newest"
 
 
-def test_chat_endpoint_routes_requested_models_and_preserves_history(
-    client,
+@pytest.mark.asyncio
+async def test_chat_service_routes_requested_models_and_preserves_history(
     db_session,
-    monkeypatch,
 ):
     openai = _FakeProvider("openai", ["first answer", "second answer"])
-    monkeypatch.setattr(
-        "app.api.chat.CoordinatorService",
-        lambda db: CoordinatorService(db, providers={"openai": openai}),
+    service = CoordinatorService(db_session, providers={"openai": openai})
+    session = Session(id="sess-switch", thread_id="api-switch-session", title="Switch Test")
+    db_session.add(session)
+    db_session.commit()
+
+    first = await service.complete_turn(
+        session,
+        message="First question",
+        model="gpt-4o",
+        idempotency_key="api-turn-1",
+    )
+    second = await service.complete_turn(
+        session,
+        message="Second question",
+        model="gpt-4o-mini",
+        idempotency_key="api-turn-2",
     )
 
-    first = client.post(
-        "/api/chat",
-        json={
-            "thread_id": "api-switch-session",
-            "message": "First question",
-            "model": "gpt-4o",
-            "idempotency_key": "api-turn-1",
-        },
-    )
-    second = client.post(
-        "/api/chat",
-        json={
-            "thread_id": "api-switch-session",
-            "message": "Second question",
-            "model": "gpt-4o-mini",
-            "idempotency_key": "api-turn-2",
-        },
-    )
-
-    assert first.status_code == second.status_code == 200
-    assert '"type": "done"' in first.text
-    assert '"type": "done"' in second.text
+    assert first.content == "first answer"
+    assert second.content == "second answer"
     assert openai.calls[0][1][0]["role"] == "system"
     conversation = [
         m for m in openai.calls[1][1] if m["role"] in {"user", "assistant"}
@@ -571,11 +554,6 @@ def test_chat_endpoint_routes_requested_models_and_preserves_history(
         "first answer",
         "Second question",
     ]
-    session = (
-        db_session.query(Session)
-        .filter(Session.thread_id == "api-switch-session")
-        .one()
-    )
     assert session.selected_provider == "openai"
 
 

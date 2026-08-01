@@ -4,83 +4,54 @@ Task coordination system for coding agents with gate-based workflow, four-eyes r
 
 ## Architecture
 
-| Component | Stack | Port |
-|-----------|-------|------|
-| Backend API | FastAPI + SQLAlchemy | 8000 |
-| Frontend | React + Vite + Tailwind + shadcn/ui | 5173 |
+| Component | Stack | Port / Interface |
+|-----------|-------|------------------|
+| MCP Server (Native) | FastMCP (Python) | 8100 (HTTP/SSE) |
 | Worker | Dramatiq + Redis | - |
-| Database | PostgreSQL | 5432 |
+| Database | PostgreSQL | 5433 (host) / 5432 (container) |
+| Cache & Outbox | Redis | 6380 (host) / 6379 (container) |
 
-## Quick Start
+## Quick Start (5 Steps)
 
 ```bash
-# 1. Database
-docker-compose up -d db
+# 1. Clone repo & set environment
+git clone <repo-url> && cd agenticmatix
+cp .env.example .env   # edit MCP_TOKEN_SECRET if needed
 
-# 2. Backend + Worker
+# 2. Start services (PostgreSQL, Redis, FastMCP Server, Dramatiq Worker)
 ./scripts/start-backend.sh
 
-# 3. Frontend
-cd frontend && npm install && npm run dev
+# 3. Setup read-only database role (for query_db tool)
+./scripts/create-readonly-role.sh
+
+# 4. Initialize coordinator workspace outside the repo
+./scripts/init-coordinator-workdir.sh ~/ct-coordinator
+
+# 5. Launch coordinator CLI inside the workdir
+cd ~/ct-coordinator && claude  # or agy / codex
 ```
 
-## Service URLs
+## Useful Scripts
 
-- Backend API: http://localhost:8000 (OpenAPI: /docs)
-- Frontend: http://localhost:5173
-- PostgreSQL: localhost:5432
+| Script | Purpose |
+|--------|---------|
+| `./scripts/start-backend.sh` | Starts Docker services (DB/Redis) and launches FastMCP server + Dramatiq worker |
+| `./scripts/create-readonly-role.sh` | Provisions the `ct_readonly` Postgres role and `ct_readonly_user` |
+| `./scripts/init-coordinator-workdir.sh <dir>` | Creates isolated workspace for coordinator CLI runs |
 
-## Environment
-
-Copy `.env.example` to `.env`:
+## Development & Testing
 
 ```bash
-DATABASE_URL=postgresql://ct:password@localhost:5432/control_tower
-REDIS_URL=redis://localhost:6379
-MCP_API_TOKEN=<random string>  # enables CLI→MCP tool access
-```
-
-## MCP Integration
-
-CLI coordinators (claude/agy/codex) access CT tools via MCP:
-
-```json
-{
-  "mcpServers": {
-    "control-tower": {
-      "command": "python",
-      "args": ["-m", "app.mcp_server", "--api-url", "http://localhost:8000"],
-      "env": {"CT_MCP_TOKEN": "<token>"}
-    }
-  }
-}
-```
-
-Set `MCP_API_TOKEN` in `.env` to enable. CLIDispatcher auto-generates config per spawn.
-
-## Key Concepts
-
-- **Gates**: spec → dispatch → review_order → verdict
-- **Modes**: supervised (human approve), plan-only (block dispatch), bypass (auto)
-- **Four-eyes**: reviewer must differ from executor
-- **Brakes**: autonomy toggle, cost limit, concurrency limit
-
-## Development
-
-```bash
-# Run tests
-pytest backend/tests/ -v
-
-# Migrations
-cd backend && alembic upgrade head
-
-# Full Docker stack
-docker-compose up --build
+# Run tests using the unified virtual environment
+backend/venv/bin/python -m pytest backend/tests -q
 ```
 
 ## Documentation
 
-- `CLAUDE.md` - System spec for AI assistants
-- `docs/adr/ADR-001-unified-tool-architecture.md` - Tool system design
-- `docs/design/` - Architecture designs
-- `docs/research/` - Research docs
+- `CLAUDE.md` - System reference for AI assistants
+- [docs/adr/](docs/adr/README.md) - Architecture Decision Records
+- [docs/design/](docs/design/README.md) - Active architecture designs
+- [docs/plans/](docs/plans/README.md) - Execution plans and roadmap
+- [docs/testing/](docs/testing/README.md) - QA scripts and test procedures
+- [docs/reviews/](docs/reviews/README.md) - Review notes and incident logs
+- [docs/archive/](docs/archive/README.md) - Deprecated designs and strategy papers

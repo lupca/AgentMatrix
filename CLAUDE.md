@@ -5,13 +5,18 @@ Hệ thống điều phối coding agent với gate-based workflow, four-eyes re
 ## Kiến trúc
 
 ```
-Frontend (React/Vite/Tailwind)     Backend (FastAPI/SQLAlchemy)     Worker (Dramatiq)
-├── Dashboard, Kanban              ├── /api/chat (SSE)              ├── run_agent
-├── Tasks, Agents, Projects        ├── /api/tasks, /api/agents      ├── advance_task
-└── WebSocket ← Redis pubsub       ├── CommandRouter                └── Redis broker
-                                   ├── CoordinatorService
-                                   ├── TaskOrchestrationService
-                                   └── CLIDispatcher → claude/agy/codex
+Coordinator CLI (Outside Repo Workdir)
+  └── FastMCP Client (mcp_native) → http://localhost:8100/mcp (Bearer Token Auth)
+                                       │
+                                       ▼
+                              FastMCP Server (Port 8100)
+                                       │
+                        ┌──────────────┴──────────────┐
+                        ▼                             ▼
+              CommandRouter / Services         PostgreSQL (5433)
+                        │                      ct_readonly_user
+                        ▼
+                 Dramatiq Worker → CLIDispatcher → agy/claude/codex
 ```
 
 ## Data Model chính
@@ -45,22 +50,14 @@ check_brakes():
   - active_runs ≥ max_concurrent_runs → QUEUE
 ```
 
-## Agent Scoring
-
-AgentMatcher tính điểm: skill_match(0.30) + performance(0.25) + load(0.10) + cost(0.10) + work_type_fit(0.15) + risk_fit(0.10)
-
 ## Commands
 
 ```bash
-# Dev
-./scripts/start-backend.sh      # FastAPI + Dramatiq worker
-cd frontend && npm run dev      # Vite dev server
+# Start backend (DB + Redis + FastMCP + Worker)
+./scripts/start-backend.sh
 
-# Test
-pytest backend/tests/ -v
-
-# Docker
-docker-compose up --build
+# Run tests
+backend/venv/bin/python -m pytest backend/tests -q
 ```
 
 ## Quy tắc quan trọng
@@ -68,4 +65,5 @@ docker-compose up --build
 - **Four-eyes**: reviewer ≠ executor (DB constraint)
 - **GateRecord**: append-only, immutable
 - **Worktree isolation**: mỗi AgentRun chạy trong git worktree riêng
-- **MCP integration**: CLI agent gọi CT tools qua MCP server
+- **MCP Native**: Coordinator CLI tương tác 100% qua tool surface FastMCP native
+- **Coordinator Workdir**: Chạy coordinator CLI từ ngoài repo (`~/ct-coordinator`)

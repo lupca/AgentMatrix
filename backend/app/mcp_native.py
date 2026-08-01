@@ -1,8 +1,8 @@
 """Native streamable-HTTP MCP server for Control Tower.
 
-This module is deliberately separate from :mod:`app.mcp_server`.  The latter
-is the old stdio -> REST forwarder and remains the rollback path while clients
-move to this server.  Native handlers resolve a DB session and call
+This is the only server surface: the old stdio -> REST forwarder
+(``app.mcp_server``) and the FastAPI layer were removed in GD4 P1.
+Native handlers resolve a DB session and call
 ``CommandRouter.execute_tool`` in-process; the router therefore remains the
 single enforcement point for lifecycle and four-eyes rules.
 """

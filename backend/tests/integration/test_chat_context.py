@@ -1,6 +1,8 @@
+import pytest
 from dataclasses import dataclass, field
 
-from app.db.models import Project, Task
+from app.db.models import Project, Task, Session
+from app.services import entity_admin
 from app.services.coordinator import CoordinatorService
 from app.services.llm_client import UsageCounts
 from app.services.providers import ProviderResponse
@@ -22,10 +24,9 @@ class _ContextProvider:
         )
 
 
-def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
-    client,
+@pytest.mark.asyncio
+async def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
     db_session,
-    monkeypatch,
 ):
     db_session.add(Project(id="alpha", name="Alpha", status="active"))
     db_session.add(
@@ -39,30 +40,24 @@ def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
     db_session.commit()
 
     provider = _ContextProvider()
-    monkeypatch.setattr(
-        "app.api.chat.CoordinatorService",
-        lambda db: CoordinatorService(db, providers={"openai": provider}),
+    service = CoordinatorService(db_session, providers={"openai": provider})
+    
+    session = Session(
+        id="sess-context-chat",
+        thread_id="context-chat",
+        project_id="alpha",
+        context_level="project",
     )
-    session = client.post(
-        "/api/sessions",
-        json={
-            "thread_id": "context-chat",
-            "project_id": "alpha",
-            "context_level": "project",
-        },
-    )
-    assert session.status_code == 201
+    db_session.add(session)
+    db_session.commit()
 
-    first = client.post(
-        "/api/chat",
-        json={
-            "thread_id": "context-chat",
-            "message": "What projects do I have?",
-            "model": "gpt-4o",
-            "idempotency_key": "context-turn-1",
-        },
+    first = await service.complete_turn(
+        session,
+        message="What projects do I have?",
+        model="gpt-4o",
+        idempotency_key="context-turn-1",
     )
-    assert first.status_code == 200
+    assert first.content == "context-aware"
     first_global = provider.messages[0][0]["content"]
     first_snapshot = next(
         message["content"] for message in provider.messages[0]
@@ -70,30 +65,22 @@ def test_chat_prompt_contains_snapshot_and_refreshes_after_project_mutation(
     )
     assert "- Projects: 1 active (Alpha)" in first_snapshot
     assert "ALPHA-001: Dispatch the release (dispatched)" in first_snapshot
-    # The snapshot is its own message so mutations never touch the Global tier.
     assert "- Projects: 1 active (Alpha)" not in first_global
 
-    updated = client.patch(
-        "/api/projects/alpha",
-        json={"name": "Renamed Alpha"},
-    )
-    assert updated.status_code == 200
+    entity_admin.update_project(db_session, "alpha", {"name": "Renamed Alpha"})
 
-    second = client.post(
-        "/api/chat",
-        json={
-            "thread_id": "context-chat",
-            "message": "Which project is this?",
-            "model": "gpt-4o",
-            "idempotency_key": "context-turn-2",
-        },
+    second = await service.complete_turn(
+        session,
+        message="Which project is this?",
+        model="gpt-4o",
+        idempotency_key="context-turn-2",
     )
-    assert second.status_code == 200
+    assert second.content == "context-aware"
     second_global = provider.messages[1][0]["content"]
     second_snapshot = next(
         message["content"] for message in provider.messages[1]
         if message["content"].startswith("## System State")
     )
     assert "- Projects: 1 active (Renamed Alpha)" in second_snapshot
-    # Global tier bytes are unaffected by the project mutation (stable prefix).
     assert second_global == first_global
+

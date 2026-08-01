@@ -10,4 +10,9 @@ node_modules
 venv
 .backend.pid
 backend.log
-.ct/review-*.json
+.worker.pid
+worker.log
+.ct/
+.codex/
+.fuse_hidden*
+.ruff_cache/

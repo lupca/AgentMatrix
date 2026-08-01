@@ -5,7 +5,7 @@ from app.services.agent_matcher import AgentMatcher
 from app.services.agent_suggester import AgentSuggester
 
 
-def test_suggested_agents_are_ranked_by_skills_and_performance(client, db_session):
+def test_suggested_agents_are_ranked_by_skills_and_performance(db_session):
     db_session.add_all(
         [
             Agent(
@@ -26,32 +26,25 @@ def test_suggested_agents_are_ranked_by_skills_and_performance(client, db_sessio
             ),
         ]
     )
+    task = Task(
+        id="MATCH-001",
+        project="frontend",
+        title="Build React TypeScript dashboard",
+        tags=["frontend", "react"],
+    )
+    db_session.add(task)
     db_session.commit()
 
-    task_response = client.post(
-        "/api/tasks",
-        json={
-            "id": "MATCH-001",
-            "project": "frontend",
-            "title": "Build React TypeScript dashboard",
-            "tags": ["frontend", "react"],
-        },
-    )
-    assert task_response.status_code == 201
+    suggestions = AgentMatcher(db_session).suggest_agents(task)
 
-    response = client.get("/api/tasks/MATCH-001/suggested-agents")
-
-    assert response.status_code == 200
-    suggestions = response.json()
-    assert [item["agent_id"] for item in suggestions] == [
+    assert [item.agent_id for item in suggestions] == [
         "@frontend-agent",
         "@backend-agent",
     ]
-    assert suggestions[0]["score"] > suggestions[1]["score"]
-    assert "frontend" in suggestions[0]["reason"]
+    assert suggestions[0].score > suggestions[1].score
 
 
-def test_suggested_agents_consider_similar_run_outcomes(client, db_session):
+def test_suggested_agents_consider_similar_run_outcomes(db_session):
     good = Agent(
         id="@good-agent",
         name="Good Agent",
@@ -93,10 +86,9 @@ def test_suggested_agents_consider_similar_run_outcomes(client, db_session):
     )
     db_session.commit()
 
-    response = client.get(f"/api/tasks/{current.id}/suggested-agents")
+    suggestions = AgentMatcher(db_session).suggest_agents(current)
 
-    assert response.status_code == 200
-    assert response.json()[0]["agent_id"] == good.id
+    assert suggestions[0].agent_id == good.id
 
 
 def test_agent_suggester_executor_role_has_no_capability_filter(db_session):

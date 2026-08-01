@@ -1,7 +1,7 @@
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from app.db.base import Base
 from app.services.command_router import COMMANDS, HELP_COMMAND, CommandRouter
 from app.services.graph_client import GraphClientError
@@ -268,6 +268,7 @@ async def test_command_router_persists_run_before_enqueueing(db_session):
         run = db_session.get(AgentRun, run_id)
         assert run is not None
         assert run.status == "queued"
+        return MagicMock(message_id="msg-123")
 
     with patch("app.workers.agent_runner.run_agent.send", side_effect=assert_run_exists):
         result = await CommandRouter(db_session).execute(

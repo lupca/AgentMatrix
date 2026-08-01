@@ -25,6 +25,7 @@ services:
       - "${MCP_PORT:-8100}:8100"
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-ct}:${DB_PASSWORD:-secret}@db:5432/${POSTGRES_DB:-control_tower}
+      DATABASE_URL_READONLY: postgresql://${CT_READONLY_USER:-ct_readonly_user}:${CT_READONLY_PASSWORD:-readonly}@db:5432/${POSTGRES_DB:-control_tower}
       REDIS_URL: redis://redis:6379/0
       MCP_TOKEN_SECRET: ${MCP_TOKEN_SECRET:?MCP_TOKEN_SECRET is required}
       MCP_NATIVE_URL: ${MCP_NATIVE_URL:-http://localhost:8100/mcp}
