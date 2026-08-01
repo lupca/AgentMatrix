@@ -87,8 +87,8 @@ def test_alembic_migration_head():
     connection.close()
 
 
-@pytest.mark.parametrize("terminal_status", ["done", "changes-requested"])
-def test_terminal_task_cannot_await_approval(db_session, terminal_status):
+def test_done_task_cannot_await_approval(db_session):
+    terminal_status = "done"
     task = Task(
         id=f"TERM-{terminal_status[:3].upper()}",
         project="project",
@@ -106,6 +106,27 @@ def test_terminal_task_cannot_await_approval(db_session, terminal_status):
     with pytest.raises(IntegrityError):
         db_session.commit()
     db_session.rollback()
+
+
+def test_changes_requested_may_await_a_redispatch_gate(db_session):
+    """CTV2-234: a supervised replan round parks a pending re-dispatch gate
+    while the task still reads changes-requested."""
+    task = Task(
+        id="TERM-CR",
+        project="project",
+        title="Replan awaiting approval",
+        status="todo",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="result-1",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    task.status = "changes-requested"
+    task.awaiting_approval = True
+    db_session.commit()  # must NOT raise anymore
+    assert task.awaiting_approval is True
 
 
 # ---------------------------------------------------------------------------

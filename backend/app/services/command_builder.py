@@ -263,11 +263,19 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
             "has one item per acceptance criterion. Reviewer execution is "
             "read-only: do not create commits or alter refs."
         )
-    sections.append(
-        "Complete every acceptance criterion, run the relevant tests, and commit the changes. "
-        "When done, print the resulting commit hash on its own final line as 'RESULT_REF: <hash>'. "
-        "A task with no commit has no result-ref and cannot be reviewed."
-    )
+    tags = [str(tag).lower() for tag in (task.tags or [])]
+    if "no-commit" in tags:
+        sections.append(
+            "This is a READ-ONLY task (tag: no-commit): do the analysis/"
+            "research work, do NOT commit anything, and when done print "
+            "exactly 'RESULT_REF: none' on its own final line."
+        )
+    else:
+        sections.append(
+            "Complete every acceptance criterion, run the relevant tests, and commit the changes. "
+            "When done, print the resulting commit hash on its own final line as 'RESULT_REF: <hash>'. "
+            "A task with no commit has no result-ref and cannot be reviewed."
+        )
     return "\n\n".join(sections)
 
 

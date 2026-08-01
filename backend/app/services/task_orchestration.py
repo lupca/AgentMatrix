@@ -231,15 +231,21 @@ class TaskOrchestrationService:
         if expected_status is None:
             if kind == "review":
                 expected_status = "awaiting-review"
-            elif task.status == "failed":
-                expected_status = "failed"  # Allow retry of failed tasks
+            elif task.status in {"failed", "changes-requested"}:
+                # Retry of a failed task, or a replan round after a fail
+                # verdict (CTV2-234) — both re-dispatch without SQL surgery.
+                expected_status = task.status
             else:
                 expected_status = "todo"
-        elif kind == "execute" and expected_status not in {"todo", "failed"}:
-            # Execute dispatch accepts "todo" (normal) or "failed" (retry).
+        elif kind == "execute" and expected_status not in {
+            "todo", "failed", "changes-requested",
+        }:
+            # Execute dispatch accepts "todo" (normal), "failed" (retry), or
+            # "changes-requested" (replan round after a fail verdict).
             # Review dispatch may target other pre-states like "awaiting-review".
             raise PrerequisiteError(
-                "execute dispatch requires expected_status='todo' or 'failed'"
+                "execute dispatch requires expected_status in "
+                "{'todo', 'failed', 'changes-requested'}"
             )
         if not (task.acceptance_criteria or []) and not task.legacy_no_ac:
             raise PrerequisiteError(
@@ -1401,6 +1407,65 @@ class TaskOrchestrationService:
             head,
             f"Merge {task.id}: {task.title} (verdict pass, reviewer {task.reviewer})",
         )
+
+    def complete_no_commit_task(
+        self, *, task_id: str, actor: str, run_id: str | None = None
+    ) -> dict:
+        """Finish a read-only task (research, context-gen) that commits nothing.
+
+        CTV2-235: RESULT_REF is mandatory in the normal path, so a task whose
+        whole job is reading/analyzing always ended "failed" even after doing
+        its work. Opt-in only: the task must carry the 'no-commit' tag, and
+        the caller must have verified the worktree really has no commits.
+        The diff-review cycle is skipped (there is no diff); the system
+        records an explicit auto-verdict gate row so the ledger shows exactly
+        what happened instead of pretending a reviewer approved it.
+        """
+        task = self._task(task_id)
+        tags = [str(t).lower() for t in (task.tags or [])]
+        if "no-commit" not in tags:
+            raise PrerequisiteError(
+                "RESULT_REF: none is only accepted for tasks tagged "
+                "'no-commit'; commit your work or tag the task."
+            )
+        now = datetime.utcnow()
+        payload = {
+            "kind": "no_commit_completion",
+            "run_id": run_id,
+            "note": "read-only task: no diff to review, auto-pass recorded by system",
+        }
+        self._ledger_record(
+            task=task,
+            gate_type="verdict",
+            status="approved",
+            actor=actor,
+            idempotency_key=f"no-commit:{task.id}:{run_id or 'manual'}",
+            input_hash=self._input_hash(payload),
+            payload=payload,
+            output_ref="pass",
+            output_payload={"verdict": "pass"},
+        )
+        task.result_ref = "no-commit"
+        task.verdict = "pass"
+        if not task.reviewer:
+            # ck_tasks_done_invariants needs a reviewer distinct from the
+            # executor; name the system so nobody mistakes this for four-eyes.
+            task.reviewer = "@system-no-commit"
+        self._cas_status(task, "done")
+        task.completed_at = now
+        task.final_result_ref = task.result_ref
+        task.final_verdict = "pass"
+        task.awaiting_approval = False
+        task.approval_prompt = None
+        task.error = None
+        emit_task_event(
+            task_id=task.id,
+            event_type="done",
+            payload={"no_commit": True, "run_id": run_id},
+            db=self.db,
+        )
+        self.db.commit()
+        return {"action": "no_commit_completed", "task_id": task.id, "status": task.status}
 
     def land_task(self, *, task_id: str, actor: str) -> dict:
         """Retry/backfill landing for a pass-verdict task (CTV2-238).

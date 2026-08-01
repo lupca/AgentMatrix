@@ -386,7 +386,10 @@ class CommandRouter:
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
                 return {'error': 'task_id is required'}
-            executor = str(args.get('executor', '') or '').strip()
+            # Accept agent_id as an alias: generate_spec_plan uses agent_id,
+            # so callers naturally use it here too — dropping it silently
+            # handed the choice to the matcher (CTV2-228).
+            executor = str(args.get('executor') or args.get('agent_id') or '').strip()
             effort = str(args.get('effort', '') or '').strip()
             command_args = ' '.join(
                 part for part in (task_id, executor, f'--effort {effort}' if effort else '') if part
@@ -402,7 +405,7 @@ class CommandRouter:
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
                 return {'error': 'task_id is required'}
-            reviewer = str(args.get('reviewer', '') or '').strip()
+            reviewer = str(args.get('reviewer') or args.get('agent_id') or '').strip()
             command_args = ' '.join(part for part in (task_id, reviewer) if part)
         elif canonical_name == 'generate_spec_plan':
             task_id = str(args.get('task_id', '')).strip()

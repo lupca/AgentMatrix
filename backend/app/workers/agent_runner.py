@@ -1017,6 +1017,46 @@ def run_agent(
                 run.result_ref = os.path.relpath(
                     review_result_path(repo_root, review_result.task_id), repo_root
                 )
+            elif (explicit_result_ref or "").strip().lower() == "none":
+                # Read-only task (CTV2-235): the agent explicitly declares it
+                # committed nothing. Only honored when the worktree agrees
+                # AND the task opted in with the 'no-commit' tag.
+                head_now = _git_ref(exec_cwd, "HEAD")
+                base_now = _git_ref(exec_cwd, base_ref)
+                if head_now and base_now and head_now != base_now:
+                    err = (
+                        "Executor declared 'RESULT_REF: none' but the "
+                        "worktree has committed changes"
+                    )
+                    run.status = ProcessStatus.FAILED.value
+                    effective_status = ProcessStatus.FAILED.value
+                    run.error_message = err
+                    TaskOrchestrationService(db).record_execution_failure(
+                        task_id=task_id,
+                        error=err,
+                        actor=f"agent:{run.agent_id}",
+                        idempotency_key=f"run:{run.id}:none-with-commits",
+                        run_id=run.id,
+                    )
+                else:
+                    try:
+                        run.result_ref = "no-commit"
+                        TaskOrchestrationService(db).complete_no_commit_task(
+                            task_id=task_id,
+                            actor=f"agent:{run.agent_id}",
+                            run_id=run.id,
+                        )
+                    except OrchestrationError as exc:
+                        run.status = ProcessStatus.FAILED.value
+                        effective_status = ProcessStatus.FAILED.value
+                        run.error_message = str(exc)
+                        TaskOrchestrationService(db).record_execution_failure(
+                            task_id=task_id,
+                            error=str(exc),
+                            actor=f"agent:{run.agent_id}",
+                            idempotency_key=f"run:{run.id}:no-commit-rejected",
+                            run_id=run.id,
+                        )
             else:
                 result_ref, no_change_error = _build_execution_result_ref(
                     exec_cwd,

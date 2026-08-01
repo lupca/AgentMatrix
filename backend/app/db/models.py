@@ -137,8 +137,9 @@ class Task(ArchivableMixin, Base):
             name="ck_tasks_done_invariants",
         ),
         CheckConstraint(
-            "status NOT IN ('done', 'changes-requested') "
-            "OR awaiting_approval IS NOT TRUE",
+            # changes-requested is NOT terminal anymore: a supervised replan
+            # round parks a pending re-dispatch gate there (CTV2-234).
+            "status <> 'done' OR awaiting_approval IS NOT TRUE",
             name="ck_tasks_terminal_not_awaiting_approval",
         ),
     )
