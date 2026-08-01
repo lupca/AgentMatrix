@@ -60,6 +60,9 @@ Chi tiết từng vấn đề ở dạng task file tại `~/projects/control-tow
 - CTV2-233 (critical, ĐÃ SỬA ac34bf0): schema `approve_gate` không có trường `decision` → mọi human REJECT qua MCP bị ghi thành approve (quan sát live: reject verdict rubber-stamp làm task done). Dev cần: test e2e reject + rà các tool khác cùng pattern mapping-vứt-arg.
 - CTV2-234 (med): không có đường chính thống `changes-requested` → re-dispatch (dispatch_task đòi todo) — vòng replan phải SQL về todo.
 - Bằng chứng mới cho CTV2-220/223: agy reviewer rubber-stamp CTV2-227 vòng 2 (pass 4/4, 0 findings trong khi F1 HIGH còn nguyên) — agy không đáng tin cả vai reviewer, matcher vẫn tự chọn nó (CTV2-228).
+- CTV2-227 (DONE, 4 vòng: 3 dispatch + 1 human replan sau khi auto_max_rounds 3/3 escalate đúng thiết kế): flow Project Context & Rules THÔNG end-to-end — tool `save_project_context` (executor-scoped, chặn cross-project write), inject [Project Context]+[Project Rules] vào dispatch/review prompt, đã demo thật: agent quét repo → gọi tool → context+4 rules vào DB → dispatch mới tự inject (merge 3f46d3c, 765c165; suite 513).
+- CTV2-235 (med): task read-only (context-gen, research) không có đường done — RESULT_REF bắt buộc commit nên run bị fail dù hoàn thành việc; cần loại task không-commit hoặc RESULT_REF: none hợp lệ.
+- Fix thêm: glob `**/` không match con trực tiếp (fnmatch) → rules không bao giờ inject; đã sửa + test (765c165).
 
 ## P2 — Bước 3 + backlog tồn đọng
 
