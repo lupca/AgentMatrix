@@ -16,61 +16,6 @@ SUPPORTED_CLIS = {"agy", "codex", "claude"}
 _EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
 
 
-# Slack added to the run timeout when deriving the executor token TTL: the
-# run may wait in the brake queue before it starts, and that wait burns
-# wall-clock against the token's exp.
-_MCP_TTL_QUEUE_MARGIN_SECONDS = 1800
-
-
-def _native_mcp_config(
-    task_id: str, role: str, *, ttl_seconds: int | None = None
-) -> str | None:
-    """Create a short-lived CLI config when native MCP is enabled.
-
-    The executor token is scoped to the task; ``ttl_seconds`` should be the
-    resolved run timeout so the token outlives the run it serves. The worker
-    (``agent_runner._cleanup_mcp_config``) removes the config after the CLI
-    exits.
-    """
-
-    if not settings.MCP_TOKEN_SECRET:
-        raise ValueError("MCP_TOKEN_SECRET is required when native MCP is enabled")
-    # Lazy import avoids the command_builder -> CommandRouter -> command_builder
-    # import cycle during application startup.
-    from app.mcp_native import issue_token
-
-    ttl = (ttl_seconds or settings.RUN_TIMEOUT_SECONDS) + _MCP_TTL_QUEUE_MARGIN_SECONDS
-    token = issue_token(
-        settings.MCP_TOKEN_SECRET, role=role, task_id=task_id, ttl_seconds=ttl
-    )
-    handle = tempfile.NamedTemporaryFile(
-        prefix="ct-mcp-", suffix=".json", mode="w", encoding="utf-8", delete=False
-    )
-    try:
-        with handle:
-            json.dump(
-                build_mcp_config(
-                    settings.MCP_NATIVE_URL,
-                    token,
-                    native_url=settings.MCP_NATIVE_URL,
-                    role=role,
-                ),
-                handle,
-            )
-        os.chmod(handle.name, 0o600)
-        return handle.name
-    except BaseException:
-        try:
-            os.unlink(handle.name)
-        except OSError:
-            pass
-        raise
-
-
-def _attach_mcp_config(command: str, config_path: str | None) -> str:
-    return command
-
-
 def _model_has_effort_suffix(model: str | None) -> bool:
     """Check if model name already includes effort level (e.g. gemini-3.6-flash-low)."""
     if not model:
@@ -90,7 +35,6 @@ def build_dispatch_command(
     agent: Agent,
     project: Optional[Project] = None,
     effort: Optional[str] = None,
-    mcp_ttl_seconds: Optional[int] = None,
 ) -> tuple[str, str, str]:
     cli = (agent.cli or _infer_cli(agent.model, agent.id)).strip().lower()
     if cli not in SUPPORTED_CLIS:
@@ -109,17 +53,12 @@ def build_dispatch_command(
     resolved_effort = effort or agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
     prompt = _task_prompt(task, review_result_path(repo_root, task.id))
-    mcp_config_path = _native_mcp_config(
-        task.id, "executor", ttl_seconds=mcp_ttl_seconds
-    )
     if cli == "codex":
         argv = ["codex", "exec"]
         if agent.model:
             argv.extend(["-m", agent.model])
         if not model_has_effort:
             argv.extend(["-c", f"model_reasoning_effort={resolved_effort}"])
-        if mcp_config_path:
-            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["--dangerously-bypass-approvals-and-sandbox", prompt])
     elif cli == "claude":
         argv = ["claude"]
@@ -127,20 +66,18 @@ def build_dispatch_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        if mcp_config_path:
-            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
     else:
+        # agy uses Go's standard flag parser which stops at the first
+        # positional argument; all flags must precede the prompt.
         argv = ["agy"]
         if agent.model:
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        if mcp_config_path:
-            argv.extend(["--mcp-config", mcp_config_path])
-        argv.extend(["--print", prompt, "--dangerously-skip-permissions"])
+        argv.extend(["--print", "--dangerously-skip-permissions", prompt])
 
-    return _attach_mcp_config(shlex.join(argv), mcp_config_path), repo_root, cli
+    return shlex.join(argv), repo_root, cli
 
 
 def build_review_command(
@@ -149,7 +86,6 @@ def build_review_command(
     project: Optional[Project],
     base_ref: str,
     head_ref: str,
-    mcp_ttl_seconds: Optional[int] = None,
 ) -> tuple[str, str, str]:
     """Build the CLI invocation for a real ``/code-review`` run.
 
@@ -178,9 +114,6 @@ def build_review_command(
     prompt = _review_prompt(
         task, base_ref, head_ref, review_result_path(repo_root, task.id)
     )
-    mcp_config_path = _native_mcp_config(
-        task.id, "executor", ttl_seconds=mcp_ttl_seconds
-    )
     resolved_effort = agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
     if cli == "codex":
@@ -189,8 +122,6 @@ def build_review_command(
             argv.extend(["-m", agent.model])
         if not model_has_effort:
             argv.extend(["-c", f"model_reasoning_effort={resolved_effort}"])
-        if mcp_config_path:
-            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["--dangerously-bypass-approvals-and-sandbox", prompt])
     elif cli == "claude":
         argv = ["claude"]
@@ -198,20 +129,17 @@ def build_review_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        if mcp_config_path:
-            argv.extend(["--mcp-config", mcp_config_path])
         argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
     else:
+        # agy: all flags before the positional prompt (Go standard flag parser).
         argv = ["agy"]
         if agent.model:
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        if mcp_config_path:
-            argv.extend(["--mcp-config", mcp_config_path])
-        argv.extend(["--print", prompt, "--dangerously-skip-permissions"])
+        argv.extend(["--print", "--dangerously-skip-permissions", prompt])
 
-    return _attach_mcp_config(shlex.join(argv), mcp_config_path), repo_root, cli
+    return shlex.join(argv), repo_root, cli
 
 
 def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -> str:

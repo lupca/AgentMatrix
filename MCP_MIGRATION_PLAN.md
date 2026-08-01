@@ -62,7 +62,7 @@ REST path gọi `invalidate_context_snapshot` sau mỗi tool call (`chat.py:82`)
 - [x] Gap tools (2026-08-01): `query_db` thêm entity `agent_runs` + `audit`; knowledge trả `content` khi point lookup theo id; tool mới `get_task_events` (cursor `since_id`), `archive_task` (kèm restore), `suggest_agents` (tư vấn, read-only); `update_task` nhận `add_depends_on`/`remove_depends_on`; nhóm deferred mới `query`. (`unset_coordinator_defaults` hóa ra đã nằm sẵn trong `entity_admin.create/update_agent` — không cần làm.)
 - [x] API key: QUYẾT ĐỊNH — `manage_agent` nhận `api_key` write-only. Router mã hóa Fernet **trước khi** payload chạm `AdminGateService` (ledger append-only không redact được), chỉ ciphertext (`api_key_encrypted`) được ghi gate/audit; không bao giờ echo lại. Policy mặc định vẫn là all-CLI agent; API-backed là tùy chọn.
 - [x] Sửa schema `approve_gate`: khai báo `gate_record_id` + dạng `admin:<id>`.
-- [x] TTL executor = run_timeout đã resolve + margin 30 phút cho queue (thread từ `task_orchestration` → `build_dispatch/review_command`); `issue-coordinator-token.sh [role] [task_id] [ttl]` cho phiên tương tác dài; fix race `_ensure_session` (IntegrityError → rollback).
+- [x] TTL executor = run_timeout đã resolve không cần margin 30 phút (đã chuyển MCP attachment sang spawn-time via `app/services/mcp_attach.py` per-CLI adapter: claude via `--mcp-config`, codex via `-c` + `CT_MCP_TOKEN` env, agy via `.agents/mcp_config.json` với `serverUrl`). Builder trả về pure CLI command, khôi phục MCP cho cả 3 CLI ở coordinator + executor. `MCP_ATTACH_PLAN.md` hoàn thành.
 
 ### B1.6 — Launcher & health (M5 — hiện KHÔNG có gì khởi động mcp_native)
 - [x] Launcher chuyển sang `python -m app.mcp_native --host 0.0.0.0 --port 8100`; worker Dramatiq giữ nguyên.

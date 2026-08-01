@@ -1,5 +1,31 @@
 # Review GĐ3 Bước 0–B1 (commits 449e622, d74121e, d9c86d8, faff559)
 
+## VÒNG 3 — review MCP_ATTACH_PLAN implementation (2026-08-01) — **ĐÃ FIX TOÀN BỘ**
+
+Trạng thái sau fix: #1 role coordinator truyền đúng + bỏ task scope ảo, có test decode token assert role/task_id cho cả hai đường và test dispatcher-level; #2 `_ensure_git_exclude` dùng `git rev-parse --git-path info/exclude` (trỏ đúng common dir), có test worktree git thật assert `git status` sạch; #3 agy merge key `control-tower` vào config có sẵn + backup `.ct-orig`, `detach_mcp` restore nguyên văn thay vì xóa (backup cả khi JSON gốc hỏng), có test merge/restore; #4 emit `TaskEvent mcp_attach_failed` khi attach fail; #5 log warning khi `run.cli` rỗng. Cleanup hai đường đều đi qua `detach_mcp`. 237 tests pass.
+
+Đã xác minh ĐÚNG: `ProcessManager` nhận `env` và merge sạch sẽ; codex token đi env `CT_MCP_TOKEN`, **không xuất hiện trong argv** (đúng ràng buộc số 1); agy dùng `serverUrl`; claude giữ nguyên hành vi; cleanup theo danh sách path trong `finally` cả hai đường; command builder giờ deterministic; `_ensure_git_exclude` xử lý cả gitdir-file của worktree. 81 test pass.
+
+### 1. [CRITICAL] Coordinator nhận token EXECUTOR
+`cli_dispatcher.spawn` gọi `attach_mcp(..., task_id="coordinator", timeout_seconds=3600, ...)` **không truyền `role`** → default `role="executor"`. Hậu quả: coordinator cầm token executor bị scope vào task ảo `"coordinator"` — mọi tool coordinator-only (`create_task`, `dispatch_task`, `approve_gate`, `record_verdict`...) bị server từ chối "requires a coordinator token", và `_task_scope_ok` bắt `task_id` argument phải bằng `"coordinator"` nên tool executor cũng gần như không gọi được. **Coordinator tê liệt hoàn toàn** — không test nào bắt được vì `test_mcp_attach.py`/`test_cli_coordinator.py` không assert role trong token.
+Fix: truyền `role="coordinator"`; đổi default `task_id` của `attach_mcp` thành `None` (token coordinator không nên mang claim task ảo); **thêm test decode token và assert `role`/`task_id`** cho cả hai đường.
+
+### 2. [HIGH] Git exclude cho `.agents` VÔ TÁC DỤNG trong worktree — đúng case executor
+Đã kiểm chứng thực nghiệm: ghi `.agents` vào `.git/worktrees/<name>/info/exclude` (chỗ `_ensure_git_exclude` đang ghi khi gitdir là file trỏ đi) → `git status` trong worktree **vẫn thấy `?? .agents/`**. Git chỉ đọc `info/exclude` từ **common dir**. Executor agent giữa run hoàn toàn có thể `git add -A` và commit file chứa token.
+Fix: dùng đúng API git — `git rev-parse --git-path info/exclude` chạy trong `workdir` trả về path common dir chính xác (đã verify); hoặc resolve `commondir`. Thêm test tạo worktree thật và assert `git status --porcelain` sạch.
+
+### 3. [MEDIUM] agy coordinator ghi đè rồi XÓA file config có sẵn của người dùng
+Đường coordinator, `workdir = self.working_directory` (thư mục thật của người dùng): nếu đã tồn tại `.agents/mcp_config.json` (người dùng khai báo MCP server khác cho agy), `attach_mcp` ghi đè không hỏi, và cleanup `finally` **xóa luôn** — mất config gốc của người dùng.
+Fix: nếu file tồn tại → merge key `control-tower` vào JSON hiện có, cleanup chỉ gỡ key đó ra (restore nội dung cũ); hoặc tối thiểu backup/restore.
+
+### 4. [LOW] Fail attach → run chạy tiếp không MCP, chỉ có log
+`run_agent` bọc `attach_mcp` trong `except Exception` rồi chạy tiếp bằng command trần. Executor mất CT tools giữa chừng khó debug. Đề xuất: emit thêm `TaskEvent` kind=info để coordinator nhìn thấy, thay vì chỉ log worker.
+
+### 5. [LOW] `run.cli or "claude"` fallback im lặng
+Nếu `run.cli` rỗng thì mặc định nhánh claude — nên log warning vì token/config claude gắn cho CLI khác là vô nghĩa.
+
+---
+
 ## VÒNG 2 — verify commit 9641536 (2026-08-01)
 
 Đã xác minh sửa đúng: nudge log warning + trả `nudged: true/false` trong response; token luôn có `token_id`+`session_id`+`exp`; `_ensure_session` auto-create Session đúng scope (task cho executor, global cho coordinator); server fail-fast `SystemExit` khi thiếu `MCP_TOKEN_SECRET`. Vấn đề #1, #2, #3 vòng 1: ĐÓNG.

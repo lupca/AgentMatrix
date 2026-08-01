@@ -158,15 +158,12 @@ def build_cli_command(
             argv += ["--mcp-config", mcp_config_path]
         argv += ["-p", prompt]
     elif normalized_cli == "agy":
-        argv = ["agy", "--agent", model]
-        if mcp_config_path:
-            argv += ["--mcp-config", mcp_config_path]
-        argv += ["--print", prompt]
+        # --model (not --agent, which selects an agent profile, not a model).
+        # --mcp-config is not supported by agy; MCP config is omitted.
+        argv = ["agy", "--model", model, "--print", prompt]
     else:
-        argv = ["codex", "exec", "-m", model]
-        if mcp_config_path:
-            argv += ["--mcp-config", mcp_config_path]
-        argv += [prompt]
+        # --mcp-config is not supported by codex exec.
+        argv = ["codex", "exec", "-m", model, prompt]
     return shlex.join(argv)
 
 
@@ -284,16 +281,17 @@ class CLIDispatcher:
         async generator forwards each output item to the event loop.
         """
 
-        if not self.mcp_secret:
-            raise RuntimeError("MCP_TOKEN_SECRET is required for coordinator MCP")
-        from app.mcp_native import issue_token
+        base_command = build_cli_command(cli, model, prompt)
+        from app.services.mcp_attach import attach_mcp
 
-        token = issue_token(self.mcp_secret, role="coordinator")
-        mcp_config_path = write_mcp_config(
-            self.api_url, token, native_url=settings.MCP_NATIVE_URL,
+        command, extra_env, cleanup_paths = attach_mcp(
+            cli=cli,
+            command=base_command,
+            workdir=self.working_directory,
             role="coordinator",
+            timeout_seconds=3600,
+            mcp_secret=self.mcp_secret,
         )
-        command = build_cli_command(cli, model, prompt, mcp_config_path)
         process_manager = self._new_process_manager()
         loop = asyncio.get_running_loop()
         events: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
@@ -306,6 +304,7 @@ class CLIDispatcher:
                 stream: Iterable[str | ProcessResult] = process_manager.run_with_streaming(
                     command,
                     self.working_directory,
+                    env=extra_env,
                 )
                 for item in stream:
                     if isinstance(item, ProcessResult):
@@ -322,11 +321,6 @@ class CLIDispatcher:
             while True:
                 kind, value = await events.get()
                 if kind == "output":
-                    # ProcessManager intentionally exposes output one line at
-                    # a time without its delimiter.  Restore that delimiter
-                    # before forwarding text to the coordinator; otherwise
-                    # Markdown blocks are concatenated (for example
-                    # ``---`` + ``### Heading``).
                     output = str(value)
                     yield output if output.endswith(("\n", "\r")) else f"{output}\n"
                 elif kind == "result":
@@ -347,20 +341,14 @@ class CLIDispatcher:
             if callable(terminate):
                 terminate()
             if not worker.done():
-                # Cancellation of to_thread cannot interrupt the underlying
-                # thread, but ProcessManager.cancel/terminate makes it exit.
                 worker.cancel()
             try:
                 await worker
             except (asyncio.CancelledError, Exception):
-                # The process error was already delivered through the queue;
-                # cleanup must not mask it or leave a task warning behind.
                 pass
-            if mcp_config_path is not None:
-                try:
-                    os.unlink(mcp_config_path)
-                except OSError:
-                    pass
+            from app.services.mcp_attach import detach_mcp
+
+            detach_mcp(cleanup_paths)
 
 
 # A concise alias used by callers that prefer the verb used in the task spec.

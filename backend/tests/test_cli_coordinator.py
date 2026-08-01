@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from unittest.mock import MagicMock
 
 import pytest
 
+from app.core.config import settings
 from app.db.models import Session
 from app.services.cli_dispatcher import (
     CLIDispatcher,
@@ -48,7 +50,7 @@ def test_cli_commands_use_account_login_and_shell_safe_prompt():
         "claude --model claude-sonnet-4 -p"
     )
     agy_command = build_cli_command("agy", "gemini-2.5-pro", "hello world")
-    assert "agy --agent gemini-2.5-pro --print" in agy_command
+    assert "agy --model gemini-2.5-pro --print" in agy_command
     assert "hello world" in agy_command
 
 
@@ -155,7 +157,8 @@ async def test_cli_coordinator_rehydrates_history_when_switching_models(db_sessi
     )
 
     second_command = second_manager.run_with_streaming.call_args.args[0]
-    assert second_command.startswith("agy --agent gemini-2.5-pro --mcp-config")
+    # agy uses --model (not --agent) and does not support --mcp-config.
+    assert second_command.startswith("agy --model gemini-2.5-pro --print")
     assert "USER:\nRemember my name is Ada." in second_command
     assert "ASSISTANT:\nAda remembered" in second_command
     assert "USER:\nWhat is my name?" in second_command
@@ -178,11 +181,10 @@ def test_build_cli_command_without_mcp_config_path_is_unchanged():
     "cli,model,expected_prefix",
     [
         ("claude", "claude-sonnet-4", "claude --model claude-sonnet-4"),
-        ("agy", "gemini-2.5-pro", "agy --agent gemini-2.5-pro"),
-        ("codex", "gpt-5-codex", "codex exec -m gpt-5-codex"),
     ],
 )
 def test_build_cli_command_places_mcp_config_before_the_prompt(cli, model, expected_prefix):
+    # --mcp-config is only supported by claude; codex and agy ignore it.
     command = build_cli_command(cli, model, "the prompt text", "/tmp/ct-mcp-x.json")
 
     assert command.startswith(expected_prefix)
@@ -190,6 +192,20 @@ def test_build_cli_command_places_mcp_config_before_the_prompt(cli, model, expec
     # The prompt stays the final argument regardless of CLI.
     assert command.endswith("'the prompt text'") or command.endswith("the prompt text")
     assert command.index("--mcp-config") < command.rindex("the prompt text")
+
+
+def test_build_cli_command_agy_omits_mcp_config():
+    """agy does not support --mcp-config; the flag must not appear."""
+    command = build_cli_command("agy", "gemini-2.5-pro", "hello", "/tmp/ct-mcp-x.json")
+    assert "--mcp-config" not in command
+    assert "--model gemini-2.5-pro" in command
+
+
+def test_build_cli_command_codex_omits_mcp_config():
+    """codex exec does not support --mcp-config; the flag must not appear."""
+    command = build_cli_command("codex", "gpt-5-codex", "hello", "/tmp/ct-mcp-x.json")
+    assert "--mcp-config" not in command
+    assert "codex exec -m gpt-5-codex" in command
 
 
 def test_build_mcp_config_registers_the_native_http_server():
@@ -235,7 +251,7 @@ async def test_dispatcher_always_injects_native_mcp_config(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_dispatcher_injects_mcp_config_when_token_configured(monkeypatch):
+async def test_dispatcher_injects_mcp_config_when_token_configured(monkeypatch, tmp_path):
     manager = MagicMock()
     manager.run_with_streaming.return_value = iter(
         ["ok", ProcessResult(ProcessStatus.COMPLETED, 0, None)]
@@ -244,32 +260,18 @@ async def test_dispatcher_injects_mcp_config_when_token_configured(monkeypatch):
         "app.services.cli_dispatcher.ProcessManager",
         MagicMock(return_value=manager),
     )
+    monkeypatch.setattr(settings, "MCP_TOKEN_SECRET", "test-secret")
 
-    dispatcher = CLIDispatcher(
-        working_directory="/tmp",
-        api_url="http://localhost:8000",
-        mcp_token="scoped-token",
-    )
-    written_paths: list[str] = []
-    real_write_mcp_config = write_mcp_config
-
-    def spy_write_mcp_config(api_url, token, **kwargs):
-        path = real_write_mcp_config(api_url, token, **kwargs)
-        written_paths.append(path)
-        return path
-
-    monkeypatch.setattr(
-        "app.services.cli_dispatcher.write_mcp_config", spy_write_mcp_config
-    )
-
+    dispatcher = CLIDispatcher(working_directory=str(tmp_path))
     async for _ in dispatcher.spawn("claude", "claude-sonnet-4", "prompt"):
         pass
 
-    command, _ = manager.run_with_streaming.call_args.args
-    assert len(written_paths) == 1
-    assert f"--mcp-config {written_paths[0]}" in command
-    # The dispatcher owns the temp file's lifecycle: gone once the CLI exits.
-    assert not os.path.exists(written_paths[0])
+    command, cwd = manager.run_with_streaming.call_args.args
+    assert "--mcp-config" in command
+    # Verify temp file was cleaned up after spawn completed
+    argv = shlex.split(command)
+    config_path = argv[argv.index("--mcp-config") + 1]
+    assert not os.path.exists(config_path)
 
 
 @pytest.mark.asyncio

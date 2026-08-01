@@ -204,21 +204,11 @@ def _json_line(line: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _cleanup_mcp_config(command: str) -> None:
-    """Remove the per-run native MCP config containing the scoped token."""
-    try:
-        argv = shlex.split(command)
-        marker = argv.index("--mcp-config")
-        path = argv[marker + 1]
-    except (ValueError, IndexError, TypeError):
-        return
-    if path.startswith(tempfile.gettempdir() + os.sep) and path.startswith(
-        os.path.join(tempfile.gettempdir(), "ct-mcp-")
-    ):
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
+def _cleanup_mcp_config(paths: list[str] | None) -> None:
+    """Undo attach_mcp side effects: restore backed-up files, delete the rest."""
+    from app.services.mcp_attach import detach_mcp
+
+    detach_mcp(paths)
 
 
 def _vendor_event(event_type: str, payload: dict[str, Any], timestamp: datetime | None = None) -> dict:
@@ -572,6 +562,7 @@ def run_agent(
     worktree_path: str | None = None
     review_git_dir: str | None = None
     exec_cwd = repo_root
+    mcp_cleanup_paths: list[str] = []
 
     try:
         run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
@@ -758,12 +749,50 @@ def run_agent(
         event_seq += 1
         db.commit()
 
+        from app.services.mcp_attach import attach_mcp
+
+        mcp_cleanup_paths = []
+        if not run.cli:
+            logger.warning(
+                "Run %s has no CLI recorded; MCP attachment defaults to claude",
+                run_id,
+            )
+        try:
+            exec_command, mcp_env, mcp_cleanup_paths = attach_mcp(
+                cli=run.cli or "claude",
+                command=command,
+                workdir=exec_cwd,
+                task_id=task_id,
+                role="executor",
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception:
+            logger.exception("Failed to attach MCP for run %s", run_id)
+            exec_command = command
+            mcp_env = {}
+            # Surface the degraded run (no CT tools) to the coordinator —
+            # a worker log line alone is invisible from the MCP side.
+            try:
+                emit_task_event(
+                    task_id,
+                    "mcp_attach_failed",
+                    payload={"run_id": run_id, "cli": run.cli},
+                    db=db,
+                    kind="info",
+                )
+                db.commit()
+            except Exception:
+                logger.exception("Failed to emit mcp_attach_failed for run %s", run_id)
+
         if is_review_run:
             process_env, review_git_dir = _review_read_only_git_env()
+            if mcp_env:
+                process_env.update(mcp_env)
         else:
-            process_env = None
+            process_env = mcp_env or None
+
         for output in process_manager.run_with_streaming(
-            command, exec_cwd, env=process_env
+            exec_command, exec_cwd, env=process_env
         ):
             if isinstance(output, ProcessResult):
                 result = output
@@ -985,7 +1014,7 @@ def run_agent(
         return None
     finally:
         process_manager.terminate()
-        _cleanup_mcp_config(command)
+        _cleanup_mcp_config(mcp_cleanup_paths)
         if worktree_manager is not None and worktree_path is not None:
             worktree_manager.remove(worktree_path)
         if review_git_dir is not None:

@@ -259,7 +259,6 @@ class TaskOrchestrationService:
                 agent,
                 project,
                 effort=resolved_effort,
-                mcp_ttl_seconds=resolved_timeout,
             )
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc
@@ -396,7 +395,6 @@ class TaskOrchestrationService:
                 project,
                 base_ref,
                 head_ref,
-                mcp_ttl_seconds=resolved_timeout,
             )
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc
