@@ -81,6 +81,9 @@ class Task(ArchivableMixin, Base):
     )
     final_result_ref = Column(String(100), nullable=True)
     final_verdict = Column(String(10), nullable=True)
+    # Merge commit on the integration branch once the reviewed result landed.
+    # done + landed_ref = the code is actually on main (CTV2-238).
+    landed_ref = Column(String(100), nullable=True)
     predicted_success = Column(String(10), nullable=True)
     prediction_factors = Column(JSON, nullable=True)
     awaiting_approval = Column(Boolean, default=False)

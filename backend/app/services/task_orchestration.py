@@ -34,6 +34,7 @@ from app.db.models import (
 from app.db.models import Session as SessionModel
 from app.services.agent_matcher import AgentMatcher, POLICY_VERSION as AGENT_MATCHER_POLICY_VERSION
 from app.services.command_builder import build_dispatch_command, build_review_command
+from app.services.landing import LandingResult, head_of, land_result
 from app.services.outbox import record_run_requested
 from app.services.task_event_service import emit_task_event
 
@@ -1366,6 +1367,81 @@ class TaskOrchestrationService:
         task.current_round_id = round_id
         return task_round
 
+    def _land_verdict_result(self, task: Task) -> LandingResult:
+        """Merge the reviewed head into the project's integration branch.
+
+        Skips (ok, no landed_ref) when landing does not apply — no repo_root,
+        repo_root not a git repository, or a result_ref that carries no head
+        commit (legacy imports). Real merge failures come back ok=False and
+        must block the done transition.
+        """
+        import os
+
+        project = self.db.get(Project, task.project) if task.project else None
+        repo_root = getattr(project, "repo_root", None)
+        head = head_of(task.result_ref)
+        if not repo_root or not head:
+            return LandingResult(ok=True, skipped_reason="no repo_root or head commit")
+        return land_result(
+            os.path.abspath(repo_root),
+            head,
+            f"Merge {task.id}: {task.title} (verdict pass, reviewer {task.reviewer})",
+        )
+
+    def land_task(self, *, task_id: str, actor: str) -> dict:
+        """Retry/backfill landing for a pass-verdict task (CTV2-238).
+
+        Covers two cases: a task stuck after a landing failure (verdict
+        recorded, still in-review, awaiting_approval), and a legacy done
+        task whose branch was never merged (landed_ref is NULL).
+        """
+        task = self._task(task_id)
+        if (task.verdict or task.final_verdict) != "pass":
+            raise PrerequisiteError(
+                f"Task {task_id} has no pass verdict; landing only applies "
+                "to reviewed results."
+            )
+        landing = self._land_verdict_result(task)
+        if not landing.ok:
+            task.awaiting_approval = True
+            task.approval_prompt = (
+                f"Landing {task.result_ref} failed: {landing.error} — "
+                "fix the repo, then call land_task again."
+            )
+            task.error = f"landing_failed: {landing.error}"
+            self.db.commit()
+            return {"action": "landing_failed", "task_id": task.id, "error": landing.error}
+
+        now = datetime.utcnow()
+        if task.status != "done":
+            self._cas_status(task, "done")
+            task.completed_at = now
+            task.final_result_ref = task.result_ref
+            task.final_verdict = "pass"
+        task.awaiting_approval = False
+        task.approval_prompt = None
+        task.error = None
+        if landing.landed_ref:
+            task.landed_ref = landing.landed_ref
+            emit_task_event(
+                task_id=task.id,
+                event_type="landed",
+                payload={
+                    "landed_ref": landing.landed_ref,
+                    "result_ref": task.result_ref,
+                    "actor": actor,
+                },
+                db=self.db,
+            )
+        self.db.commit()
+        return {
+            "action": "landed" if landing.landed_ref else "landing_skipped",
+            "task_id": task.id,
+            "status": task.status,
+            "landed_ref": landing.landed_ref,
+            "skipped_reason": landing.skipped_reason,
+        }
+
     def _record_verdict_on_round(
         self,
         task: Task,
@@ -1509,10 +1585,39 @@ class TaskOrchestrationService:
             task.awaiting_approval = False
             task.approval_prompt = None
             if verdict == "pass":
+                # done must mean the code is on main (CTV2-238): land first,
+                # and refuse to claim done when landing applies but fails.
+                landing = self._land_verdict_result(task)
+                if not landing.ok:
+                    task.awaiting_approval = True
+                    task.approval_prompt = (
+                        f"Verdict is pass but landing {task.result_ref} failed: "
+                        f"{landing.error} — fix the repo, then call land_task."
+                    )
+                    task.error = f"landing_failed: {landing.error}"
+                    self._record_verdict_on_round(task, verdict=verdict, now=now)
+                    emit_task_event(
+                        task_id=task.id,
+                        event_type="landing_failed",
+                        payload={"result_ref": task.result_ref, "error": landing.error},
+                        db=self.db,
+                    )
+                    return None, verdict
                 self._cas_status(task, "done")
                 task.completed_at = now
                 task.final_result_ref = task.result_ref
                 task.final_verdict = verdict
+                if landing.landed_ref:
+                    task.landed_ref = landing.landed_ref
+                    emit_task_event(
+                        task_id=task.id,
+                        event_type="landed",
+                        payload={
+                            "landed_ref": landing.landed_ref,
+                            "result_ref": task.result_ref,
+                        },
+                        db=self.db,
+                    )
             else:
                 self._cas_status(task, "changes-requested")
                 task.completed_at = None

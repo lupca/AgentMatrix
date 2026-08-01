@@ -282,6 +282,29 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="task_lifecycle",
         ),
         ToolSpec(
+            name="land_task",
+            description=(
+                "Merge a pass-verdict task's result into the project's "
+                "integration branch (retry after a landing failure, or "
+                "backfill a legacy done task whose ct-run branch was never "
+                "merged). Landing normally happens automatically when the "
+                "verdict gate approves."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task id"},
+                },
+                "required": ["task_id"],
+            },
+            handler="land_task",
+            tier="deferred",
+            permission="write",
+            entity="tasks",
+            slash_alias=None,
+            group="task_lifecycle",
+        ),
+        ToolSpec(
             name="cancel_task",
             description="Cancel a task.",
             parameters={

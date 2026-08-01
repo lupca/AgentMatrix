@@ -242,6 +242,8 @@ class CommandRouter:
             'approval_prompt': task.approval_prompt,
             'executor': task.executor,
             'reviewer': task.reviewer,
+            'result_ref': task.result_ref,
+            'landed_ref': task.landed_ref,
             'error': task.error,
         }
 
@@ -423,6 +425,11 @@ class CommandRouter:
                 return {'error': f"Unsupported decision {decision!r}: use 'approved' or 'rejected'"}
             command_args = f'{gate_id} {decision}'
         elif canonical_name == 'cancel_task':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            command_args = task_id
+        elif canonical_name == 'land_task':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
                 return {'error': 'task_id is required'}
@@ -1392,6 +1399,18 @@ class CommandRouter:
             'repo_root': repo_root,
         }
 
+    async def _handle_land_task(self, args: str, session_id: str) -> dict:
+        task_id = args.strip()
+        if not task_id:
+            return {'error': 'Usage: land_task <task_id>'}
+        service = TaskOrchestrationService(self.db)
+        try:
+            return service.land_task(
+                task_id=task_id, actor=f"chat:{session_id or 'anonymous'}"
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
     async def _handle_cancel_task(self, args: str, session_id: str) -> dict:
         from datetime import datetime, timezone
         from app.db.models import AgentRun
@@ -1879,6 +1898,8 @@ class CommandRouter:
                         'executor': task.executor,
                         'reviewer': task.reviewer,
                         'mode': task.mode,
+                        'result_ref': task.result_ref,
+                        'landed_ref': task.landed_ref,
                         'awaiting_approval': bool(pending) or bool(task.awaiting_approval),
                         'approval_prompt': task.approval_prompt,
                         'pending_gate': {
@@ -1913,6 +1934,8 @@ class CommandRouter:
                         'executor': task.executor,
                         'reviewer': task.reviewer,
                         'mode': task.mode,
+                        'result_ref': task.result_ref,
+                        'landed_ref': task.landed_ref,
                         'awaiting_approval': bool(pending) or bool(task.awaiting_approval),
                         'approval_prompt': task.approval_prompt,
                         'pending_gate': {

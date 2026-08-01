@@ -767,6 +767,8 @@ async def test_dispatch_supervised_returns_post_mutation_task_snapshot(db_sessio
         "approval_prompt": task.approval_prompt,
         "executor": task.executor,
         "reviewer": task.reviewer,
+        "result_ref": task.result_ref,
+        "landed_ref": task.landed_ref,
         "error": task.error,
     }
     assert task.awaiting_approval is True

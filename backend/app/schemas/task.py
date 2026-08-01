@@ -216,6 +216,7 @@ class Task(BaseModel):
     depends_on: list[str] | None = []
     plan: str | None = None
     result_ref: str | None = None
+    landed_ref: str | None = None
     findings: list[Any] | None = []
     verdict: str | None = None
     predicted_success: str | None = None
