@@ -49,11 +49,14 @@ verdict approved tồn tại — vì vậy KHÔNG được emit event giữa ch�
 - LỊCH SỬ ĐEN (CTV2-233): schema từng KHÔNG có `decision` — mọi reject bị ghi
   thành approve. Đã sửa; nếu thấy hành vi lạ quanh reject, nghi chỗ này trước.
 - Approve dispatch/review_order = REPLAY payload đã ghi trong gate → tạo AgentRun.
-  Đã biết (CTV2-228, chưa sửa): `agent_id` coordinator yêu cầu lúc dispatch
-  KHÔNG được tôn trọng khi replay — matcher tự chọn lại.
-- Reject verdict → task về changes-requested; KHÔNG có đường chính thống
-  `changes-requested → dispatch` (dispatch_task đòi todo — CTV2-234, tạm phải
-  SQL về todo).
+  `agent_id`/`executor`/`reviewer` chỉ định được tôn trọng (CTV2-228 đã sửa —
+  mapping nhận cả alias `agent_id`); matcher chỉ chạy khi không chỉ định.
+- Verdict fail → changes-requested → `dispatch_task` chấp nhận re-dispatch
+  thẳng từ đó (vòng replan, CTV2-234 đã sửa — constraint terminal chỉ còn
+  áp cho done, migration 037).
+- Task read-only: tag `no-commit` + executor in `RESULT_REF: none` (worktree
+  phải thật sự không có commit) → done qua gate verdict hệ thống
+  (reviewer `@system-no-commit`, minh bạch trong ledger — CTV2-235).
 
 ## Admin gates
 

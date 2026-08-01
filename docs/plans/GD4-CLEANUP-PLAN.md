@@ -47,7 +47,7 @@ Chi tiết từng vấn đề ở dạng task file tại `~/projects/control-tow
 11. CTV2-226 (med): gỡ `wake_coordinator` dead path (gộp vào P1 xóa FastAPI/coordinator cũ).
 
 **Phát hiện thêm 2026-08-01 (chiều, sau P1):**
-- CTV2-228 (high): `approve_gate` bỏ qua `agent_id` coordinator yêu cầu khi dispatch — matcher tự chọn lại lúc replay (quan sát 2 lần: sonnet-medium→sonnet-low, luna-high→sonnet-high). Human approve một đằng hệ chạy một nẻo.
+- CTV2-228 (DONE 3690029): gốc là mapping chỉ đọc `executor`/`reviewer` còn caller truyền `agent_id` → bị vứt lặng lẽ, matcher chiếm quyền. Mapping giờ nhận alias `agent_id`; verify sống payload gate ghi đúng agent chỉ định.
 - CTV2-229 (done): migrate_md_to_db từng clear `agents` (mất api_key qua CASCADE agent_accounts, reset điểm đo) và reset `next_task_seq` (create_task sinh id trùng) — đã sửa: agents upsert giữ key/điểm, re-seed counter sau import.
 - Reminder `pending_approvals` từng dính task đã archive (đã sửa: lọc `archived_at IS NULL` cả hai ledger + escalation).
 - CTV2-227 (đang chạy qua dispatch): nối lại flow Project Context & Rules — tool `save_project_context` + inject context/rules vào prompt (test cũ là test rỗng, chưa từng có injection).
@@ -59,10 +59,10 @@ Chi tiết từng vấn đề ở dạng task file tại `~/projects/control-tow
 - CTV2-232 (high): watchdog no-progress giết oan CLI im lặng (`claude -p` không stream) — tạm nới `max_no_progress_seconds=2400` (admin:15); fix chuẩn = heartbeat theo PID sống.
 - CTV2-233 (critical, ĐÃ SỬA ac34bf0): schema `approve_gate` không có trường `decision` → mọi human REJECT qua MCP bị ghi thành approve (quan sát live: reject verdict rubber-stamp làm task done). Dev cần: test e2e reject + rà các tool khác cùng pattern mapping-vứt-arg.
 - CTV2-238 (DONE d3ff4ab): landing — verdict pass tự merge vào main, done kèm landed_ref; conflict escalate; tool land_task retry/backfill.
-- CTV2-234 (med): không có đường chính thống `changes-requested` → re-dispatch (dispatch_task đòi todo) — vòng replan phải SQL về todo.
+- CTV2-234 (DONE 3690029): re-dispatch chính thống từ changes-requested/failed; constraint terminal nới còn done (migration 037).
 - Bằng chứng mới cho CTV2-220/223: agy reviewer rubber-stamp CTV2-227 vòng 2 (pass 4/4, 0 findings trong khi F1 HIGH còn nguyên) — agy không đáng tin cả vai reviewer, matcher vẫn tự chọn nó (CTV2-228).
 - CTV2-227 (DONE, 4 vòng: 3 dispatch + 1 human replan sau khi auto_max_rounds 3/3 escalate đúng thiết kế): flow Project Context & Rules THÔNG end-to-end — tool `save_project_context` (executor-scoped, chặn cross-project write), inject [Project Context]+[Project Rules] vào dispatch/review prompt, đã demo thật: agent quét repo → gọi tool → context+4 rules vào DB → dispatch mới tự inject (merge 3f46d3c, 765c165; suite 513).
-- CTV2-235 (med): task read-only (context-gen, research) không có đường done — RESULT_REF bắt buộc commit nên run bị fail dù hoàn thành việc; cần loại task không-commit hoặc RESULT_REF: none hợp lệ.
+- CTV2-235 (DONE 3690029): tag `no-commit` + `RESULT_REF: none` (worktree sạch) → done qua gate verdict hệ thống; khai none mà có commit vẫn fail.
 - Fix thêm: glob `**/` không match con trực tiếp (fnmatch) → rules không bao giờ inject; đã sửa + test (765c165).
 
 **Phát hiện tối 2026-08-01 (từ phiên coordinator voma-invoice, /tmp/convention.txt):**
