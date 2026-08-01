@@ -1277,7 +1277,8 @@ class CommandRouter:
         )
         task.mode = TaskOrchestrationService(self.db).mode_for_task(task)
         self.db.add(task)
-        project_row.next_task_seq = seq + 1
+        # The atomic UPDATE above already incremented the counter — bumping
+        # it again here skipped every other id (IDEA-001 -> IDEA-003).
         try:
             self.db.commit()
         except Exception:
