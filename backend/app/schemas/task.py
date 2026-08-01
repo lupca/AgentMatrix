@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 
 REVIEW_RESULT_SCHEMA_VERSION = "1.0"
@@ -33,10 +33,20 @@ class ReviewACResult(BaseModel):
     # criterion_id/status pair is the required v1 contract.
     ac_index: StrictInt | None = None
     ac_text: StrictStr | None = None
+    # Legacy alias for status. The reviewer prompt has always asked for this
+    # key, so with extra="forbid" it must be a real field, not a property —
+    # otherwise every artifact that follows the prompt fails validation.
+    verdict: Literal["pass", "fail"] | None = None
 
-    @property
-    def verdict(self) -> str:
-        return self.status
+    @model_validator(mode="after")
+    def _sync_verdict(self) -> "ReviewACResult":
+        if self.verdict is None:
+            self.verdict = self.status
+        elif self.verdict != self.status:
+            raise ValueError(
+                f"verdict ({self.verdict}) contradicts status ({self.status})"
+            )
+        return self
 
 
 class ReviewResult(BaseModel):

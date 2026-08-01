@@ -900,6 +900,10 @@ def run_agent(
                         review_result_path(repo_root, review_result.task_id),
                         repo_root,
                     )
+                    # The verdict prerequisite check queries for a review run
+                    # with status="success"; with autoflush=False the pending
+                    # in-memory status is invisible until flushed.
+                    db.flush()
                     _submit_review_verdict(db, run, review_result)
             elif is_review_task and task is not None:
                 review_result = load_review_result(

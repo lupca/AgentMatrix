@@ -7,10 +7,10 @@
 
 Vòng done duy nhất đến giờ là vòng agy vượt rào (xem `REVIEW-GD3-B1.md` vòng 3). Cần một vòng sạch với guardrail mới:
 
-- [ ] `./scripts/init-coordinator-workdir.sh ~/ct-coordinator 28800` → chạy coordinator từ đó (KHÔNG phải trong repo này).
-- [ ] Đi trọn P1 của `B18-TEST-SCRIPT.md` trên một project/repo test thật: create → spec plan → dispatch supervised → human approve → execute → review four-eyes → verdict → done.
-- [ ] Điều kiện đạt: 0 lần Bash-vào-DB/sửa source (soi transcript), `approved_by` trong GateRecord phản ánh human, và nếu coordinator vấp lỗi hệ thống → nó BÁO chứ không tự vá (đây là phép thử guardrail).
-- [ ] Nhân tiện chạy P0.4 (SQL count) và P2 (đường lỗi) của kịch bản test.
+- [x] `./scripts/init-coordinator-workdir.sh ~/ct-coordinator 28800` → chạy coordinator từ đó (KHÔNG phải trong repo này).
+- [x] Đi trọn P1 của `B18-TEST-SCRIPT.md` trên project/repo test thật (ct-demo): CTDE-001, CTDE-003, CTDE-011 đều todo→done trọn vòng 2026-08-01, four-eyes giữ, verdict từ review run thật. (Phải sửa 4 bug chặn đường trước — xem mục "Kết quả test B1.8" dưới.)
+- [x] Guardrail đạt: coordinator báo `failed` nguyên văn, thử approve bị từ chối thì dừng đề xuất, không Bash-vào-DB (một lần curl thẳng endpoint MCP — vẫn qua auth + gate, chấp nhận được).
+- [ ] Cảnh cuối còn thiếu: dispatch **supervised** với human approve qua chat (gate `dispatch_pending` → "y"). Đang chờ approve `admin:11` (autonomy=supervised) rồi chạy một task mới. Lưu ý CTV2-222: nút chỉnh là setting `autonomy`, KHÔNG phải `default_mode`.
 
 ## P1 — Bước 2: xóa hẳn lớp FastAPI (một PR)
 
@@ -21,6 +21,30 @@ Chi tiết gốc trong `MCP_MIGRATION_PLAN.md` Bước 2; checklist thi hành:
 - [ ] Viết lại (TestClient → gọi service qua `db_session`): `test_coordinator.py`, `tests/integration/test_chat_context.py`, `test_tool_chat.py`, `test_agent_matcher.py`, `test_context_generator.py`, `test_dispatch_with_context.py`, `test_token_telemetry.py`. (16 test đang fail sẵn nằm trọn trong nhóm này.)
 - [ ] `requirements.txt`: bỏ `fastapi`; giữ `uvicorn`; bỏ `httpx` nếu không còn ai dùng sau khi xóa `mcp_server.py`.
 - [ ] DoD: `grep -r fastapi backend/app` = 0; `pytest backend/tests -q` xanh 100% (không còn nhóm fail-sẵn); flow B1.8 chạy lại vẫn ok.
+
+## Kết quả test B1.8 (2026-08-01) — nguồn: `B18-TEST-SCRIPT.md` mục Ghi nhận
+
+Chi tiết từng vấn đề ở dạng task file tại `~/projects/control-tower/projects/agenticmatix/tasks/CTV2-211..226`.
+
+**Đã sửa trong lúc test (dev review lại + bổ sung test):**
+- CTV2-211: agy nuốt prompt khi flag chen giữa `--print` và prompt → sửa thứ tự argv trong `command_builder.py`.
+- CTV2-212 (critical): run_agent bị giao 2 lần — 3 call site sync trong `command_router` không ghi `dramatiq_message_id` → outbox publisher gửi bản sao. Đã ghi message_id + commit sau send.
+- CTV2-213 (critical): ReviewResult schema tự mâu thuẫn prompt (`verdict` bị `extra="forbid"` chặn; tests_* không nói là mảng) → `verdict` thành field thật + prompt nói rõ kiểu.
+- CTV2-214 (critical): verdict bị từ chối oan do `autoflush=False` → `db.flush()` trước `_submit_review_verdict`.
+- CTV2-215: tool mới `wait_for_task` (long-poll, trả trọn gói task+run+events) — thay polling timer, đã e2e verify.
+
+**Cần dev fix (theo thứ tự ưu tiên đề nghị):**
+1. CTV2-216 (high): reaper cho run `running` có PID chết — đang chiếm slot concurrency vĩnh viễn.
+2. CTV2-217 (high): run_agent dead-letter → run kẹt `queued` mãi, cần handler mark failed.
+3. CTV2-219 (high): vệ sinh retry — lock per-run, idempotency key theo attempt, xóa branch `ct-run/*` cùng worktree, fallback shared-tree thành lỗi cứng, hủy run khi task kết thúc.
+4. CTV2-220 (high): agy headless làm việc trong scratch dir thay vì cwd — research workspace mechanism; tạm cấm agy làm executor; chuẩn hóa model/effort mapping agy.
+5. CTV2-221 (high): escalation set `awaiting_approval` không kèm GateRecord → ngõ cụt approve + chặn dispatch lại.
+6. CTV2-218 (med): dedupe chuỗi self-reschedule outbox/reconcile (166×2 chuỗi, log storm).
+7. CTV2-222 (med): `default_mode` là nút chết — nối vào thật hoặc bỏ whitelist; docs cho `autonomy`.
+8. CTV2-223 (med): reviewer pool dính id rác (`@user`, `@lupca`) — rà bảng agents + filter.
+9. CTV2-224 (med): `update_task` nhận `mode` qua gate.
+10. CTV2-225 (med): tái hiện result_ref đường bypass sau các fix trên; còn thì điều tra tiếp.
+11. CTV2-226 (med): gỡ `wake_coordinator` dead path (gộp vào P1 xóa FastAPI/coordinator cũ).
 
 ## P2 — Bước 3 + backlog tồn đọng
 

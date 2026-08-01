@@ -318,6 +318,41 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             required_role="executor",
         ),
         ToolSpec(
+            name="wait_for_task",
+            description=(
+                "Long-poll one task until something happens: a status change, "
+                "a pending gate that needs approval, or a terminal state "
+                "(done/failed/cancelled). Blocks server-side up to "
+                "timeout_seconds and returns the task snapshot, the latest "
+                "run, and new events in one call — use this instead of "
+                "polling get_status on a timer. On timeout (changed=false), "
+                "call it again with the returned cursor as since_event_id."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "since_event_id": {
+                        "type": "integer",
+                        "description": "Event cursor from the previous call; also returns any event newer than this.",
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "default": 55,
+                        "description": "How long to block server-side (5-120). Keep below your client's tool timeout.",
+                    },
+                },
+                "required": ["task_id"],
+            },
+            handler="wait_for_task",
+            tier="deferred",
+            permission="read",
+            entity="tasks",
+            slash_alias=None,
+            group="query",
+            required_role="executor",
+        ),
+        ToolSpec(
             name="archive_task",
             description=(
                 "Archive a task (soft delete preserving history), or restore "

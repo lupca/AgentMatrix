@@ -52,12 +52,16 @@ SERVER_INSTRUCTIONS = (
     "get_status when unsure. In supervised mode a pending gate needs the "
     "human's explicit approval in chat before you call approve_gate. "
     "Read with query_db/get_status/get_stats/get_task_events/get_run_output; "
+    "after dispatching, block on wait_for_task instead of polling on a timer; "
     "act with create_task, generate_spec_plan, suggest_agents, dispatch_task, "
     "request_review, record_verdict, approve_gate, cancel_task, archive_task, "
     "update_task; admin via manage_project/manage_agent/manage_knowledge/"
     "update_settings (a pending admin gate returns 'admin:<id>' — pass it to "
     "approve_gate). Errors are structured with a hint: follow the hint, do "
-    "not retry blindly."
+    "not retry blindly. The verdict belongs to the reviewer: never record a "
+    "verdict for a review you did not run, never merge ct-run/* branches "
+    "yourself, and report the task status from get_status verbatim — a "
+    "failed task is failed even if the diff looks right."
 )
 
 TOKEN_PREFIX = "ct1"
@@ -192,9 +196,9 @@ def _next_step(result: Mapping[str, Any]) -> str | None:
     status = task.get("status")
     return {
         "todo": "Gọi generate_spec_plan nếu task chưa có plan, sau đó dispatch_task.",
-        "dispatched": "Chờ executor hoàn tất; gọi get_status để theo dõi.",
+        "dispatched": "Gọi wait_for_task để chờ executor xong và nhận kết quả trong một lần gọi.",
         "awaiting-review": "Gọi request_review để bắt đầu review độc lập.",
-        "in-review": "Chờ reviewer; gọi get_status để theo dõi verdict.",
+        "in-review": "Gọi wait_for_task để chờ verdict của reviewer.",
         "changes-requested": "Gọi dispatch_task để chạy lại task sau khi cập nhật.",
         "done": "Task đã done; không cần gọi thêm transition.",
     }.get(str(status))

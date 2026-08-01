@@ -1,3 +1,4 @@
+import asyncio
 import re
 import hashlib
 import json
@@ -336,6 +337,15 @@ class CommandRouter:
                 'event_types': args.get('event_types'),
                 'limit': args.get('limit', 50),
             }, ensure_ascii=False)
+        elif canonical_name == 'wait_for_task':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            command_args = json.dumps({
+                'task_id': task_id,
+                'since_event_id': args.get('since_event_id'),
+                'timeout_seconds': args.get('timeout_seconds', 55),
+            }, ensure_ascii=False)
         elif canonical_name == 'archive_task':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
@@ -575,6 +585,94 @@ class CommandRouter:
             'cursor': events[-1].id if events else since_id,
             'has_more': len(events) == limit,
         }
+
+    async def _handle_wait_for_task(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+            since_event_id = int(payload.get('since_event_id') or 0)
+            timeout_seconds = min(120, max(5, int(payload.get('timeout_seconds') or 55)))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {'error': 'Invalid wait_for_task arguments'}
+        task_id = str(payload.get('task_id', '')).strip()
+        if not task_id:
+            return {'error': 'task_id is required'}
+
+        _TERMINAL = {'done', 'failed', 'cancelled', 'changes-requested'}
+        _POLL_INTERVAL = 2.0
+
+        def _snapshot() -> tuple[dict | None, list[dict], int]:
+            # End the previous transaction so READ COMMITTED shows fresh rows.
+            self.db.rollback()
+            task = self.db.get(Task, task_id)
+            if task is None:
+                return None, [], since_event_id
+            events = (
+                self.db.query(TaskEvent)
+                .filter(TaskEvent.task_id == task_id, TaskEvent.id > since_event_id)
+                .order_by(TaskEvent.id.asc())
+                .limit(20)
+                .all()
+            )
+            cursor = events[-1].id if events else since_event_id
+            task_dict = {
+                'id': task.id,
+                'status': task.status,
+                'executor': task.executor,
+                'reviewer': task.reviewer,
+                'result_ref': task.result_ref,
+                'error': task.error,
+                'awaiting_approval': bool(task.awaiting_approval),
+                'approval_prompt': task.approval_prompt,
+            }
+            event_dicts = [
+                {'id': e.id, 'event_type': e.event_type, 'kind': e.kind,
+                 'payload': e.payload,
+                 'created_at': e.created_at.isoformat() if e.created_at else None}
+                for e in events
+            ]
+            return task_dict, event_dicts, cursor
+
+        task_dict, _, _ = _snapshot()
+        if task_dict is None:
+            return {'error': f"Task '{task_id}' not found"}
+        initial_status = task_dict['status']
+
+        waited = 0.0
+        while True:
+            task_dict, event_dicts, cursor = _snapshot()
+            if task_dict is None:
+                return {'error': f"Task '{task_id}' not found"}
+            changed = (
+                task_dict['status'] != initial_status
+                or task_dict['status'] in _TERMINAL
+                or task_dict['awaiting_approval']
+                or bool(event_dicts)
+            )
+            if changed or waited >= timeout_seconds:
+                latest_run = (
+                    self.db.query(AgentRun)
+                    .filter(AgentRun.task_id == task_id)
+                    .order_by(AgentRun.queued_at.desc())
+                    .first()
+                )
+                return {
+                    'task': task_dict,
+                    'changed': changed,
+                    'events': event_dicts,
+                    # Resend this as since_event_id on the next wait_for_task call.
+                    'cursor': cursor,
+                    'waited_seconds': round(waited),
+                    'latest_run': {
+                        'id': latest_run.id,
+                        'kind': latest_run.kind,
+                        'agent_id': latest_run.agent_id,
+                        'status': latest_run.status,
+                        'result_ref': latest_run.result_ref,
+                        'error_message': latest_run.error_message,
+                    } if latest_run else None,
+                }
+            await asyncio.sleep(_POLL_INTERVAL)
+            waited += _POLL_INTERVAL
 
     async def _handle_archive_task(self, args: str, session_id: str) -> dict:
         try:
@@ -988,13 +1086,17 @@ class CommandRouter:
         if run is None:
             return {'error': 'Dispatch transition did not create an agent run'}
         try:
-            run_agent.send(
+            message = run_agent.send(
                 run.id,
                 task_id,
                 run.command,
                 context['repo_root'],
                 run.timeout_seconds,
             )
+            # Record the broker message id so the outbox publisher knows this
+            # run was already sent — a NULL id makes it publish a duplicate.
+            run.dramatiq_message_id = str(message.message_id)
+            self.db.commit()
         except Exception as exc:
             error = f'Could not queue run: {exc}'
             service.record_dispatch_queue_failure(
@@ -1069,13 +1171,17 @@ class CommandRouter:
         if run is None:
             return {'error': 'Review transition did not create an agent run'}
         try:
-            run_agent.send(
+            message = run_agent.send(
                 run.id,
                 task_id,
                 run.command,
                 context['repo_root'],
                 run.timeout_seconds,
             )
+            # See _handle_dispatch_task: without the message id the outbox
+            # publisher re-sends this run as a duplicate.
+            run.dramatiq_message_id = str(message.message_id)
+            self.db.commit()
         except Exception as exc:
             error = f'Could not queue review run: {exc}'
             service.record_dispatch_queue_failure(
@@ -1294,13 +1400,17 @@ class CommandRouter:
         if run is not None:
             context = result.context or {}
             try:
-                run_agent.send(
+                message = run_agent.send(
                     run.id,
                     run.task_id,
                     run.command,
                     context['repo_root'],
                     run.timeout_seconds,
                 )
+                # See _handle_dispatch_task: without the message id the
+                # outbox publisher re-sends this run as a duplicate.
+                run.dramatiq_message_id = str(message.message_id)
+                self.db.commit()
             except Exception as exc:
                 error = f'Could not queue run: {exc}'
                 service.record_dispatch_queue_failure(

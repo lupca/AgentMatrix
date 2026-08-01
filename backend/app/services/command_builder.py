@@ -68,14 +68,15 @@ def build_dispatch_command(
             argv.extend(["--effort", resolved_effort])
         argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
     else:
-        # agy uses Go's standard flag parser which stops at the first
-        # positional argument; all flags must precede the prompt.
+        # agy: the prompt must directly follow --print — another flag in
+        # between makes agy drop the prompt and answer about the flag
+        # instead (verified against agy 1.1.9).
         argv = ["agy"]
         if agent.model:
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        argv.extend(["--print", "--dangerously-skip-permissions", prompt])
+        argv.extend(["--dangerously-skip-permissions", "--print", prompt])
 
     return shlex.join(argv), repo_root, cli
 
@@ -131,13 +132,13 @@ def build_review_command(
             argv.extend(["--effort", resolved_effort])
         argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
     else:
-        # agy: all flags before the positional prompt (Go standard flag parser).
+        # agy: the prompt must directly follow --print (see build_dispatch_command).
         argv = ["agy"]
         if agent.model:
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        argv.extend(["--print", "--dangerously-skip-permissions", prompt])
+        argv.extend(["--dangerously-skip-permissions", "--print", prompt])
 
     return shlex.join(argv), repo_root, cli
 
@@ -157,7 +158,9 @@ def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -
         f"Write the final review result as JSON to {result_path}. "
         "Do not use stdout as the result. The JSON must contain exactly these "
         "fields: schema_version (\"1.0\"), task_id, base, head, ac_results, "
-        "findings, tests_run, tests_passed. Each ac_results item must contain "
+        "findings, tests_run, tests_passed. tests_run and tests_passed are "
+        "arrays of strings — the exact test commands you ran and the subset "
+        "that passed (empty arrays if none). Each ac_results item must contain "
         "criterion_id, status (only \"pass\" or \"fail\"), verdict (only "
         "\"pass\" or \"fail\") as legacy alias, evidence (an "
         "array of strings), and finding_ids (an array of strings). Legacy "
@@ -201,7 +204,9 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
             f"Write the final review result as JSON to {result_path}. "
             "Do not use stdout as the result. The JSON must contain exactly these "
             "fields: schema_version (\"1.0\"), task_id, base, head, ac_results, "
-            "findings, tests_run, tests_passed. Each ac_results item must contain "
+            "findings, tests_run, tests_passed. tests_run and tests_passed are "
+        "arrays of strings — the exact test commands you ran and the subset "
+        "that passed (empty arrays if none). Each ac_results item must contain "
             "criterion_id, status (only \"pass\" or \"fail\"), verdict (only "
             "\"pass\" or \"fail\") as legacy alias, evidence (an "
             "array of strings), and finding_ids (an array of strings). Legacy "

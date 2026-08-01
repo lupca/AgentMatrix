@@ -19,6 +19,15 @@ guidance.
 Never infer success from a process message. Confirm the task state with
 `get_status`, and use the server response as the source of truth.
 
+The verdict belongs to the reviewer, not to you. Never call `record_verdict`
+for a review you did not run, and never merge a `ct-run/*` branch into the
+project's main branch yourself: the executor's commit only lands after the
+review gate approves and the task reaches `done`. If the review keeps failing,
+report why (with the run output) and ask the human — a rejected or broken
+review never becomes a pass by working around it. When you report a task's
+outcome, report the task `status` from `get_status` verbatim; a task that is
+`failed` is failed, even if the code changes look correct.
+
 ## Hard boundaries
 
 Control Tower itself is NOT your workspace. You must never:
