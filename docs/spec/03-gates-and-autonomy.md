@@ -13,6 +13,13 @@ create_task → [spec/plan: generate_spec_plan hoặc update_task đổ plan+AC]
 → verdict pass → done   |   verdict fail → changes-requested
 ```
 
+**⚠️ "done" hiện KHÔNG có nghĩa code đã vào main.** Commit của executor nằm
+trên `ct-run/<run_id>`; coordinator bị cấm merge (rule hậu agy-incident) và
+chưa có actor chính thống nào merge thay → admin phải merge tay
+(`git merge --no-ff ct-run/<run_id>`) sau khi done. Đây là gap thiết kế
+CTV2-238 (đề xuất: bước landing do worker thực hiện sau verdict pass, có gate
+merge trong supervised, conflict thì escalate).
+
 ## Mode
 
 - **supervised**: mỗi gate cần human `approve_gate`.
