@@ -2,13 +2,14 @@
 
 Hệ thống điều phối coding agent với gate-based workflow, four-eyes review, và autonomy controls.
 
-## Tổng quan
+## Overview
 
-Control Tower V2 điều phối các coding agent (claude/agy/codex) thông qua một quy trình dựa trên gate:
-dispatch → execute → review → verdict. Mỗi bước được ghi lại trong một ledger bất biến (`GateRecord`)
-và yêu cầu reviewer khác với executor (four-eyes).
+Control Tower V2 orchestrates coding agents across a gate-based workflow. Tasks move
+through a well-defined lifecycle (todo → dispatched → awaiting-review → in-review →
+done/changes-requested/failed), with every transition guarded by an append-only gate
+ledger and enforced four-eyes review (reviewer ≠ executor).
 
-## Kiến trúc
+## Architecture
 
 ```
 Frontend (React/Vite/Tailwind)     Backend (FastAPI/SQLAlchemy)     Worker (Dramatiq)
@@ -20,35 +21,13 @@ Frontend (React/Vite/Tailwind)     Backend (FastAPI/SQLAlchemy)     Worker (Dram
                                    └── CLIDispatcher → claude/agy/codex
 ```
 
-## Data Model chính
+## Key Concepts
 
-- **Task**: todo→dispatched→awaiting-review→in-review→done/changes-requested/failed
-- **AgentRun**: queued→running→success/failed/timeout (kind: execute|review)
-- **GateRecord**: append-only ledger (pending→approved/rejected)
-- **Agent**: CLI-backed (claude/agy/codex) với capabilities[], success_rate
-- **Session**: context_level (global|project|task), messages[]
-
-## Gate Flow
-
-```
-todo → [dispatch gate] → dispatched → [run_agent] → awaiting-review
-     → [review_order gate] → in-review → [run_agent review] → [verdict gate] → done
-```
-
-Mode: supervised (cần approve), plan-only (block dispatch), bypass (auto-approve)
-
-## Autonomy & Brakes
-
-- `autonomy_enabled=false` → STOP
-- `task_cost ≥ max_cost_usd_per_task` → STOP
-- `active_runs ≥ max_concurrent_runs` → QUEUE
-
-## Quy tắc quan trọng
-
-- **Four-eyes**: reviewer ≠ executor (DB constraint)
-- **GateRecord**: append-only, immutable
-- **Worktree isolation**: mỗi AgentRun chạy trong git worktree riêng
-- **MCP integration**: CLI agent gọi CT tools qua MCP server
+- **Task**: the unit of work tracked through the gate-based state machine.
+- **AgentRun**: a single execution or review pass by a CLI-backed agent.
+- **GateRecord**: an append-only, immutable ledger of gate decisions.
+- **Agent**: CLI-backed (claude/agy/codex) with capabilities and a success rate.
+- **Session**: conversational context scoped to global, project, or task level.
 
 ## Getting Started
 
