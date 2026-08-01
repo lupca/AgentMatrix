@@ -72,7 +72,7 @@ REST path gọi `invalidate_context_snapshot` sau mỗi tool call (`chat.py:82`)
 ### B1.7 — DDL & test harness (M6 + M0)
 - [x] Xác nhận Alembic head `033_task_event_schema_v2`; bổ sung model `ProjectRule`/`Project.context_generated` khớp migration 032. `tests/conftest.py` tự lo `create_all` cho test DB.
 - [x] Sửa `tests/conftest.py`: bỏ `TestClient`, `app.main` và fixture REST `client`.
-- [ ] Load-check nhẹ cho `SessionLocal()` per tool call trong `mcp_native` (Q4) — N coordinator đồng thời; chỉnh pool_size nếu cần.
+- [x] Load-check (2026-08-01, Postgres thật, 4 mức 5→50 client đồng thời, mixed read workload): **0 lỗi**, p50 ~20–40ms, p95 ~110–180ms, ~155 rps; pool mặc định (5+10 overflow) đủ — không cần chỉnh. Load test bắt được và đã fix 3 bug production trên đường native: (1) handler khai báo tham số `Context` nhưng `FunctionTool` schema tường minh không inject → 100% tool call fail, chuyển sang `get_http_headers()` dependency; (2) `get_http_headers()` mặc định strip header `authorization` → phải `include={"authorization"}`; (3) `token_id` dạng uuid đầy đủ 40 ký tự tràn cột `Session.id String(36)` trên Postgres (SQLite không enforce nên test không bắt được) → rút còn `mcp-<16 hex>`. Thêm test e2e gọi tool qua fastmcp Client thật — loại test đã thiếu khiến bug (1) lọt.
 
 ### B1.8 — Chứng minh flow người dùng trước khi chặt cầu (Q3)
 - [ ] Chạy thật một phiên coordinator CLI (Claude Code hoặc agy) nối `:8100`: tạo task → dispatch (supervised, human approve qua chat) → review → done, **không chạm REST**. Hiện đã xác nhận CLI có sẵn và `/health` native hoạt động; còn thiếu phiên/project/agent thực tế và credential để chạy flow này.

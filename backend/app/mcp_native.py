@@ -13,7 +13,6 @@ import argparse
 import base64
 import hashlib
 import hmac
-import inspect
 import json
 import os
 import re
@@ -22,7 +21,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from fastmcp import Context, FastMCP
+from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_http_headers
 from fastmcp.tools.function_tool import FunctionTool
 
 from sqlalchemy.exc import IntegrityError
@@ -67,7 +67,9 @@ def issue_token(
     ttl = ttl_seconds if ttl_seconds is not None else (3600 if role == "coordinator" else 900)
     if ttl <= 0:
         raise ValueError("ttl_seconds must be greater than zero")
-    token_id = token_id or f"mcp-{uuid.uuid4()}"
+    # Session.id is String(36); "mcp-" + 16 hex chars stays well under it
+    # (a full uuid4 is 36 chars and used to overflow the column on Postgres).
+    token_id = token_id or f"mcp-{uuid.uuid4().hex[:16]}"
     session_id = session_id or token_id
     payload = {"role": role, "token_id": token_id, "session_id": session_id, "exp": int(time.time()) + ttl}
     if task_id:
@@ -110,19 +112,25 @@ def authenticate_token(
     )
 
 
-async def _claims_from_context(context: Context | None, default_token: str = "") -> TokenClaims | None:
+def _claims_from_request(default_token: str = "") -> TokenClaims | None:
+    """Resolve token claims for the current tool call.
+
+    ``get_http_headers()`` reads the active request from fastmcp's context
+    var, so handlers don't need a ``Context`` parameter — a plain
+    ``FunctionTool`` constructed with an explicit JSON schema never receives
+    one (fastmcp only injects Context for introspected signatures). Outside
+    an HTTP request (in-process transport) it returns ``{}`` and the
+    ``default_token`` fallback applies.
+    """
+
     headers: Mapping[str, str] = {}
-    if context is not None:
-        try:
-            headers = context.get_http_headers()  # fastmcp >= 3
-            if inspect.isawaitable(headers):
-                headers = await headers
-        except (AttributeError, TypeError):
-            try:
-                headers = context.request_context.request.headers
-            except AttributeError:
-                headers = {}
-    authorization = headers.get("authorization") or headers.get("Authorization")
+    try:
+        # get_http_headers() strips `authorization` by default; it must be
+        # explicitly included — it is the whole point of this call.
+        headers = get_http_headers(include={"authorization"}) or {}
+    except Exception:
+        headers = {}
+    authorization = headers.get("authorization")
     return authenticate_token(
         authorization or default_token,
         secret=settings.MCP_TOKEN_SECRET,
@@ -200,8 +208,8 @@ def _ensure_session(db, claims: TokenClaims) -> str:
 
 
 def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
-    async def handler(context: Context, **kwargs: Any) -> dict[str, Any]:
-        claims = await _claims_from_context(context, default_token)
+    async def handler(**kwargs: Any) -> dict[str, Any]:
+        claims = _claims_from_request(default_token)
         if claims is None:
             return {"ok": False, "data": None, "error": {"code": "unauthorized", "message": "Invalid or missing MCP token"}}
         if spec.required_role == "coordinator" and claims.role != "coordinator":

@@ -1,6 +1,17 @@
 from __future__ import annotations
 
-from app.mcp_native import authenticate_token, envelope, issue_token
+import json
+
+import pytest
+from fastmcp import Client
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+import app.mcp_native as mcp_native
+from app.db.base import Base
+from app.db.models import Project, Task
+from app.mcp_native import authenticate_token, build_server, envelope, issue_token
 
 
 def test_role_token_round_trip_and_task_scope_claim():
@@ -30,3 +41,45 @@ def test_native_envelope_includes_next_for_task_state():
     )
     assert result["ok"] is True
     assert result["next"] == "Gọi request_review để bắt đầu review độc lập."
+
+
+@pytest.mark.asyncio
+async def test_tool_call_end_to_end_through_mcp_client(monkeypatch):
+    """Full call path through a real fastmcp client. Regression for the
+    handler signature bug: FunctionTool built from an explicit JSON schema
+    never receives an injected Context, so a handler requiring one fails on
+    every single call — which only surfaces when a tool is actually invoked
+    through the protocol, not when the handler is unit-called directly."""
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="p1", name="P", repo_root="/tmp"))
+    seed.add(Task(id="T-1", title="One", project="p1", status="todo"))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+
+    token = issue_token("test-secret", role="coordinator")
+    server = build_server(default_token=token)
+    async with Client(server) as client:
+        result = await client.call_tool("get_status", {"task_id": "T-1"})
+        body = json.loads(result.content[0].text)
+
+    assert body["ok"] is True, body
+    assert body["data"]["task"]["id"] == "T-1"
+
+
+@pytest.mark.asyncio
+async def test_tool_call_without_token_is_unauthorized(monkeypatch):
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    server = build_server()  # no default token, no HTTP headers
+    async with Client(server) as client:
+        result = await client.call_tool("get_status", {"task_id": "T-1"})
+        body = json.loads(result.content[0].text)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "unauthorized"
