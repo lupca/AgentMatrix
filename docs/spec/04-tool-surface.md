@@ -15,7 +15,7 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 |---|---|
 | `create_task` | CHỈ nhận `title`, `project`, `depends_on`. Muốn plan/AC/priority/tags → `update_task` sau. Id tự sinh từ counter. |
 | `update_task` | Patch CHỈ cho: `acceptance_criteria`, `plan`, `priority`, `tags`. KHÔNG nhận raw_input/files/tests/risk/mode (mode qua gate — CTV2-224 backlog). |
-| `generate_spec_plan` | `{task_id, agent_id}` — agent role spec_plan (CLI hoặc API). Ghi AC+plan+files+tests+risk vào task. Retry 1 lần khi JSON sai schema. |
+| `generate_spec_plan` | `{task_id, agent_id}` — agent role spec_plan (CLI hoặc API). Prompt nhận FULL raw_input + project context/rules (391b19c); AC bị ép objectively-verifiable, plan theo khung Scope in/out + bước verb-first + Open questions; input mỏng → Open questions thay vì bịa scope. Retry 1 lần khi JSON sai schema. LƯU Ý: raw_input là input quan trọng nhất — tạo task xong nên đổ mô tả chi tiết (hiện phải qua SQL/create; update_task chưa nhận raw_input). Task lớn/critical: cân nhắc đường chất lượng cao hơn — dispatch task tag no-commit cho CLI agent đọc repo thật rồi coordinator tự đổ plan qua update_task. |
 | `dispatch_task` | `{task_id, agent_id?}` — đòi status todo + có AC (hoặc legacy_no_ac). Supervised → gate pending. agent_id bị matcher ghi đè khi approve (CTV2-228). |
 | `request_review` | Chỉ khi awaiting-review VÀ chưa có gate review_order mở (driver thường tạo sẵn — approve cái đó thay vì gọi tool này). |
 | `record_verdict` | CHỈ reviewer của review run thành công mới được gọi; coordinator không tự verdict hộ. |
