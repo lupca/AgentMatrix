@@ -17,11 +17,15 @@ from app.db.models import (
     Project,
     Setting,
     Task,
+    TaskDependency,
+    TaskEvent,
     Session as SessionModel,
 )
 from app.services import entity_admin
 from app.services.admin_gate import AdminGateService, AdminOrchestrationError
+from app.services.agent_suggester import AgentSuggester
 from app.services.archive import ArchiveError, ArchiveService
+from app.services.crypto import encrypt_api_key
 from app.db.archive import with_archived
 from app.services.task_orchestration import (
     OrchestrationError,
@@ -161,6 +165,42 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
             "description": s.description,
         },
     },
+    "agent_runs": {
+        "model": AgentRun,
+        "filters": {
+            "id": "str",
+            "task_id": "str",
+            "agent_id": "str",
+            "status": "str",
+            "kind": "str",
+        },
+        "order_by": AgentRun.queued_at.desc(),
+        "serialize": lambda r: {
+            "id": r.id,
+            "task_id": r.task_id,
+            "agent_id": r.agent_id,
+            "kind": r.kind,
+            "status": r.status,
+            "effort": r.effort,
+            "exit_code": r.exit_code,
+            "queued_at": r.queued_at.isoformat() if r.queued_at else None,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+        },
+    },
+    "audit": {
+        "model": AuditLog,
+        "filters": {"task_id": "str", "action": "str", "actor": "str"},
+        "order_by": AuditLog.created_at.desc(),
+        "serialize": lambda a: {
+            "id": a.id,
+            "task_id": a.task_id,
+            "action": a.action,
+            "actor": a.actor,
+            "details": a.details,
+            "created_at": a.created_at.isoformat() if a.created_at else None,
+        },
+    },
 }
 
 
@@ -287,6 +327,31 @@ class CommandRouter:
             command_args = json.dumps({
                 'task_id': args.get('task_id'),
                 'agent_id': args.get('agent_id'),
+            }, ensure_ascii=False)
+        elif canonical_name == 'get_task_events':
+            command_args = json.dumps({
+                'task_id': args.get('task_id'),
+                'since_id': args.get('since_id'),
+                'kind': args.get('kind'),
+                'event_types': args.get('event_types'),
+                'limit': args.get('limit', 50),
+            }, ensure_ascii=False)
+        elif canonical_name == 'archive_task':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            command_args = json.dumps({
+                'task_id': task_id,
+                'restore': bool(args.get('restore', False)),
+            }, ensure_ascii=False)
+        elif canonical_name == 'suggest_agents':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            command_args = json.dumps({
+                'task_id': task_id,
+                'role': args.get('role', 'executor'),
+                'top_n': args.get('top_n', 3),
             }, ensure_ascii=False)
         elif canonical_name == 'query_db':
             entity = str(args.get('entity', '')).strip()
@@ -470,6 +535,86 @@ class CommandRouter:
             'run_cost_usd': round(sum(float(row.estimated_cost_usd or 0) for row in resources), 8),
         }
 
+    async def _handle_get_task_events(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+            since_id = int(payload.get('since_id') or 0)
+            limit = min(200, max(1, int(payload.get('limit') or 50)))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {'error': 'Invalid get_task_events arguments'}
+        task_id = str(payload.get('task_id') or '').strip() or None
+        kind = str(payload.get('kind') or '').strip() or None
+        event_types = payload.get('event_types') or None
+
+        query = self.db.query(TaskEvent)
+        if task_id:
+            query = query.filter(TaskEvent.task_id == task_id)
+        if since_id:
+            query = query.filter(TaskEvent.id > since_id)
+        if kind:
+            query = query.filter(TaskEvent.kind == kind)
+        if event_types:
+            query = query.filter(TaskEvent.event_type.in_([str(t) for t in event_types]))
+        events = query.order_by(TaskEvent.id.asc()).limit(limit).all()
+        return {
+            'events': [
+                {
+                    'id': event.id,
+                    'task_id': event.task_id,
+                    'event_type': event.event_type,
+                    'kind': event.kind,
+                    'payload': event.payload,
+                    'created_at': event.created_at.isoformat() if event.created_at else None,
+                }
+                for event in events
+            ],
+            # Resend this as since_id on the next call to only get new events.
+            'cursor': events[-1].id if events else since_id,
+            'has_more': len(events) == limit,
+        }
+
+    async def _handle_archive_task(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {'error': 'Invalid archive_task arguments'}
+        task_id = str(payload.get('task_id', '')).strip()
+        if not task_id:
+            return {'error': 'task_id is required'}
+        service = ArchiveService(self.db, actor=f"chat:{session_id or 'anonymous'}")
+        try:
+            if payload.get('restore'):
+                return service.restore('tasks', task_id)
+            return service.archive('tasks', task_id)
+        except ArchiveError as exc:
+            return {'error': str(exc)}
+
+    async def _handle_suggest_agents(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+            top_n = min(10, max(1, int(payload.get('top_n') or 3)))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {'error': 'Invalid suggest_agents arguments'}
+        task_id = str(payload.get('task_id', '')).strip()
+        if not task_id:
+            return {'error': 'task_id is required'}
+        role = str(payload.get('role') or 'executor').strip()
+        task = self.db.get(Task, task_id)
+        if task is None:
+            return {'error': f"Task '{task_id}' not found"}
+        try:
+            suggestions = AgentSuggester(self.db).suggest(task, role=role, top_n=top_n)
+        except ValueError as exc:
+            return {'error': str(exc)}
+        return {
+            'task_id': task_id,
+            'role': role,
+            'suggestions': [
+                {'agent_id': s.agent_id, 'score': s.score, 'reason': s.reason}
+                for s in suggestions
+            ],
+        }
+
     async def _handle_load_tools(self, args: str, session_id: str) -> dict:
         group = args.strip()
         definitions = get_group_tool_definitions(group)
@@ -598,13 +743,20 @@ class CommandRouter:
                 query = query.filter(column == value)
         rows = query.order_by(entity_spec['order_by']).offset(offset).limit(limit).all()
 
+        serialized = [entity_spec['serialize'](row) for row in rows]
+        # A knowledge item's content is only useful in full, so include it on
+        # a point lookup (id filter) while list queries stay compact.
+        if entity == 'knowledge' and 'id' in filters:
+            for row, data in zip(rows, serialized):
+                data['content'] = row.content
+
         return {
             'status': 'success',
             'entity': entity,
             'count': len(rows),
             'limit': limit,
             'offset': offset,
-            'rows': [entity_spec['serialize'](row) for row in rows],
+            'rows': serialized,
         }
 
     async def _handle_create_task(self, args: str, session_id: str) -> dict:
@@ -1159,13 +1311,13 @@ class CommandRouter:
         if not isinstance(payload, Mapping):
             return {'error': 'Payload must be a JSON object'}
         if entity == 'agents' and 'api_key' in payload:
-            return {
-                'error': (
-                    'manage_agent cannot accept an api_key value. Configure '
-                    'API-agent credentials through the REST API '
-                    '(POST/PATCH /api/agents) instead.'
-                )
-            }
+            # Encrypt before the payload reaches AdminGateService: the gate
+            # ledger is append-only, so a plaintext key stored there would be
+            # unredactable forever. Only the ciphertext may be persisted.
+            payload = dict(payload)
+            raw_key = payload.pop('api_key')
+            if raw_key:
+                payload['api_key_encrypted'] = encrypt_api_key(str(raw_key))
 
         action = str(payload.get('action', '')).strip()
         if not action:
@@ -1314,15 +1466,39 @@ class CommandRouter:
         if not task_id or not isinstance(patch, Mapping) or not patch:
             return {'error': 'task_id and a non-empty patch object are required'}
 
+        patch = dict(patch)
+        add_deps = [str(d) for d in patch.pop('add_depends_on', None) or []]
+        remove_deps = [str(d) for d in patch.pop('remove_depends_on', None) or []]
+        actor = f"chat:{session_id or 'anonymous'}"
+        service = TaskOrchestrationService(self.db)
+
         try:
-            task = TaskOrchestrationService(self.db).update_task_fields(
-                task_id=task_id,
-                patch=dict(patch),
-                actor=f"chat:{session_id or 'anonymous'}",
+            for dep_id in add_deps:
+                service.add_dependency(
+                    task_id=task_id, depends_on_task_id=dep_id, actor=actor
+                )
+            if remove_deps:
+                self.db.query(TaskDependency).filter(
+                    TaskDependency.task_id == task_id,
+                    TaskDependency.depends_on_task_id.in_(remove_deps),
+                ).delete(synchronize_session=False)
+                self.db.commit()
+            task = (
+                service.update_task_fields(task_id=task_id, patch=patch, actor=actor)
+                if patch
+                else self.db.get(Task, task_id)
             )
         except OrchestrationError as exc:
             return {'error': str(exc)}
+        if task is None:
+            return {'error': f"Task '{task_id}' not found"}
 
+        depends_on = [
+            dep.depends_on_task_id
+            for dep in self.db.query(TaskDependency)
+            .filter(TaskDependency.task_id == task_id)
+            .all()
+        ]
         return {
             'action': 'updated',
             'task_id': task.id,
@@ -1330,6 +1506,7 @@ class CommandRouter:
             'acceptance_criteria': task.acceptance_criteria,
             'priority': task.priority,
             'tags': task.tags,
+            'depends_on': depends_on,
         }
 
     @staticmethod

@@ -37,9 +37,14 @@ class ToolSpec:
 
 
 # Deferred-tool groups loadable via the ``load_tools`` meta-tool (ADR-001
-# §D3). "admin" has no members yet (Phase 2c) but is listed so the schema
-# enum and system-prompt hint stay accurate ahead of that work.
-DEFERRED_GROUPS: tuple[str, ...] = ("task_lifecycle", "admin", "session", "research")
+# §D3).
+DEFERRED_GROUPS: tuple[str, ...] = (
+    "task_lifecycle",
+    "admin",
+    "session",
+    "research",
+    "query",
+)
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
@@ -238,11 +243,29 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="approve_gate",
-            description="Approve a gate awaiting human confirmation before it proceeds.",
+            description=(
+                "Approve a gate awaiting human confirmation before it "
+                "proceeds. Pass gate_record_id when you have it (use the "
+                "'admin:<id>' form returned by manage_* tools for admin "
+                "gates); task_id alone resolves that task's pending gate."
+            ),
             parameters={
                 "type": "object",
-                "properties": {"task_id": {"type": "string"}},
-                "required": ["task_id"],
+                "properties": {
+                    "gate_record_id": {
+                        "type": "string",
+                        "description": (
+                            "Gate record id, or 'admin:<id>' for an admin "
+                            "gate pending from manage_project/manage_agent/"
+                            "manage_knowledge/update_settings."
+                        ),
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task whose pending gate to approve (fallback when gate_record_id is unknown).",
+                    },
+                },
+                "required": [],
             },
             handler="approve_gate",
             tier="deferred",
@@ -265,6 +288,81 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             entity="tasks",
             slash_alias="/cancel",
             group="task_lifecycle",
+        ),
+        ToolSpec(
+            name="get_task_events",
+            description=(
+                "Poll task events with a cursor. Use since_id to fetch only "
+                "events newer than the last one you saw; kind=decision "
+                "returns events that need a coordinator decision."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Filter to one task; omit for all tasks."},
+                    "since_id": {"type": "integer", "description": "Return only events with id greater than this."},
+                    "kind": {"type": "string", "enum": ["decision", "info"]},
+                    "event_types": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer", "default": 50},
+                },
+                "required": [],
+            },
+            handler="get_task_events",
+            tier="deferred",
+            permission="read",
+            entity="tasks",
+            slash_alias="/events",
+            group="query",
+            required_role="executor",
+        ),
+        ToolSpec(
+            name="archive_task",
+            description=(
+                "Archive a task (soft delete preserving history), or restore "
+                "a previously archived one with restore=true."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "restore": {"type": "boolean", "default": False},
+                },
+                "required": ["task_id"],
+            },
+            handler="archive_task",
+            tier="deferred",
+            permission="write",
+            entity="tasks",
+            slash_alias=None,
+            group="task_lifecycle",
+        ),
+        ToolSpec(
+            name="suggest_agents",
+            description=(
+                "Advisory agent ranking for a task without dispatching: "
+                "returns the top candidates with score and reason, using the "
+                "same matcher dispatch uses (skill/performance/load/cost/"
+                "risk). Read-only."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "role": {
+                        "type": "string",
+                        "enum": ["executor", "reviewer", "coordinator", "spec_plan"],
+                        "default": "executor",
+                    },
+                    "top_n": {"type": "integer", "default": 3},
+                },
+                "required": ["task_id"],
+            },
+            handler="suggest_agents",
+            tier="deferred",
+            permission="read",
+            entity="agents",
+            slash_alias=None,
+            group="query",
         ),
         ToolSpec(
             name="request_review",
@@ -379,12 +477,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="manage_agent",
             description=(
-                "Create, update, or disable an agent. Rejects any payload "
-                "containing an api_key — configure API-agent credentials "
-                "through the REST API instead; use has_api_key to check "
-                "whether one is set. Admin-permission: in supervised mode "
-                "this creates a pending gate awaiting /approve; in bypass "
-                "mode it applies immediately."
+                "Create, update, or disable an agent. api_key is write-only: "
+                "it is encrypted before any record is persisted, never "
+                "echoed back, and never readable through any tool — use "
+                "has_api_key to check whether one is set. Admin-permission: "
+                "in supervised mode this creates a pending gate awaiting "
+                "/approve; in bypass mode it applies immediately."
             ),
             parameters={
                 "type": "object",
@@ -410,6 +508,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "enum": ["anthropic", "google", "openai"],
                     },
                     "base_url": {"type": "string"},
+                    "api_key": {
+                        "type": "string",
+                        "description": (
+                            "API credential for agent_type=api. Write-only: "
+                            "encrypted at rest, redacted from gate/audit "
+                            "records, never returned."
+                        ),
+                    },
                     "is_default": {"type": "boolean"},
                     "mode": {
                         "type": "string",
@@ -493,9 +599,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="update_task",
             description=(
-                "Edit a task's plan, acceptance criteria, priority, or tags. "
-                "Does not change task status — use dispatch_task, "
-                "record_verdict, or approve_gate for status transitions."
+                "Edit a task's plan, acceptance criteria, priority, tags, or "
+                "dependencies. Does not change task status — use "
+                "dispatch_task, record_verdict, or approve_gate for status "
+                "transitions."
             ),
             parameters={
                 "type": "object",
@@ -505,7 +612,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "type": "object",
                         "description": (
                             "Fields to update: plan, acceptance_criteria, "
-                            "priority, tags."
+                            "priority, tags. Dependency edits: "
+                            "add_depends_on / remove_depends_on (arrays of "
+                            "task ids; cycles are rejected)."
                         ),
                     },
                 },
@@ -564,9 +673,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "Load additional tool schemas for the rest of this turn. Call "
                 "this before using a tool that isn't in the baseline set. "
                 "Groups: task_lifecycle (dispatch_task, record_verdict, "
-                "approve_gate, cancel_task, request_review), admin (project/agent/knowledge/"
-                "settings management), session (compact_context), research "
-                "(get_minimal_context, get_impact_radius)."
+                "approve_gate, cancel_task, request_review, update_task, "
+                "archive_task, generate_spec_plan), admin (project/agent/"
+                "knowledge/settings management), session (compact_context), "
+                "research (get_minimal_context, get_impact_radius), query "
+                "(get_task_events, suggest_agents)."
             ),
             parameters={
                 "type": "object",

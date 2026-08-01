@@ -846,18 +846,36 @@ async def test_query_db_via_tool_call_matches_slash_command(db_session):
 
 
 @pytest.mark.asyncio
-async def test_manage_agent_rejects_payload_with_api_key(db_session):
+async def test_manage_agent_api_key_is_encrypted_before_the_gate_ledger(db_session):
+    """api_key is write-only: accepted, but only the ciphertext may ever be
+    persisted — the admin-gate ledger is append-only, so a plaintext key
+    stored there could never be redacted."""
     result = await CommandRouter(db_session).execute_tool(
         "manage_agent",
-        {"action": "create", "id": "agent-x", "name": "X", "role": "executor", "api_key": "sk-leak"},
+        {
+            "action": "create",
+            "id": "agent-x",
+            "name": "X",
+            "role": "executor",
+            "agent_type": "api",
+            "provider": "openai",
+            "api_key": "sk-leak",
+            "mode": "bypass",
+        },
         "session-1",
     )
-    assert "error" in result
-    assert "api_key" in result["error"]
+    assert "error" not in result, result
 
-    from app.db.models import Agent
+    import json as _json
 
-    assert db_session.query(Agent).filter(Agent.id == "agent-x").first() is None
+    from app.db.models import AdminGateRecord, Agent
+
+    agent = db_session.query(Agent).filter(Agent.id == "agent-x").first()
+    assert agent is not None
+    assert agent.api_key and agent.api_key != "sk-leak"
+    assert "sk-leak" not in _json.dumps(result)
+    for record in db_session.query(AdminGateRecord).all():
+        assert "sk-leak" not in _json.dumps(record.input_payload or {})
 
 
 @pytest.mark.asyncio

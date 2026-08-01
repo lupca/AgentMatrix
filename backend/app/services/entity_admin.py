@@ -146,13 +146,16 @@ def create_agent(db: Session, data: dict[str, Any]) -> Agent:
     has_explicit_type = "agent_type" in data
     agent_type = data.get("agent_type", "cli")
     api_key = data.get("api_key")
+    # The manage_agent tool encrypts before the payload is persisted to the
+    # append-only admin-gate ledger; the REST path passes plaintext api_key.
+    api_key_encrypted = data.get("api_key_encrypted")
     base_url = data.get("base_url")
 
     _validate_agent_configuration(
         agent_type,
         data.get("cli"),
         data.get("provider"),
-        bool(api_key),
+        bool(api_key or api_key_encrypted),
         require_cli=has_explicit_type,
     )
 
@@ -162,7 +165,7 @@ def create_agent(db: Session, data: dict[str, Any]) -> Agent:
     fields["role"] = role
     fields["agent_type"] = agent_type
     if agent_type == "api":
-        fields["api_key"] = encrypt_api_key(api_key)
+        fields["api_key"] = api_key_encrypted or encrypt_api_key(api_key)
         fields["base_url"] = (base_url or "").strip() or None
     else:
         fields["api_key"] = None
@@ -192,17 +195,22 @@ def update_agent(db: Session, agent_id: str, data: dict[str, Any]) -> Agent:
     # below — callers passing a raw dict (manage_agent tool) aren't fenced in
     # by a pydantic schema the way the REST path's AgentUpdate model is.
     patch = {
-        k: v for k, v in data.items() if k in _AGENT_UPDATE_FIELDS or k in {"api_key", "base_url"}
+        k: v
+        for k, v in data.items()
+        if k in _AGENT_UPDATE_FIELDS or k in {"api_key", "api_key_encrypted", "base_url"}
     }
-    api_key_was_provided = "api_key" in patch
+    api_key_was_provided = "api_key" in patch or "api_key_encrypted" in patch
     api_key = patch.pop("api_key", None)
+    api_key_encrypted = patch.pop("api_key_encrypted", None)
     if "base_url" in patch:
         patch["base_url"] = (patch["base_url"] or "").strip() or None
 
     target_type = patch.get("agent_type", agent.agent_type or "cli")
     target_cli = patch.get("cli", agent.cli)
     target_provider = patch.get("provider", agent.provider)
-    has_api_key = bool(api_key) if api_key_was_provided else bool(agent.api_key)
+    has_api_key = (
+        bool(api_key or api_key_encrypted) if api_key_was_provided else bool(agent.api_key)
+    )
     legacy_cli_update = (
         target_type == "cli"
         and not agent.cli
@@ -218,7 +226,7 @@ def update_agent(db: Session, agent_id: str, data: dict[str, Any]) -> Agent:
     )
 
     if target_type == "api" and api_key_was_provided:
-        patch["api_key"] = encrypt_api_key(api_key)
+        patch["api_key"] = api_key_encrypted or encrypt_api_key(api_key)
     elif target_type == "cli":
         patch["api_key"] = None
         patch["provider"] = None

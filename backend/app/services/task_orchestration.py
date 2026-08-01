@@ -252,9 +252,14 @@ class TaskOrchestrationService:
             self._require_independent(task.executor, agent_id)
         project = self.db.get(Project, task.project)
         resolved_effort = effort or agent.effort or "medium"
+        resolved_timeout = timeout_seconds or self.run_timeout_seconds
         try:
             command, repo_root, cli = build_dispatch_command(
-                task, agent, project, effort=resolved_effort
+                task,
+                agent,
+                project,
+                effort=resolved_effort,
+                mcp_ttl_seconds=resolved_timeout,
             )
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc
@@ -277,7 +282,7 @@ class TaskOrchestrationService:
                 "command": command,
                 "repo_root": repo_root,
                 "cli": cli,
-                "timeout_seconds": timeout_seconds or self.run_timeout_seconds,
+                "timeout_seconds": resolved_timeout,
                 "kind": kind,
                 "agent_role": "reviewer" if kind == "review" else "executor",
                 "effort": resolved_effort,
@@ -383,9 +388,15 @@ class TaskOrchestrationService:
         if agent is None:
             raise PrerequisiteError(f"Agent {reviewer} not found")
         project = self.db.get(Project, task.project)
+        resolved_timeout = timeout_seconds or self.run_timeout_seconds
         try:
             command, repo_root, cli = build_review_command(
-                task, agent, project, base_ref, head_ref
+                task,
+                agent,
+                project,
+                base_ref,
+                head_ref,
+                mcp_ttl_seconds=resolved_timeout,
             )
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc
@@ -404,7 +415,7 @@ class TaskOrchestrationService:
                 "command": command,
                 "repo_root": repo_root,
                 "cli": cli,
-                "timeout_seconds": timeout_seconds or self.run_timeout_seconds,
+                "timeout_seconds": resolved_timeout,
             },
         )
 

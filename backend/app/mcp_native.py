@@ -25,6 +25,8 @@ from typing import Any, Mapping
 from fastmcp import Context, FastMCP
 from fastmcp.tools.function_tool import FunctionTool
 
+from sqlalchemy.exc import IntegrityError
+
 from app.core.config import settings
 from app.db.base import SessionLocal
 from app.db.models import Session as SessionModel, Task
@@ -70,8 +72,6 @@ def issue_token(
     payload = {"role": role, "token_id": token_id, "session_id": session_id, "exp": int(time.time()) + ttl}
     if task_id:
         payload["task_id"] = task_id
-    if token_id:
-        payload["token_id"] = token_id
     encoded = _b64_json(payload)
     signature = hmac.new(secret.encode(), encoded.encode(), hashlib.sha256).digest()
     return f"{TOKEN_PREFIX}.{encoded}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
@@ -190,7 +190,12 @@ def _ensure_session(db, claims: TokenClaims) -> str:
         project_id=task.project if task else None,
         task_id=task.id if task else None, messages=[], status="active",
     ))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # A concurrent first call with the same token already created the
+        # row between our existence check and this commit.
+        db.rollback()
     return session_id
 
 

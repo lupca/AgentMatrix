@@ -16,11 +16,21 @@ SUPPORTED_CLIS = {"agy", "codex", "claude"}
 _EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
 
 
-def _native_mcp_config(task_id: str, role: str) -> str | None:
+# Slack added to the run timeout when deriving the executor token TTL: the
+# run may wait in the brake queue before it starts, and that wait burns
+# wall-clock against the token's exp.
+_MCP_TTL_QUEUE_MARGIN_SECONDS = 1800
+
+
+def _native_mcp_config(
+    task_id: str, role: str, *, ttl_seconds: int | None = None
+) -> str | None:
     """Create a short-lived CLI config when native MCP is enabled.
 
-    The executor token is scoped to the task. The shell trap in
-    :func:`_attach_mcp_config` removes the config after the CLI exits.
+    The executor token is scoped to the task; ``ttl_seconds`` should be the
+    resolved run timeout so the token outlives the run it serves. The worker
+    (``agent_runner._cleanup_mcp_config``) removes the config after the CLI
+    exits.
     """
 
     if not settings.MCP_TOKEN_SECRET:
@@ -29,7 +39,10 @@ def _native_mcp_config(task_id: str, role: str) -> str | None:
     # import cycle during application startup.
     from app.mcp_native import issue_token
 
-    token = issue_token(settings.MCP_TOKEN_SECRET, role=role, task_id=task_id)
+    ttl = (ttl_seconds or settings.RUN_TIMEOUT_SECONDS) + _MCP_TTL_QUEUE_MARGIN_SECONDS
+    token = issue_token(
+        settings.MCP_TOKEN_SECRET, role=role, task_id=task_id, ttl_seconds=ttl
+    )
     handle = tempfile.NamedTemporaryFile(
         prefix="ct-mcp-", suffix=".json", mode="w", encoding="utf-8", delete=False
     )
@@ -77,6 +90,7 @@ def build_dispatch_command(
     agent: Agent,
     project: Optional[Project] = None,
     effort: Optional[str] = None,
+    mcp_ttl_seconds: Optional[int] = None,
 ) -> tuple[str, str, str]:
     cli = (agent.cli or _infer_cli(agent.model, agent.id)).strip().lower()
     if cli not in SUPPORTED_CLIS:
@@ -95,7 +109,9 @@ def build_dispatch_command(
     resolved_effort = effort or agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
     prompt = _task_prompt(task, review_result_path(repo_root, task.id))
-    mcp_config_path = _native_mcp_config(task.id, "executor")
+    mcp_config_path = _native_mcp_config(
+        task.id, "executor", ttl_seconds=mcp_ttl_seconds
+    )
     if cli == "codex":
         argv = ["codex", "exec"]
         if agent.model:
@@ -133,6 +149,7 @@ def build_review_command(
     project: Optional[Project],
     base_ref: str,
     head_ref: str,
+    mcp_ttl_seconds: Optional[int] = None,
 ) -> tuple[str, str, str]:
     """Build the CLI invocation for a real ``/code-review`` run.
 
@@ -161,7 +178,9 @@ def build_review_command(
     prompt = _review_prompt(
         task, base_ref, head_ref, review_result_path(repo_root, task.id)
     )
-    mcp_config_path = _native_mcp_config(task.id, "executor")
+    mcp_config_path = _native_mcp_config(
+        task.id, "executor", ttl_seconds=mcp_ttl_seconds
+    )
     resolved_effort = agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
     if cli == "codex":
