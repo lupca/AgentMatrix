@@ -554,6 +554,16 @@ def migrate(dry_run: bool = False, clear: bool = True):
         print("Re-enabling done-verdict trigger...")
         session.execute(text("ALTER TABLE tasks ENABLE TRIGGER trg_tasks_done_verdict"))
 
+        # Re-seed the per-project id counter, otherwise create_task starts
+        # over at 001 and collides with the imported ids.
+        print("Re-seeding projects.next_task_seq from imported task ids...")
+        session.execute(text("""
+            UPDATE projects p SET next_task_seq = COALESCE((
+                SELECT MAX((regexp_match(t.id, '-0*([0-9]+)'))[1]::int)
+                FROM tasks t WHERE t.project = p.id
+            ), 0)
+        """))
+
         session.commit()
         print(f"\nImported: {len(projects)} projects, {len(agents)} agents, {len(tasks)} tasks, {len(knowledge)} knowledge items")
 
