@@ -30,7 +30,7 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 | Tool | Ghi chú |
 |---|---|
 | `save_project_context` | Executor-callable. Args: `task_id` (BẮT BUỘC — scope), `project_id`, `context_md` (≤150 dòng), `rules` (≤5, name/globs/content; globs = list of strings; name unique, ≤100 ký tự). Từ chối cross-project: task phải thuộc project_id. Thay TRỌN BỘ rules cũ. |
-| `get_minimal_context`, `get_impact_radius` | Proxy sang code-review-graph. |
+| `get_minimal_context`, `get_impact_radius` | Proxy sang code-review-graph. Cần session scope project/task. MỌI call graph ghi 1 row `tool_metrics` (ok/fail/cache-hit, duration, result_count, bytes_out) — fail vẫn fallback [] không chặn task, nhưng giờ đo được (CTV2-239). |
 | `manage_knowledge` | CRUD knowledge_items qua admin gate. |
 | `compact_context` | Nén context session. |
 
@@ -42,6 +42,7 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 | `update_settings` | `{key, value}` trong SETTINGS_WHITELIST → admin gate. |
 | `query_db` | Raw SQL read-only (1 câu SELECT/WITH), chạy bằng `ct_readonly_user`, cap 500 rows + statement timeout. Bảng mới phải được GRANT (đã có default privileges). |
 | `get_stats` | Token/cost/run stats từ LLMUsage. |
+| (bảng `tool_metrics`) | Telemetry công cụ tiết-kiệm-token: graph calls + review results (findings, AC pass/fail, tests). Truy vấn qua query_db. Reviewer được prompt chạy `.claude/review-toolchain.md` (ocr...) — thiếu binary = ghi chú và đi tiếp, không phải lỗi. |
 | `suggest_agents` | AgentSuggester — xếp hạng theo capabilities/success_rate. |
 
 ## Bẫy mapping đã biết
