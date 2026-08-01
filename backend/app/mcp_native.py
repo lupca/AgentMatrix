@@ -235,9 +235,11 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
         )
         for row in (
             db.query(GateRecord)
+            .join(Task, Task.id == GateRecord.task_id)
             .filter(
                 GateRecord.status == "pending",
                 GateRecord.id.notin_(decided_task),
+                Task.archived_at.is_(None),
             )
             .order_by(GateRecord.created_at.asc())
             .limit(5)
@@ -271,7 +273,10 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
         gated_tasks = {p["id"] for p in pending}
         for row in (
             db.query(Task)
-            .filter(Task.awaiting_approval.is_(True))
+            .filter(
+                Task.awaiting_approval.is_(True),
+                Task.archived_at.is_(None),
+            )
             .order_by(Task.updated_at.asc())
             .limit(5)
         ):
