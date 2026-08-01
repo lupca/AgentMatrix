@@ -82,17 +82,49 @@ TOKEN=$("$SCRIPT_DIR/issue-coordinator-token.sh" coordinator "" "$TTL" | tail -1
 } > "$WORKDIR/.agents/mcp_config.json"
 chmod 600 "$WORKDIR/.agents/mcp_config.json"
 
+# Claude Code project-scoped config: shows up under "Project MCPs" the moment
+# a claude session starts in the workspace (approve it on first run).
+{
+  echo '{'
+  echo '  "mcpServers": {'
+  echo '    "control-tower": {'
+  echo '      "type": "http",'
+  echo "      \"url\": \"$NATIVE_URL\","
+  echo '      "headers": {'
+  echo "        \"Authorization\": \"Bearer $TOKEN\""
+  echo '      }'
+  printf '    }'
+  for i in "${!EXTRA_NAMES[@]}"; do
+    printf ',\n    "%s": {\n      "type": "http",\n      "url": "%s"\n    }' "${EXTRA_NAMES[$i]}" "${EXTRA_URLS[$i]}"
+  done
+  echo
+  echo '  }'
+  echo '}'
+} > "$WORKDIR/.mcp.json"
+chmod 600 "$WORKDIR/.mcp.json"
+
+# Codex workspace config: token stays out of the file via bearer_token_env_var.
+mkdir -p "$WORKDIR/.codex"
+{
+  echo '[mcp_servers.control-tower]'
+  echo "url = \"$NATIVE_URL\""
+  echo 'bearer_token_env_var = "CT_MCP_TOKEN"'
+  for i in "${!EXTRA_NAMES[@]}"; do
+    echo
+    echo "[mcp_servers.${EXTRA_NAMES[$i]}]"
+    echo "url = \"${EXTRA_URLS[$i]}\""
+  done
+} > "$WORKDIR/.codex/config.toml"
+echo "export CT_MCP_TOKEN=$TOKEN" > "$WORKDIR/.codex/env.sh"
+chmod 600 "$WORKDIR/.codex/config.toml" "$WORKDIR/.codex/env.sh"
+
 echo "Coordinator workspace ready: $WORKDIR"
 if [[ ${#EXTRA_NAMES[@]} -gt 0 ]]; then
   echo "Extra MCP servers: ${EXTRA_NAMES[*]}"
 fi
 echo
-echo "  agy:    cd $WORKDIR && agy          (reads PROJECT.md + .agents/mcp_config.json)"
-echo "  codex:  cd $WORKDIR && codex        (reads AGENTS.md; MCP via -c flags or config.toml)"
-echo "  claude: cd $WORKDIR && claude mcp add --transport http control-tower $NATIVE_URL \\"
-echo "            --header \"Authorization: Bearer $TOKEN\""
-for i in "${!EXTRA_NAMES[@]}"; do
-  echo "          claude mcp add --transport http ${EXTRA_NAMES[$i]} ${EXTRA_URLS[$i]}"
-done
+echo "  claude: cd $WORKDIR && claude       (.mcp.json — approve 'Project MCPs' on first run)"
+echo "  agy:    cd $WORKDIR && agy           (PROJECT.md + .agents/mcp_config.json)"
+echo "  codex:  cd $WORKDIR && source .codex/env.sh && codex   (AGENTS.md + .codex/config.toml)"
 echo
 echo "Token TTL: ${TTL}s — re-run this script to refresh the token in place."
