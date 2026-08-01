@@ -96,8 +96,21 @@ def get_matching_rules(
             continue
 
         for task_file in task_files:
-            if any(fnmatch(task_file, glob) for glob in rule.globs):
+            if any(_glob_matches(task_file, glob) for glob in rule.globs):
                 matched.append(rule)
                 break
 
     return matched
+
+
+def _glob_matches(path: str, glob: str) -> bool:
+    """fnmatch with gitignore-style ``**/`` semantics.
+
+    Plain fnmatch translates ``a/**/*.py`` into a pattern that requires a
+    slash between ``a/`` and the file name, so direct children
+    (``a/file.py``) never match — exactly the globs LLM-generated rules use.
+    Treat ``**/`` as also matching zero directories.
+    """
+    if fnmatch(path, glob):
+        return True
+    return "**/" in glob and fnmatch(path, glob.replace("**/", ""))

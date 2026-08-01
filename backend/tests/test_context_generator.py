@@ -61,6 +61,24 @@ class TestGetMatchingRules:
 
         assert len(result) == 2
 
+    def test_double_star_matches_direct_children(self, db_session):
+        project = Project(id="proj-ds", name="DS")
+        rule = ProjectRule(
+            id="r-ds", project_id="proj-ds", name="services",
+            globs=["backend/app/services/**/*.py"], content="services rule",
+        )
+        db_session.add_all([project, rule])
+        db_session.flush()
+
+        direct = get_matching_rules(
+            db_session, "proj-ds", ["backend/app/services/outbox.py"]
+        )
+        nested = get_matching_rules(
+            db_session, "proj-ds", ["backend/app/services/providers/base.py"]
+        )
+        assert [r.name for r in direct] == ["services"]
+        assert [r.name for r in nested] == ["services"]
+
 
 class TestContextChecker:
     def test_check_project_ready_missing_context(self, db_session):
