@@ -10,7 +10,7 @@ from sqlalchemy.pool import StaticPool
 
 import app.mcp_native as mcp_native
 from app.db.base import Base
-from app.db.models import Agent, Project, Task
+from app.db.models import Agent, InboxItem, Project, Task
 from app.mcp_native import authenticate_token, build_server, envelope, issue_token
 from app.services.task_orchestration import TaskOrchestrationService
 
@@ -195,3 +195,56 @@ async def test_save_project_context_executor_token_mismatched_task_id_rejected(m
 
     assert body["ok"] is False, body
     assert body["error"]["code"] == "task_scope_violation"
+
+
+@pytest.mark.asyncio
+async def test_manage_inbox_crud_mapping_and_promote_end_to_end(monkeypatch):
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="ideas", name="Ideas", repo_root="/tmp", task_prefix="IDEA"))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    server = build_server(default_token=issue_token("test-secret", role="coordinator"))
+
+    async with Client(server) as client:
+        bad = await client.call_tool("manage_inbox", {"action": "add", "content": "x", "project_id": "missing"})
+        assert "does not exist" in json.loads(bad.content[0].text)["error"]["message"]
+
+        added = await client.call_tool("manage_inbox", {
+            "action": "add", "content": "Build an inbox", "project_id": "ideas", "tags": ["product"]
+        })
+        add_body = json.loads(added.content[0].text)
+        assert add_body["ok"] is True, add_body
+        item_id = add_body["data"]["item"]["id"]
+
+        updated = await client.call_tool("manage_inbox", {
+            "action": "update", "id": item_id,
+            "patch": {"content": "Build a better inbox", "tags": ["product", "v2"], "status": "open"},
+        })
+        assert json.loads(updated.content[0].text)["data"]["item"]["content"] == "Build a better inbox"
+
+        listed = await client.call_tool("manage_inbox", {"action": "list", "q": "better", "status": "open"})
+        assert json.loads(listed.content[0].text)["data"]["count"] == 1
+
+        promoted = await client.call_tool("manage_inbox", {"action": "promote", "id": item_id, "title": "Inbox task"})
+        promote_body = json.loads(promoted.content[0].text)
+        assert promote_body["ok"] is True, promote_body
+        assert promote_body["data"]["task_id"] == "IDEA-001"
+        assert promote_body["data"]["item"]["status"] == "triaged"
+
+        verify = session_factory()
+        task = verify.get(Task, "IDEA-001")
+        item = verify.get(InboxItem, item_id)
+        assert task.raw_input == "Build a better inbox"
+        assert item.task_id == task.id
+        verify.close()
+
+        second = await client.call_tool("manage_inbox", {"action": "add", "content": "Delete me"})
+        second_id = json.loads(second.content[0].text)["data"]["item"]["id"]
+        deleted = await client.call_tool("manage_inbox", {"action": "delete", "id": second_id})
+        assert json.loads(deleted.content[0].text)["data"]["action"] == "deleted"

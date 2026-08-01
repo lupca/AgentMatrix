@@ -566,7 +566,7 @@ def test_get_tool_definitions_returns_only_baseline_eager_tools(db_session):
     tools = hierarchy.get_tool_definitions()
     names = {t["name"] for t in tools}
 
-    assert names == {"create_task", "get_status", "get_run_output", "get_stats", "query_db", "load_tools"}
+    assert names == {"create_task", "manage_inbox", "get_status", "get_run_output", "get_stats", "query_db", "load_tools"}
     assert "dispatch_task" not in names
     assert "compact_context" not in names
 

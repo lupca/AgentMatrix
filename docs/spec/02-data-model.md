@@ -4,6 +4,13 @@ Models: `backend/app/db/models.py`. Migration: alembic (`backend/alembic/version
 
 ## Task
 
+## InboxItem
+
+Kho ý tưởng thô dạng text, độc lập với gate. `project_id` và `task_id` nullable,
+liên kết bị xóa thì SET NULL; `status` là `open`, `triaged`, hoặc `dropped`.
+`promote` tạo task qua counter của project, giữ nguyên content vào `raw_input` và
+liên kết ngược bằng `task_id`.
+
 ```
 todo → dispatched → awaiting-review → in-review → done
                                           └→ changes-requested → (todo → vòng mới)

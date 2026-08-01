@@ -178,6 +178,26 @@ class Task(ArchivableMixin, Base):
         return "executing"
 
 
+class InboxItem(Base):
+    """A raw idea captured before it becomes a task."""
+
+    __tablename__ = "inbox_items"
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    content = Column(Text, nullable=False)
+    project_id = Column(String(50), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
+    task_id = Column(String(20), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    tags = Column(JSON, nullable=False, default=list, server_default="[]")
+    status = Column(String(20), nullable=False, default="open", server_default="open")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("status IN ('open', 'triaged', 'dropped')", name="ck_inbox_items_status"),
+        Index("ix_inbox_items_status", "status"),
+        Index("ix_inbox_items_project_id", "project_id"),
+    )
+
+
 class TaskDependency(Base):
     """One edge of the task DAG: ``task_id`` cannot dispatch until
 
