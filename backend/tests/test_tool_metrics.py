@@ -17,6 +17,9 @@ from app.services.tool_metrics import record_tool_metric
 
 @pytest.fixture
 def metric_session(monkeypatch):
+    # record_tool_metric refuses to persist under TESTING=1; these two tests
+    # deliberately point SessionLocal at a scratch sqlite instead.
+    monkeypatch.delenv("TESTING", raising=False)
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
@@ -24,6 +27,13 @@ def metric_session(monkeypatch):
     factory = sessionmaker(bind=engine)
     monkeypatch.setattr("app.db.base.SessionLocal", factory)
     return factory
+
+
+def test_record_tool_metric_skips_under_testing_env(metric_session, monkeypatch):
+    monkeypatch.setenv("TESTING", "1")
+    record_tool_metric(tool="x", source="y", ok=True)
+    db = metric_session()
+    assert db.query(ToolMetric).count() == 0
 
 
 def test_record_tool_metric_persists_a_row(metric_session):
@@ -40,6 +50,7 @@ def test_record_tool_metric_persists_a_row(metric_session):
 
 
 def test_record_tool_metric_never_raises(monkeypatch):
+    monkeypatch.delenv("TESTING", raising=False)
     monkeypatch.setattr("app.db.base.SessionLocal", MagicMock(side_effect=RuntimeError("db down")))
     record_tool_metric(tool="x", source="y", ok=False)  # must not raise
 

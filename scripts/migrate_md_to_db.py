@@ -161,13 +161,9 @@ def parse_task_files(projects_dir: Path) -> list[dict]:
         if not plan:
             plan = parse_plan_section(body)
 
-        # Use raw body as raw_input if no specific raw_input
-        raw_input = fm.get('raw_input')
-        if not raw_input:
-            # Get first section after title as context
-            title_match = re.search(r'^#\s+.+\n\n(.+?)(?=\n##|\Z)', body, re.DOTALL)
-            if title_match:
-                raw_input = title_match.group(1).strip()
+        # Keep the FULL body: the old first-section-only extraction silently
+        # dropped most task content (Vấn đề/Nguyên nhân/Đã sửa...).
+        raw_input = fm.get('raw_input') or body.strip() or None
 
         task_id = fm.get('id')
         existing_ids = [t['id'] for t in tasks]
@@ -227,8 +223,16 @@ def parse_agent_files(agents_dir: Path) -> list[dict]:
         # (human users are stored as 'cli' with type='human' in the type field)
         agent_type = 'cli'  # default for all agents
 
+        profile_keys = (
+            'total_tasks_executed', 'total_tasks_reviewed', 'avg_review_rounds',
+            'weaknesses', 'recent_trend', 'last_active', 'superseded_by',
+            'coordination_defects', 'coordination_defects_caught_by_user',
+        )
+        legacy_profile = {k: fm[k] for k in profile_keys if fm.get(k) is not None}
+
         agents.append({
             'id': agent_id,
+            'legacy_profile': legacy_profile or None,
             'name': name,
             'role': role,
             'type': fm.get('type', 'ai'),
@@ -393,9 +397,11 @@ def migrate(dry_run: bool = False, clear: bool = True):
         for a in agents:
             session.execute(text("""
                 INSERT INTO agents (id, name, role, capabilities, type, model, effort,
-                                   cli, provider, is_default, agent_type, success_rate, status)
+                                   cli, provider, is_default, agent_type, success_rate, status,
+                                   legacy_profile)
                 VALUES (:id, :name, :role, :capabilities, :type, :model, :effort,
-                       :cli, :provider, :is_default, :agent_type, :success_rate, :status)
+                       :cli, :provider, :is_default, :agent_type, :success_rate, :status,
+                       :legacy_profile)
                 ON CONFLICT (id) DO UPDATE SET
                     name = EXCLUDED.name,
                     role = EXCLUDED.role,
@@ -408,6 +414,7 @@ def migrate(dry_run: bool = False, clear: bool = True):
                     is_default = EXCLUDED.is_default,
                     agent_type = EXCLUDED.agent_type,
                     status = EXCLUDED.status,
+                    legacy_profile = COALESCE(EXCLUDED.legacy_profile, agents.legacy_profile),
                     -- measured in production; the md value is only an
                     -- initial estimate, never overwrite a real score
                     success_rate = agents.success_rate,
@@ -426,6 +433,7 @@ def migrate(dry_run: bool = False, clear: bool = True):
                 'agent_type': a['agent_type'],
                 'success_rate': a['success_rate'],
                 'status': a['status'],
+                'legacy_profile': json.dumps(a.get('legacy_profile')) if a.get('legacy_profile') else None,
             })
 
         # Insert tasks
@@ -581,6 +589,18 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Migrate markdown to PostgreSQL')
     parser.add_argument('--dry-run', action='store_true', help='Preview without committing')
     parser.add_argument('--no-clear', action='store_true', help='Skip clearing tables (upsert mode)')
+    parser.add_argument(
+        '--yes-clear', action='store_true',
+        help='REQUIRED to actually clear tables: the DB is the production '
+             'source of truth now, a re-import DESTROYS live task state.',
+    )
     args = parser.parse_args()
+
+    if not args.dry_run and not args.no_clear and not args.yes_clear:
+        print('REFUSING: this import CLEARS live production tables '
+              '(tasks, projects, gate_records, knowledge_items).')
+        print('The markdown repo is a legacy snapshot; the DB has moved on.')
+        print('Pass --yes-clear if you really mean it, or --dry-run/--no-clear.')
+        sys.exit(2)
 
     migrate(dry_run=args.dry_run, clear=not args.no_clear)

@@ -572,6 +572,10 @@ class Agent(ArchivableMixin, Base):
     base_url = Column(String(500), nullable=True)
     is_default = Column(Boolean, nullable=False, default=False, server_default="false")
     success_rate = Column(Float, nullable=True, default=0.0)
+    # V1 markdown profile stats (total_tasks_executed/reviewed,
+    # avg_review_rounds, weaknesses, recent_trend, last_active, ...) that the
+    # md importer used to drop entirely.
+    legacy_profile = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

@@ -31,6 +31,12 @@ def record_tool_metric(
     error: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> None:
+    import os
+
+    # The test suite (conftest sets TESTING=1) must never leak telemetry
+    # rows into whatever real database DATABASE_URL happens to point at.
+    if os.environ.get("TESTING") == "1":
+        return
     try:
         from app.db.base import SessionLocal
         from app.db.models import ToolMetric
