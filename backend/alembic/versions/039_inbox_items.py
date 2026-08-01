@@ -24,6 +24,10 @@ def upgrade() -> None:
     )
     op.create_index("ix_inbox_items_status", "inbox_items", ["status"])
     op.create_index("ix_inbox_items_project_id", "inbox_items", ["project_id"])
+    # query_db runs as ct_readonly_user; without an explicit grant a fresh
+    # machine (no default privileges) cannot read the new table (review F-001).
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("GRANT SELECT ON inbox_items TO ct_readonly_user")
 
 
 def downgrade() -> None:
