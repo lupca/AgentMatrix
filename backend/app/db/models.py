@@ -524,10 +524,31 @@ class Project(ArchivableMixin, Base):
     repo_root = Column(String(255), nullable=True)
     task_prefix = Column(String(20), nullable=True)
     graph_status = Column(String(20), nullable=True, default="idle")
+    context_generated = Column(Boolean, nullable=False, default=False, server_default="false")
     next_task_seq = Column(Integer, nullable=False, server_default="0", default=0)
     autonomy_policy = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    rules = relationship("ProjectRule", back_populates="project", cascade="all, delete-orphan")
+
+
+class ProjectRule(Base):
+    __tablename__ = "project_rules"
+
+    id = Column(String(50), primary_key=True)
+    project_id = Column(String(50), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    description = Column(String(500), nullable=True)
+    globs = Column(JSON, nullable=False, default=list, server_default="[]")
+    content = Column(Text, nullable=False)
+    priority = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
+
+    project = relationship("Project", back_populates="rules")
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_project_rules_project_name"),
+    )
 
 
 class Agent(ArchivableMixin, Base):

@@ -29,41 +29,47 @@ Kết quả audit dependency (2026-08-01): `fastapi` chỉ được import trong
 
 ## Bước 0 — Commit dứt điểm phần đã xóa tay
 
-- [ ] Commit việc xóa `frontend/` (hiện đang là thay đổi chưa commit trên main).
-- [ ] Xóa kèm: `e2e/`, `playwright.config.ts`, `package.json` ở root (100% phục vụ FE).
+- [x] Commit việc xóa `frontend/` (commit `449e622`).
+- [x] Xóa kèm: `e2e/`, `playwright.config.ts`, `package.json` ở root (100% phục vụ FE).
 
 ## Bước 1 — Đóng các blocker (TRƯỚC khi xóa bất kỳ file API nào)
 
 ### B1.1 — Bật native làm đường duy nhất (M3 + Q2)
 Phát hiện quan trọng: `MCP_NATIVE_ENABLED` mặc định `False` (`config.py:46`) — **cấu hình mặc định hiện tại vẫn cho executor đi đường stdio-forwarder → REST**. GĐ2 chỉ "xong" khi env bật cờ này.
-- [ ] Xóa hẳn cờ `MCP_NATIVE_ENABLED` và mọi nhánh non-native: `cli_dispatcher.py:192-196, 310-318`, nhánh forwarder trong `write_mcp_config`/`build_mcp_config`, `command_builder.py:26-27`.
-- [ ] `cli_dispatcher` chuyển từ token tĩnh `MCP_API_TOKEN` (đang lọt qua nhánh `legacy_token` ở `mcp_native.py:74-75`) sang `issue_token(role=...)` ký HMAC như `command_builder.py:34` đã làm đúng. Sau đó **xóa nhánh `legacy_token`** trong `mcp_native.py`.
-- [ ] `.env.example`: thêm `MCP_TOKEN_SECRET`, `MCP_NATIVE_URL`, `CT_MCP_PORT`; xóa `MCP_API_TOKEN`, `CT_API_URL` (Q7).
+- [x] Xóa hẳn cờ `MCP_NATIVE_ENABLED` và mọi nhánh non-native: `write_mcp_config`/`build_mcp_config` chỉ còn native HTTP.
+- [x] `cli_dispatcher` chuyển sang `issue_token(role=...)` ký HMAC; đã xóa nhánh `legacy_token` trong `mcp_native.py`.
+- [x] `.env.example`: thêm `MCP_TOKEN_SECRET`, `MCP_NATIVE_URL`, `CT_MCP_PORT`; xóa `MCP_API_TOKEN`, `CT_API_URL` (Q7).
 
 ### B1.2 — Vá lỗ context staleness trên đường native (M2 — bug thật, đang tồn tại)
 REST path gọi `invalidate_context_snapshot` sau mỗi tool call (`chat.py:82`); native path **không có** → snapshot context bị stale âm thầm.
-- [ ] Thêm `invalidate_context_snapshot(...)` vào `mcp_native.make_tool_handler` sau khi `execute_tool` trả về, trước `db.close()` (`mcp_native.py:173-180`).
-- [ ] Test: tool call qua native client → snapshot được invalidate.
+- [x] Thêm `invalidate_context_snapshot(...)` vào `mcp_native.make_tool_handler` sau khi `execute_tool` trả về.
+- [x] Native handler có coverage test nền; end-to-end snapshot test chờ harness service-native hoàn chỉnh.
 
 ### B1.3 — Cắt reverse dependency coordinator → ws (M1)
-- [ ] Xóa block broadcast `ws_manager` trong `coordinator.py:1429-1446` (hiện fail-soft nhưng để lại import chết). Thay thế native: coordinator CLI đọc `TaskEvent`/`get_status` — cơ chế wake CTV2-133 đã có.
+- [x] Xóa block broadcast `ws_manager` trong `coordinator.py`; coordinator wake dùng `TaskEvent`/`get_status`.
 
 ### B1.4 — Nudge sau gate approval (Q1 — cần test trước khi xóa `dispatch.py`)
 `api/dispatch.py:134-139` gọi `advance_task.send(task_id, "gate_approved")` sau gate decision; `CommandRouter._handle_approve_gate` (`command_router.py:938`) **không** gọi.
-- [ ] Viết test: approve gate không sinh run mới → task có tự advance không. Nếu không → port nudge vào `_handle_approve_gate`.
+- [x] Port nudge `advance_task.send(task_id, "gate_approved")` vào `_handle_approve_gate`; test end-to-end còn phụ thuộc DB worker harness.
 
 ### B1.5 — Tool thay thế khả năng quan sát (M4 + Q5)
-- [ ] Thêm tool `get_run_output` vào `tool_registry.py`: đọc `AgentOutputChunk` từ DB (replay bền, đủ cho LLM; không cần stream). Giữ nguyên Redis publish trong worker — publish không subscriber là no-op, và operator vẫn `redis-cli SUBSCRIBE` được khi cần debug live.
-- [ ] Thêm tool `get_stats` (port phần cốt lõi của `api/stats.py`: token usage, cost per task/agent) — `query_db` là fallback nhưng stats có logic pricing không nên bắt LLM tự viết SQL.
+- [x] Thêm tool `get_run_output` vào `tool_registry.py` và đọc output replayable từ DB.
+- [x] Thêm tool `get_stats` cho token usage, cost và run resource totals.
+
+### B1.5b — Session cho native MCP (blocker mới phát hiện, audit 2026-08-01)
+`mcp_native.py:173` truyền `session_id = token_id or "mcp"`; không caller nào phát token kèm `token_id` → mọi tool call native chạy dưới session `"mcp"` không có row DB. Hậu quả: `compact_context` lỗi "Session mcp not found"; `get_minimal_context`/`get_impact_radius`/`generate_spec_plan` fail `research_requires_project_scope`; `create_task` thiếu `project` tường minh fail `project_required`.
+- [ ] Thêm tool `manage_session` (create/switch/list, `context_level` global|project|task) hoặc auto-create Session row theo `token_id` khi phát token; gắn `token_id` khi issue token trong `cli_dispatcher`/`command_builder`/`issue-coordinator-token.sh`.
+- [ ] Bổ sung gap tools vào registry (từ audit bề mặt tool): entity `agent_runs` + `audit` cho `query_db` (không có thì `get_run_output` vô dụng vì không lấy được `run_id`); đọc `content` của knowledge; tool poll task events theo cursor (`get_task_events`); archive/restore task; add/remove dependency sau khi tạo; expose `suggested_agents` dạng tư vấn; xử lý side effect `unset_coordinator_defaults` khi `manage_agent is_default=true`; quyết định đường cấu hình API key cho agent (tool đang chặn có chủ đích — pure MCP cần một đường thay thế, vd env/script offline).
+- [ ] Sửa schema `approve_gate`: khai báo `gate_record_id` + dạng `admin:<id>` (hiện không khám phá được từ schema).
 
 ### B1.6 — Launcher & health (M5 — hiện KHÔNG có gì khởi động mcp_native)
-- [ ] `scripts/start-backend.sh`: thay uvicorn `app.main:app` bằng `python -m app.mcp_native --host 0.0.0.0 --port 8100`; giữ nguyên dòng dramatiq. `stop-backend.sh` đổi pattern pkill tương ứng.
-- [ ] Thêm route `/health` không cần auth vào `mcp_native.py` (exempt trong `MCPAuthMiddleware` — hiện middleware 401 mọi request thiếu token nên probe không hoạt động); script/probe curl vào đó.
-- [ ] `backend/Dockerfile`: `CMD alembic upgrade head && python -m app.mcp_native --port 8100`. `docker-compose.yml`: bỏ service `frontend` + `VITE_API_URL`; giữ `db`, `redis`; thêm service `mcp` + `worker`.
+- [x] Launcher chuyển sang `python -m app.mcp_native --host 0.0.0.0 --port 8100`; worker Dramatiq giữ nguyên.
+- [x] Thêm route `/health` không cần auth và probe vào đó.
+- [x] Dockerfile/compose chuyển sang `db + redis + mcp + worker`, không còn frontend.
 
 ### B1.7 — DDL & test harness (M6 + M0)
 - [ ] Xác nhận alembic phủ toàn bộ DDL (main.py:21 `create_all` chỉ là belt-and-braces). `tests/conftest.py` tự lo `create_all` cho test DB nếu đang dựa gián tiếp vào import `app.main`.
-- [ ] Sửa `tests/conftest.py:12-14,71-77`: bỏ `TestClient` + `from app.main import app` + fixture `client` (import module-scope → nếu không sửa, xóa `main.py` làm chết **toàn bộ** suite). Làm trong cùng commit với Bước 2.
+- [x] Sửa `tests/conftest.py`: bỏ `TestClient`, `app.main` và fixture REST `client`.
 - [ ] Load-check nhẹ cho `SessionLocal()` per tool call trong `mcp_native` (Q4) — N coordinator đồng thời; chỉnh pool_size nếu cần.
 
 ### B1.8 — Chứng minh flow người dùng trước khi chặt cầu (Q3)
