@@ -73,3 +73,11 @@ backend/venv/bin/python -m pytest backend/tests -q
 Đặc tả đầy đủ (và luôn phải phản ánh hiện trạng code) ở `docs/spec/01..07`
 — bắt đầu từ `docs/README.md`. Đổi hành vi hệ thống thì cập nhật spec tương ứng
 trong cùng PR. Backlog sống: `docs/plans/GD4-CLEANUP-PLAN.md`.
+
+## Cho AI agent
+
+**ĐỌC `docs/AGENT-PLAYBOOK.md` TRƯỚC KHI LÀM BẤT CỨ VIỆC GÌ** — đó là ký ức
+làm việc chưng cất từ các phiên trước: vòng lặp giải quyết vấn đề, bộ đồ nghề
+riêng của dự án, cách điều phối task qua chính hệ thống, các họ bug đặc trưng,
+và kỳ vọng của lupca (sửa luôn không hỏi, không dùng fable/claude-review/agy,
+DB là source of truth, mọi việc ghi thành task CTV2-xxx).
