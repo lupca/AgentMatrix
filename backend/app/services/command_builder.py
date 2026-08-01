@@ -8,6 +8,8 @@ import shlex
 import tempfile
 from typing import Optional
 
+from sqlalchemy.orm import Session
+
 from app.db.models import Agent, Project, Task
 from app.core.config import settings
 from app.services.cli_dispatcher import build_mcp_config
@@ -35,6 +37,7 @@ def build_dispatch_command(
     agent: Agent,
     project: Optional[Project] = None,
     effort: Optional[str] = None,
+    db: Optional[Session] = None,
 ) -> tuple[str, str, str]:
     cli = (agent.cli or _infer_cli(agent.model, agent.id)).strip().lower()
     if cli not in SUPPORTED_CLIS:
@@ -53,6 +56,7 @@ def build_dispatch_command(
     resolved_effort = effort or agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
     prompt = _task_prompt(task, review_result_path(repo_root, task.id))
+    prompt = _inject_project_context(prompt, project, task, db)
     if cli == "codex":
         argv = ["codex", "exec"]
         if agent.model:
@@ -87,6 +91,7 @@ def build_review_command(
     project: Optional[Project],
     base_ref: str,
     head_ref: str,
+    db: Optional[Session] = None,
 ) -> tuple[str, str, str]:
     """Build the CLI invocation for a real ``/code-review`` run.
 
@@ -115,6 +120,7 @@ def build_review_command(
     prompt = _review_prompt(
         task, base_ref, head_ref, review_result_path(repo_root, task.id)
     )
+    prompt = _inject_project_context(prompt, project, task, db)
     resolved_effort = agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
     if cli == "codex":
@@ -171,6 +177,38 @@ def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -
         "read-only: do not create commits or alter refs."
     )
     return "\n\n".join(sections)
+
+
+def _inject_project_context(
+    prompt: str,
+    project: Optional[Project],
+    task: Task,
+    db: Optional[Session],
+) -> str:
+    """Prepend project context/rules sections to ``prompt`` when available.
+
+    Purely opportunistic and additive: a project with no context_md and no
+    matching rules leaves ``prompt`` byte-identical.
+    """
+    sections: list[str] = []
+
+    if project is not None and project.context_md:
+        sections.append(f"[Project Context]\n{project.context_md}")
+
+    if db is not None and project is not None:
+        from app.services.context_generator import get_matching_rules
+
+        matching_rules = get_matching_rules(db, project.id, task.files)
+        if matching_rules:
+            rules_text = "\n\n".join(
+                f"## {rule.name}\n{rule.content}" for rule in matching_rules
+            )
+            sections.append(f"[Project Rules]\n{rules_text}")
+
+    if not sections:
+        return prompt
+
+    return "\n\n".join(sections + [prompt])
 
 
 def _infer_cli(model: str | None, agent_id: str) -> str:

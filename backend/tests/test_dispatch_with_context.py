@@ -30,8 +30,16 @@ class TestDispatchWithContext:
             id="r-py",
             project_id="proj-full-ctx",
             name="Python Rule",
-            globs=["**/*.py"],
+            globs=["*/**/*.py", "*.py"],
             content="Use type hints",
+            priority=5,
+        )
+        rule_ts = ProjectRule(
+            id="r-ts",
+            project_id="proj-full-ctx",
+            name="Typescript Rule",
+            globs=["*/**/*.ts", "*.ts"],
+            content="Never use any",
             priority=5,
         )
         task = Task(
@@ -43,11 +51,16 @@ class TestDispatchWithContext:
             files=["app/main.py"],
         )
         agent = Agent(id="agent-1", name="Executor Agent", role="executor", model="claude-sonnet")
-        db_session.add_all([project, rule_all, rule_py, task, agent])
+        db_session.add_all([project, rule_all, rule_py, rule_ts, task, agent])
         db_session.flush()
 
-        command, repo_root, cli = build_dispatch_command(task, agent, project)
+        command, repo_root, cli = build_dispatch_command(task, agent, project, db=db_session)
 
         assert cli == "claude"
         assert repo_root == "/tmp"
         assert "Execute task task-3: Update API" in command
+        assert "[Project Context]" in command
+        assert "FastAPI + Postgres" in command
+        assert "Never break production" in command
+        assert "Use type hints" in command
+        assert "Never use any" not in command
