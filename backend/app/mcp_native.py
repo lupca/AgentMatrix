@@ -264,6 +264,25 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
                 "kind": f"admin:{row.entity}/{row.action}",
                 "waiting_since": row.created_at.isoformat() if row.created_at else None,
             })
+        # Escalations (safety brake, invalid review result) raise
+        # awaiting_approval WITHOUT a gate record (CTV2-221). In auto mode
+        # these are the only human decisions there are — without this branch
+        # the reminder list stays empty exactly when a human is needed most.
+        gated_tasks = {p["id"] for p in pending}
+        for row in (
+            db.query(Task)
+            .filter(Task.awaiting_approval.is_(True))
+            .order_by(Task.updated_at.asc())
+            .limit(5)
+        ):
+            if row.id in gated_tasks:
+                continue
+            pending.append({
+                "id": row.id,
+                "kind": "task:escalation",
+                "prompt": (row.approval_prompt or "")[:160] or None,
+                "waiting_since": row.updated_at.isoformat() if row.updated_at else None,
+            })
     except Exception:  # a broken reminder must never break the tool call
         return []
     return pending
