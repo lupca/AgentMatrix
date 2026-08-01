@@ -412,7 +412,16 @@ class CommandRouter:
             gate_id = args.get('gate_record_id', args.get('task_id'))
             if gate_id is None:
                 return {'error': 'gate_record_id is required'}
-            command_args = str(gate_id)
+            # The decision must survive the JSON->string mapping: dropping it
+            # silently turned every human veto into an approval (CTV2-233).
+            decision = str(args.get('decision', 'approved') or 'approved').strip().lower()
+            if decision in {'approve', 'approved', 'yes', 'y'}:
+                decision = 'approved'
+            elif decision in {'reject', 'rejected', 'no', 'n', 'deny', 'denied'}:
+                decision = 'rejected'
+            else:
+                return {'error': f"Unsupported decision {decision!r}: use 'approved' or 'rejected'"}
+            command_args = f'{gate_id} {decision}'
         elif canonical_name == 'cancel_task':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:

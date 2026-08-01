@@ -266,6 +266,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "type": "string",
                         "description": "Task whose pending gate to approve (fallback when gate_record_id is unknown).",
                     },
+                    "decision": {
+                        "type": "string",
+                        "enum": ["approved", "rejected"],
+                        "description": "Human decision for the gate; defaults to approved.",
+                    },
                 },
                 "required": [],
             },
