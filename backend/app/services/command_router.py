@@ -1369,8 +1369,23 @@ class CommandRouter:
 
         repo_root, _error = self._research_repo_root(session_id)
 
+        # Feed the planner the same project context executors get — a
+        # planner that ignores the repo's conventions plans against them.
+        project = self.db.get(Project, task.project) if task.project else None
+        context_parts: list[str] = []
+        if project is not None and (project.context_md or '').strip():
+            context_parts.append(project.context_md.strip())
+        if project is not None:
+            from app.services.context_generator import get_matching_rules
+
+            for rule in get_matching_rules(self.db, project.id, task.files or None):
+                context_parts.append(f"## Rule: {rule.name}\n{rule.content}")
+        project_context = "\n\n".join(context_parts) or None
+
         try:
-            result, flows = await generate_spec_plan(task, repo_root, agent)
+            result, flows = await generate_spec_plan(
+                task, repo_root, agent, project_context=project_context
+            )
         except (SpecPlanGenerationError, ConfigurationError) as exc:
             return {'error': str(exc)}
 

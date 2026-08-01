@@ -133,3 +133,32 @@ def test_parse_json_extracts_object_from_surrounding_prose():
 
     prose = 'Here is the plan you asked for:\n{"a": [1, 2]}\nHope it helps!'
     assert _parse_json(prose) == {"a": [1, 2]}
+
+
+def test_prompt_includes_description_context_and_quality_bars():
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_prompt
+
+    task = Task(
+        id="T-1", project="p1", title="Add login rate limiting",
+        raw_input="Limit to 5 attempts per minute per IP using the existing redis client.",
+    )
+    prompt = _build_prompt(
+        task, ["app/auth.py"],
+        project_context="# Project: p1\n## Hard Boundaries\n- never bypass the gate ledger",
+    )
+    assert "existing redis client" in prompt          # raw_input reaches the planner
+    assert "never bypass the gate ledger" in prompt   # project context injected
+    assert "objectively verifiable" in prompt         # anti-vacuous AC bar
+    assert "Open questions" in prompt                 # thin-input escape hatch
+    assert "Scope" in prompt
+
+
+def test_prompt_without_description_or_context_still_valid():
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_prompt
+
+    task = Task(id="T-2", project="p1", title="Tiny fix")
+    prompt = _build_prompt(task, [])
+    assert "Task description:" not in prompt
+    assert "Project context" not in prompt

@@ -26,7 +26,13 @@ class SpecPlanGenerationError(RuntimeError):
     """The LLM did not produce a schema-valid spec/plan after retrying."""
 
 
-def _build_prompt(task: Task, graph_candidates: list[str], *, retry_reason: str | None = None) -> str:
+def _build_prompt(
+    task: Task,
+    graph_candidates: list[str],
+    *,
+    retry_reason: str | None = None,
+    project_context: str | None = None,
+) -> str:
     candidates = "\n".join(f"- {c}" for c in graph_candidates) or "(none found)"
     retry_note = (
         f"\nYour previous reply was rejected: {retry_reason}. "
@@ -34,21 +40,43 @@ def _build_prompt(task: Task, graph_candidates: list[str], *, retry_reason: str 
         if retry_reason
         else ""
     )
+    # The task description is the single most important planning input — a
+    # planner that only sees the title invents plausible-but-wrong work
+    # (observed live: VOMA-001).
+    details = (task.raw_input or "").strip()
+    details_block = f"Task description:\n{details}\n\n" if details else ""
+    context_block = (
+        f"Project context (conventions and hard boundaries — respect them):\n"
+        f"{project_context.strip()}\n\n"
+        if project_context and project_context.strip()
+        else ""
+    )
     return (
         "You are a software spec/plan generator for a task-coordination system.\n"
         f"Task title: {task.title}\n"
         f"Project: {task.project}\n\n"
+        f"{details_block}"
+        f"{context_block}"
         "Files the code graph reports as relevant to this area (prefer these; "
         "you may name others but they will be marked unconfirmed):\n"
         f"{candidates}\n"
         f"{retry_note}\n"
         "Respond with ONLY a valid JSON object (no markdown fences) with keys:\n"
         f'  "schema_version": "{SPEC_PLAN_RESULT_SCHEMA_VERSION}"\n'
-        '  "acceptance_criteria": list of 2-6 specific, testable string criteria\n'
-        '  "plan": a concise step-by-step implementation plan (string)\n'
+        '  "acceptance_criteria": list of 2-6 criteria. Each MUST be '
+        "objectively verifiable by a reviewer (name the observable outcome, "
+        "file, or command output — never vague like 'code is clean' or "
+        "restating the title)\n"
+        '  "plan": one string structured as: a 1-2 sentence intent; "Scope — '
+        'in:/out:"; then 4-10 ordered, verb-first, atomic steps '
+        "(discovery -> changes -> tests -> verification), each naming likely "
+        "files or commands; end with \"Open questions:\" (max 3, or 'none')\n"
         '  "files": list of file paths this task will likely touch\n'
         '  "tests": list of test file paths/commands that verify this task\n'
-        '  "risk": one of "low", "medium", "high"\n'
+        '  "risk": one of "low", "medium", "high"\n\n'
+        "Base the plan ONLY on the information above — if the description is "
+        "too thin to plan responsibly, put what you need to know into Open "
+        "questions instead of inventing scope.\n"
     )
 
 
@@ -73,7 +101,10 @@ def _parse_json(content: str) -> dict:
 
 
 async def generate_spec_plan(
-    task: Task, repo_root: str | None, agent: Agent
+    task: Task,
+    repo_root: str | None,
+    agent: Agent,
+    project_context: str | None = None,
 ) -> tuple[SpecPlanResult, list[str]]:
     """Call the LLM once (with one retry on schema mismatch) and ground its
     file claims and flows in the code graph. Returns (result, flows).
@@ -108,7 +139,12 @@ async def generate_spec_plan(
     last_error: Exception | None = None
 
     for _ in range(_MAX_ATTEMPTS):
-        prompt = _build_prompt(task, graph_candidates, retry_reason=retry_reason)
+        prompt = _build_prompt(
+            task,
+            graph_candidates,
+            retry_reason=retry_reason,
+            project_context=project_context,
+        )
         response = await llm.complete(
             agent,
             [{"role": "user", "content": prompt}],
