@@ -199,6 +199,11 @@ def update_agent(db: Session, agent_id: str, data: dict[str, Any]) -> Agent:
         for k, v in data.items()
         if k in _AGENT_UPDATE_FIELDS or k in {"api_key", "api_key_encrypted", "base_url"}
     }
+    if not patch and not ("api_key" in data or "api_key_encrypted" in data):
+        raise EntityValidationError(
+            "Agent update contains no updatable fields; allowed: "
+            + ", ".join(sorted(_AGENT_UPDATE_FIELDS | {"api_key", "base_url"}))
+        )
     api_key_was_provided = "api_key" in patch or "api_key_encrypted" in patch
     api_key = patch.pop("api_key", None)
     api_key_encrypted = patch.pop("api_key_encrypted", None)

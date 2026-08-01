@@ -219,11 +219,21 @@ class AdminGateService:
             raise AdminPrerequisiteError(str(exc)) from exc
         return obj.id, output
 
+    @staticmethod
+    def _patch_of(payload: dict[str, Any]) -> dict[str, Any]:
+        """Accept both the flat form and the documented {id, patch} form.
+
+        The nested form used to fall through the field whitelist untouched —
+        an approved update gate silently changed nothing.
+        """
+        patch = payload.get("patch")
+        return patch if isinstance(patch, dict) else payload
+
     def _apply_project(self, action: str, entity_id: str | None, payload: dict[str, Any]):
         if action == "create":
             return entity_admin.create_project(self.db, payload)
         if action == "update":
-            return entity_admin.update_project(self.db, entity_id, payload)
+            return entity_admin.update_project(self.db, entity_id, self._patch_of(payload))
         if action == "archive":
             ArchiveService(self.db, "admin_gate").archive_project(entity_id)
         else:
@@ -234,7 +244,7 @@ class AdminGateService:
         if action == "create":
             return entity_admin.create_agent(self.db, payload)
         if action == "update":
-            return entity_admin.update_agent(self.db, entity_id, payload)
+            return entity_admin.update_agent(self.db, entity_id, self._patch_of(payload))
         if action == "disable":
             return entity_admin.disable_agent(self.db, entity_id)
         if action == "archive":
@@ -247,7 +257,7 @@ class AdminGateService:
         if action == "create":
             return entity_admin.create_knowledge(self.db, payload)
         if action == "update":
-            return entity_admin.update_knowledge(self.db, entity_id, payload)
+            return entity_admin.update_knowledge(self.db, entity_id, self._patch_of(payload))
         if action == "archive":
             ArchiveService(self.db, "admin_gate").archive("knowledge", entity_id)
         else:
