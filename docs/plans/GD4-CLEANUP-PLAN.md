@@ -64,6 +64,11 @@ Chi tiết từng vấn đề ở dạng task file tại `~/projects/control-tow
 - CTV2-235 (med): task read-only (context-gen, research) không có đường done — RESULT_REF bắt buộc commit nên run bị fail dù hoàn thành việc; cần loại task không-commit hoặc RESULT_REF: none hợp lệ.
 - Fix thêm: glob `**/` không match con trực tiếp (fnmatch) → rules không bao giờ inject; đã sửa + test (765c165).
 
+**Phát hiện tối 2026-08-01 (từ phiên coordinator voma-invoice, /tmp/convention.txt):**
+- CTV2-236 (critical, ĐÃ SỬA b9e7631): `generate_spec_plan` chết cả 2 đường — CLI không truyền `--effort` (agy exit 1 với gemini-3.6-flash vốn bắt buộc effort); API không parse được reasoning model (`<think>…</think>{json}` chết char 0, max_tokens 1200 quá bé). Verify sống: VOMA-001 sinh plan ok bằng cả agy lẫn DeepSeek/SiliconFlow.
+- CTV2-237 (critical, ĐÃ SỬA 57641e0): admin gate update dạng `{id, patch}` là no-op lặng lẽ — whitelist lọc key phẳng, patch lồng bị vứt sạch, approve xong không đổi gì; giờ unwrap + reject update rỗng.
+- ct_readonly_user thiếu SELECT trên bảng mới (query_db "permission denied for table agents") — đã GRANT + default privileges; cần đưa vào `create-readonly-role.sh`.
+
 ## P2 — Bước 3 + backlog tồn đọng
 
 ### Code chết & mồ côi
