@@ -41,7 +41,7 @@ IMPORTANT:
 - Focus on conventions and constraints, not descriptions
 - Hard boundaries = things that will break if violated
 
-After scanning, call `save_project_context` with project_id="{project_id}".
+After scanning, call `save_project_context` with task_id="{task_id}" and project_id="{project_id}".
 """
 
 

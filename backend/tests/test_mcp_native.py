@@ -83,3 +83,76 @@ async def test_tool_call_without_token_is_unauthorized(monkeypatch):
         body = json.loads(result.content[0].text)
     assert body["ok"] is False
     assert body["error"]["code"] == "unauthorized"
+
+
+@pytest.mark.asyncio
+async def test_save_project_context_executor_token_matching_task_id_succeeds(monkeypatch):
+    """Regression for F1: the ToolSpec for save_project_context had no task_id
+    parameter, so _task_scope_ok rejected every executor call with
+    task_scope_violation before the handler ever ran."""
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="p1", name="P", repo_root="/tmp"))
+    seed.add(Task(id="task-1", title="One", project="p1", status="dispatched"))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+
+    token = issue_token("test-secret", role="executor", task_id="task-1")
+    server = build_server(default_token=token)
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "save_project_context",
+            {
+                "task_id": "task-1",
+                "project_id": "p1",
+                "context_md": "# Stack\nFastAPI",
+                "rules": [],
+            },
+        )
+        body = json.loads(result.content[0].text)
+
+    assert body["ok"] is True, body
+    assert body["data"]["status"] == "success"
+    assert body["data"]["project_id"] == "p1"
+
+
+@pytest.mark.asyncio
+async def test_save_project_context_executor_token_mismatched_task_id_rejected(monkeypatch):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="p1", name="P", repo_root="/tmp"))
+    seed.add(Task(id="task-1", title="One", project="p1", status="dispatched"))
+    seed.add(Task(id="task-2", title="Two", project="p1", status="dispatched"))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+
+    token = issue_token("test-secret", role="executor", task_id="task-1")
+    server = build_server(default_token=token)
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "save_project_context",
+            {
+                "task_id": "task-2",
+                "project_id": "p1",
+                "context_md": "# Stack\nFastAPI",
+                "rules": [],
+            },
+        )
+        body = json.loads(result.content[0].text)
+
+    assert body["ok"] is False, body
+    assert body["error"]["code"] == "task_scope_violation"

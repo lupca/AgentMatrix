@@ -477,6 +477,21 @@ class CommandRouter:
             if not file:
                 return {'error': 'file is required'}
             command_args = file
+        elif canonical_name == 'save_project_context':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            project_id = str(args.get('project_id', '')).strip()
+            if not project_id:
+                return {'error': 'project_id is required'}
+            if 'context_md' not in args:
+                return {'error': 'context_md is required'}
+            command_args = json.dumps({
+                'task_id': task_id,
+                'project_id': project_id,
+                'context_md': args.get('context_md'),
+                'rules': args.get('rules') or [],
+            }, ensure_ascii=False)
         else:
             return {'error': f'Unknown tool: {tool_name}'}
 
@@ -792,6 +807,92 @@ class CommandRouter:
         except Exception as exc:
             return self._research_error(exc)
         return {'status': 'success', 'repo_root': repo_root, 'files': result}
+
+    async def _handle_save_project_context(self, args: str, session_id: str) -> dict:
+        import uuid
+        from app.db.models import ProjectRule
+
+        try:
+            payload = json.loads(args)
+        except (json.JSONDecodeError, TypeError):
+            return {'error': 'Invalid arguments for save_project_context'}
+
+        task_id = str(payload.get('task_id', '')).strip()
+        if not task_id:
+            return {'error': 'task_id is required'}
+
+        project_id = str(payload.get('project_id', '')).strip()
+        if not project_id:
+            return {'error': 'project_id is required'}
+
+        context_md = payload.get('context_md')
+        if not isinstance(context_md, str) or not context_md.strip():
+            return {'error': 'context_md is required'}
+
+        rules = payload.get('rules') or []
+        if not isinstance(rules, list):
+            return {'error': 'rules must be a list'}
+
+        project = self.db.get(Project, project_id)
+        if project is None:
+            return {'error': f'Project {project_id} not found'}
+
+        context_lines = context_md.splitlines()
+        if len(context_lines) > 150:
+            return {
+                'error': (
+                    f'context_md must be at most 150 lines, got {len(context_lines)}'
+                )
+            }
+
+        if len(rules) > 5:
+            return {'error': f'rules must contain at most 5 entries, got {len(rules)}'}
+
+        parsed_rules: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+        for idx, rule in enumerate(rules):
+            if not isinstance(rule, Mapping):
+                return {'error': f'rule at index {idx} must be an object'}
+            name = str(rule.get('name', '')).strip()
+            content = rule.get('content')
+            if not name:
+                return {'error': f'rule at index {idx} is missing a name'}
+            if name in seen_names:
+                return {'error': f"duplicate rule name '{name}'; rule names must be unique"}
+            seen_names.add(name)
+            if not isinstance(content, str) or not content.strip():
+                return {'error': f"rule '{name}' is missing content"}
+            globs = rule.get('globs') or []
+            if not isinstance(globs, list):
+                return {'error': f"rule '{name}' globs must be a list"}
+            parsed_rules.append({
+                'name': name,
+                'globs': list(globs),
+                'content': content[:3000],
+            })
+
+        project.context_md = context_md
+        project.context_generated = True
+
+        self.db.query(ProjectRule).filter(ProjectRule.project_id == project_id).delete()
+        for rule in parsed_rules:
+            self.db.add(ProjectRule(
+                id=f'rule-{uuid.uuid4().hex[:12]}',
+                project_id=project_id,
+                name=rule['name'],
+                globs=rule['globs'],
+                content=rule['content'],
+            ))
+
+        self.db.commit()
+
+        return {
+            'status': 'success',
+            'task_id': task_id,
+            'project_id': project_id,
+            'context_lines': len(context_lines),
+            'rules_count': len(parsed_rules),
+        }
 
     async def _handle_query_db(self, args: str, session_id: str) -> dict:
         try:

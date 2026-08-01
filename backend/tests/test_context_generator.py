@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from app.db.models import Project, ProjectRule, Task, Agent
 from app.services.command_router import CommandRouter
@@ -86,6 +88,112 @@ class TestContextChecker:
         assert result["ready"] is True
         assert result["has_context"] is True
         assert result["has_rules"] is True
+
+
+class TestSaveProjectContext:
+    async def _call(self, router, project_id, context_md, rules=None, task_id="task-save-1"):
+        args = json.dumps({
+            "task_id": task_id,
+            "project_id": project_id,
+            "context_md": context_md,
+            "rules": rules or [],
+        })
+        return await router.execute("save_project_context", args, "session-1")
+
+    @pytest.mark.asyncio
+    async def test_save_success(self, db_session):
+        project = Project(id="proj-save-1", name="Save Test")
+        db_session.add(project)
+        db_session.flush()
+
+        router = CommandRouter(db_session)
+        result = await self._call(
+            router,
+            "proj-save-1",
+            "# Context\nSome content",
+            rules=[{"name": "rule1", "globs": ["*.py"], "content": "content 1"}],
+        )
+
+        assert result["status"] == "success"
+        assert result["task_id"] == "task-save-1"
+        assert result["project_id"] == "proj-save-1"
+        assert result["context_lines"] == 2
+        assert result["rules_count"] == 1
+
+        db_session.refresh(project)
+        assert project.context_md == "# Context\nSome content"
+        assert project.context_generated is True
+        rules = db_session.query(ProjectRule).filter_by(project_id="proj-save-1").all()
+        assert len(rules) == 1
+        assert rules[0].name == "rule1"
+
+    @pytest.mark.asyncio
+    async def test_save_rejects_context_over_150_lines(self, db_session):
+        project = Project(id="proj-save-2", name="Too Long")
+        db_session.add(project)
+        db_session.flush()
+
+        router = CommandRouter(db_session)
+        too_long = "\n".join(f"line {i}" for i in range(151))
+        result = await self._call(router, "proj-save-2", too_long)
+
+        assert "error" in result
+        db_session.refresh(project)
+        assert project.context_md is None
+        assert project.context_generated is False
+
+    @pytest.mark.asyncio
+    async def test_save_replaces_existing_rules(self, db_session):
+        project = Project(id="proj-save-3", name="Replace Test")
+        db_session.add(project)
+        db_session.flush()
+
+        router = CommandRouter(db_session)
+        await self._call(
+            router,
+            "proj-save-3",
+            "# Context v1",
+            rules=[{"name": "old-rule", "globs": [], "content": "old content"}],
+        )
+
+        await self._call(
+            router,
+            "proj-save-3",
+            "# Context v2",
+            rules=[{"name": "new-rule", "globs": [], "content": "new content"}],
+        )
+
+        rules = db_session.query(ProjectRule).filter_by(project_id="proj-save-3").all()
+        assert len(rules) == 1
+        assert rules[0].name == "new-rule"
+        names = [r.name for r in rules]
+        assert "old-rule" not in names
+
+    @pytest.mark.asyncio
+    async def test_save_rejects_duplicate_rule_names(self, db_session):
+        project = Project(id="proj-save-4", name="Dup Test")
+        db_session.add(project)
+        db_session.flush()
+
+        router = CommandRouter(db_session)
+        result = await self._call(
+            router,
+            "proj-save-4",
+            "# Context",
+            rules=[
+                {"name": "dup-rule", "globs": [], "content": "content a"},
+                {"name": "dup-rule", "globs": [], "content": "content b"},
+            ],
+        )
+
+        assert "error" in result
+        assert "dup-rule" in result["error"]
+
+        db_session.refresh(project)
+        assert project.context_md is None
+        assert project.context_generated is False
+        rules = db_session.query(ProjectRule).filter_by(project_id="proj-save-4").all()
+        assert len(rules) == 0
 
 
 
