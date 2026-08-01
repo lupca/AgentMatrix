@@ -68,12 +68,12 @@ REST path gọi `invalidate_context_snapshot` sau mỗi tool call (`chat.py:82`)
 - [x] Dockerfile/compose chuyển sang `db + redis + mcp + worker`, không còn frontend.
 
 ### B1.7 — DDL & test harness (M6 + M0)
-- [ ] Xác nhận alembic phủ toàn bộ DDL (main.py:21 `create_all` chỉ là belt-and-braces). `tests/conftest.py` tự lo `create_all` cho test DB nếu đang dựa gián tiếp vào import `app.main`.
+- [x] Xác nhận Alembic head `033_task_event_schema_v2`; bổ sung model `ProjectRule`/`Project.context_generated` khớp migration 032. `tests/conftest.py` tự lo `create_all` cho test DB.
 - [x] Sửa `tests/conftest.py`: bỏ `TestClient`, `app.main` và fixture REST `client`.
 - [ ] Load-check nhẹ cho `SessionLocal()` per tool call trong `mcp_native` (Q4) — N coordinator đồng thời; chỉnh pool_size nếu cần.
 
 ### B1.8 — Chứng minh flow người dùng trước khi chặt cầu (Q3)
-- [ ] Chạy thật một phiên coordinator CLI (Claude Code hoặc agy) nối `:8100`: tạo task → dispatch (supervised, human approve qua chat) → review → done, **không chạm REST**. Đây là điều kiện tiên quyết để sang Bước 2.
+- [ ] Chạy thật một phiên coordinator CLI (Claude Code hoặc agy) nối `:8100`: tạo task → dispatch (supervised, human approve qua chat) → review → done, **không chạm REST**. Hiện đã xác nhận CLI có sẵn và `/health` native hoạt động; còn thiếu phiên/project/agent thực tế và credential để chạy flow này.
 
 ## Bước 2 — Xóa (một PR, sau khi Bước 1 xanh)
 
