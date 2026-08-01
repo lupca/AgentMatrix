@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 Tier = Literal["eager", "deferred"]
 Permission = Literal["read", "write", "admin"]
+Role = Literal["coordinator", "executor"]
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class ToolSpec:
     entity: str
     slash_alias: str | None
     group: str
+    required_role: Role = "coordinator"
 
 
 # Deferred-tool groups loadable via the ``load_tools`` meta-tool (ADR-001
@@ -87,6 +89,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             entity="tasks",
             slash_alias="/status",
             group="query",
+            required_role="executor",
         ),
         ToolSpec(
             name="query_db",
@@ -490,6 +493,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             entity="research",
             slash_alias=None,
             group="research",
+            required_role="executor",
         ),
         ToolSpec(
             name="get_impact_radius",
@@ -507,6 +511,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             entity="research",
             slash_alias=None,
             group="research",
+            required_role="executor",
         ),
         ToolSpec(
             name="load_tools",

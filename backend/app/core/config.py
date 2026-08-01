@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     # the coordinator chat CLI's MCP subprocess reaches this API on. Empty
     # token means the endpoint stays closed (fail-closed default).
     MCP_API_TOKEN: str = ""
+    MCP_TOKEN_SECRET: str = ""
+    MCP_NATIVE_URL: str = "http://localhost:8100/mcp"
     CT_API_URL: str = "http://localhost:8000"
 
     class Config:

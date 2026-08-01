@@ -21,6 +21,8 @@ from app.services.process_manager import ProcessManager, ProcessResult, ProcessS
 
 
 SUPPORTED_CLIS = {"agy", "claude", "codex"}
+INSTRUCTION_FILES = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "agy": "PROJECT.md"}
+COORDINATOR_RULES_PATH = "docs/coordinator-rules.md"
 
 
 @dataclass(frozen=True)
@@ -168,7 +170,10 @@ def build_cli_command(
     return shlex.join(argv)
 
 
-def build_mcp_config(api_url: str, token: str) -> dict[str, Any]:
+def build_mcp_config(
+    api_url: str, token: str, *, native_url: str | None = None,
+    role: str = "coordinator",
+) -> dict[str, Any]:
     """MCP config registering the Control Tower projection (ADR-001 §D5).
 
     Uses the ``mcpServers`` shape shared by claude/codex/agy: a stdio server
@@ -176,6 +181,11 @@ def build_mcp_config(api_url: str, token: str) -> dict[str, Any]:
     token so its handlers can call ``POST /api/mcp/tools/call``.
     """
 
+    if native_url:
+        return {"mcpServers": {"control-tower": {
+            "type": "http", "url": native_url,
+            "headers": {"Authorization": f"Bearer {token}", "X-CT-Role": role},
+        }}}
     return {
         "mcpServers": {
             "control-tower": {
@@ -185,6 +195,43 @@ def build_mcp_config(api_url: str, token: str) -> dict[str, Any]:
             }
         }
     }
+
+
+def build_instruction_text(source: str) -> str:
+    """Create the compact CLI instruction payload from one canonical source."""
+
+    summary = (
+        "Control Tower coordinator: use MCP tools only; follow task state "
+        "todo→dispatched→awaiting-review→in-review→done; obey four-eyes; "
+        "read and follow `next` in every tool result.\n\n"
+    )
+    body = source.strip()
+    text = summary + body
+    if len(text) > 2048:
+        text = text[:2048].rsplit("\n", 1)[0].rstrip() + "\n"
+    return text
+
+
+def write_instruction_files(workspace: str, source_path: str | None = None) -> dict[str, str]:
+    """Write Claude/Codex/agy instruction files from one source document.
+
+    Existing files are replaced intentionally: these are generated projections
+    and must not drift. ``GEMINI.md`` is never generated.
+    """
+
+    root = os.path.abspath(workspace)
+    canonical = source_path or os.path.join(root, COORDINATOR_RULES_PATH)
+    if not os.path.exists(canonical):
+        canonical = os.path.join(root, "README.md")
+    with open(canonical, encoding="utf-8") as fh:
+        content = build_instruction_text(fh.read())
+    written: dict[str, str] = {}
+    for cli, filename in INSTRUCTION_FILES.items():
+        path = os.path.join(root, filename)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        written[cli] = path
+    return written
 
 
 def write_mcp_config(api_url: str, token: str) -> str:
@@ -204,6 +251,13 @@ def write_mcp_config(api_url: str, token: str) -> str:
         os.unlink(path)
         raise
     return path
+
+
+def write_coordinator_instruction_files(workspace: str) -> dict[str, str]:
+    """Generate CLAUDE.md, AGENTS.md and PROJECT.md from canonical rules."""
+
+    source = os.path.join(workspace, COORDINATOR_RULES_PATH)
+    return write_instruction_files(workspace, source)
 
 
 class CLIDispatcher:
