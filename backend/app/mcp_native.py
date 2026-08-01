@@ -17,6 +17,8 @@ import inspect
 import json
 import os
 import re
+import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -25,6 +27,7 @@ from fastmcp.tools.function_tool import FunctionTool
 
 from app.core.config import settings
 from app.db.base import SessionLocal
+from app.db.models import Session as SessionModel, Task
 from app.graph.context import invalidate_context_snapshot
 from app.services.command_router import CommandRouter
 from app.services.tool_registry import ToolSpec, get_mcp_tool_specs
@@ -39,6 +42,8 @@ class TokenClaims:
     role: str
     task_id: str | None = None
     token_id: str | None = None
+    session_id: str | None = None
+    exp: int = 0
 
 
 def _b64_json(value: Mapping[str, Any]) -> str:
@@ -48,13 +53,21 @@ def _b64_json(value: Mapping[str, Any]) -> str:
 
 def issue_token(
     secret: str, *, role: str = "coordinator", task_id: str | None = None,
-    token_id: str | None = None,
+    token_id: str | None = None, session_id: str | None = None,
+    ttl_seconds: int | None = None,
 ) -> str:
     """Issue a compact HMAC-signed token for the native MCP endpoint."""
 
     if role not in ROLES:
         raise ValueError(f"role must be one of {sorted(ROLES)}")
-    payload = {"role": role}
+    if not secret:
+        raise ValueError("secret is required")
+    ttl = ttl_seconds if ttl_seconds is not None else (3600 if role == "coordinator" else 900)
+    if ttl <= 0:
+        raise ValueError("ttl_seconds must be greater than zero")
+    token_id = token_id or f"mcp-{uuid.uuid4()}"
+    session_id = session_id or token_id
+    payload = {"role": role, "token_id": token_id, "session_id": session_id, "exp": int(time.time()) + ttl}
     if task_id:
         payload["task_id"] = task_id
     if token_id:
@@ -84,10 +97,16 @@ def authenticate_token(
         return None
     if not hmac.compare_digest(actual, expected):
         return None
-    if payload.get("role") not in ROLES:
+    if payload.get("role") not in ROLES or not payload.get("token_id") or not payload.get("session_id"):
+        return None
+    try:
+        if int(payload.get("exp", 0)) <= int(time.time()):
+            return None
+    except (TypeError, ValueError):
         return None
     return TokenClaims(
-        role=payload["role"], task_id=payload.get("task_id"), token_id=payload.get("token_id")
+        role=payload["role"], task_id=payload.get("task_id"),
+        token_id=payload["token_id"], session_id=payload["session_id"], exp=int(payload["exp"]),
     )
 
 
@@ -159,6 +178,22 @@ def envelope(result: Mapping[str, Any], *, next_step: str | None = None) -> dict
     return {"ok": True, "data": dict(result), **({"next": next_step} if next_step else {})}
 
 
+def _ensure_session(db, claims: TokenClaims) -> str:
+    """Give every native token a real router session, including executor tokens."""
+    session_id = claims.session_id or claims.token_id or "mcp"
+    if db.get(SessionModel, session_id) is not None:
+        return session_id
+    task = db.get(Task, claims.task_id) if claims.task_id else None
+    db.add(SessionModel(
+        id=session_id, thread_id=session_id, title=f"MCP {claims.role}",
+        context_level="task" if task else "global",
+        project_id=task.project if task else None,
+        task_id=task.id if task else None, messages=[], status="active",
+    ))
+    db.commit()
+    return session_id
+
+
 def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
     async def handler(context: Context, **kwargs: Any) -> dict[str, Any]:
         claims = await _claims_from_context(context, default_token)
@@ -170,7 +205,8 @@ def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
             return {"ok": False, "data": None, "error": {"code": "task_scope_violation", "message": "Executor token is scoped to a different task"}}
         db = SessionLocal()
         try:
-            result = await CommandRouter(db).execute_tool(spec.name, kwargs, claims.token_id or "mcp")
+            session_id = _ensure_session(db, claims)
+            result = await CommandRouter(db).execute_tool(spec.name, kwargs, session_id)
             # Native calls bypass the REST endpoint, so invalidate the same
             # context cache the old /api/mcp/tools/call path invalidated.
             invalidate_context_snapshot(db, project_id=None)
@@ -238,6 +274,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    if not settings.MCP_TOKEN_SECRET:
+        raise SystemExit("MCP_TOKEN_SECRET is required")
     import uvicorn
 
     uvicorn.run(build_http_app(default_token=args.token), host=args.host, port=args.port)

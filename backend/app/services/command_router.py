@@ -2,6 +2,7 @@ import re
 import hashlib
 import json
 import os
+import logging
 from collections.abc import Mapping
 from typing import Any, Tuple, Optional
 from app.db.models import (
@@ -26,6 +27,8 @@ from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
 )
+
+logger = logging.getLogger(__name__)
 from app.services.tool_registry import (
     DEFERRED_GROUPS,
     TOOL_REGISTRY,
@@ -1092,6 +1095,7 @@ class CommandRouter:
                 )
                 self.db.refresh(result.task)
                 return {'error': error, 'run_id': run.id, 'task': self._task_snapshot(result.task)}
+        nudged: bool | None = None
         if result.applied:
             # The REST endpoint nudges the orchestration driver after an
             # approval. Native MCP approvals must wake it as well; the
@@ -1099,13 +1103,21 @@ class CommandRouter:
             try:
                 advance_task.send(result.task.id, "gate_approved")
             except Exception:
-                pass
+                nudged = False
+                logger.warning(
+                    "Failed to nudge orchestration driver after gate approval task=%s",
+                    result.task.id,
+                    exc_info=True,
+                )
+            else:
+                nudged = True
         return {
             'action': 'gate_decision',
             'task_id': result.task.id,
             'decision': result.status,
             'new_status': result.task.status,
             'run_id': run.id if run is not None else None,
+            'nudged': nudged,
             'task': self._task_snapshot(result.task),
         }
 

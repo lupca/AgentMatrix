@@ -57,8 +57,8 @@ REST path gọi `invalidate_context_snapshot` sau mỗi tool call (`chat.py:82`)
 - [x] Thêm tool `get_stats` cho token usage, cost và run resource totals.
 
 ### B1.5b — Session cho native MCP (blocker mới phát hiện, audit 2026-08-01)
-`mcp_native.py:173` truyền `session_id = token_id or "mcp"`; không caller nào phát token kèm `token_id` → mọi tool call native chạy dưới session `"mcp"` không có row DB. Hậu quả: `compact_context` lỗi "Session mcp not found"; `get_minimal_context`/`get_impact_radius`/`generate_spec_plan` fail `research_requires_project_scope`; `create_task` thiếu `project` tường minh fail `project_required`.
-- [ ] Thêm tool `manage_session` (create/switch/list, `context_level` global|project|task) hoặc auto-create Session row theo `token_id` khi phát token; gắn `token_id` khi issue token trong `cli_dispatcher`/`command_builder`/`issue-coordinator-token.sh`.
+`mcp_native.py` truyền session theo token; token trước đây không có `token_id`/`session_id` nên mọi tool call native chạy dưới session ma `"mcp"` không có row DB. Hậu quả: `compact_context` lỗi "Session mcp not found"; `get_minimal_context`/`get_impact_radius`/`generate_spec_plan` fail `research_requires_project_scope`; `create_task` thiếu `project` tường minh fail `project_required`.
+- [x] Token native nay luôn có `token_id` + `session_id`, auto-create Session row theo scope (task cho executor), và có `exp` TTL; `cli_dispatcher`/`command_builder` dùng issuer chung.
 - [ ] Bổ sung gap tools vào registry (từ audit bề mặt tool): entity `agent_runs` + `audit` cho `query_db` (không có thì `get_run_output` vô dụng vì không lấy được `run_id`); đọc `content` của knowledge; tool poll task events theo cursor (`get_task_events`); archive/restore task; add/remove dependency sau khi tạo; expose `suggested_agents` dạng tư vấn; xử lý side effect `unset_coordinator_defaults` khi `manage_agent is_default=true`; quyết định đường cấu hình API key cho agent (tool đang chặn có chủ đích — pure MCP cần một đường thay thế, vd env/script offline).
 - [ ] Sửa schema `approve_gate`: khai báo `gate_record_id` + dạng `admin:<id>` (hiện không khám phá được từ schema).
 
