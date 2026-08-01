@@ -1,0 +1,82 @@
+diff --git a/backend/app/schemas/task.py b/backend/app/schemas/task.py
+index e069886..e7cdda7 100644
+--- a/backend/app/schemas/task.py
++++ b/backend/app/schemas/task.py
+@@ -23,16 +23,14 @@ class SpecPlanResult(BaseModel):
+ class ReviewACResult(BaseModel):
+     """The reviewer's verdict and evidence for one acceptance criterion."""
+ 
+-    model_config = ConfigDict(extra="forbid", strict=True)
++    model_config = ConfigDict(extra="ignore", strict=False)
+ 
+-    criterion_id: StrictStr
++    criterion_id: str
+     status: Literal["pass", "fail"]
+-    evidence: list[StrictStr]
+-    finding_ids: list[StrictStr]
+-    # Kept as optional compatibility metadata for older consumers.  The
+-    # criterion_id/status pair is the required v1 contract.
+-    ac_index: StrictInt | None = None
+-    ac_text: StrictStr | None = None
++    evidence: list[str]
++    finding_ids: list[str]
++    ac_index: int | None = None
++    ac_text: str | None = None
+ 
+     @property
+     def verdict(self) -> str:
+@@ -42,29 +40,29 @@ class ReviewACResult(BaseModel):
+ class ReviewResult(BaseModel):
+     """Versioned, machine-readable output produced by a code-review run."""
+ 
+-    model_config = ConfigDict(extra="forbid", strict=True)
++    model_config = ConfigDict(extra="ignore", strict=False)
+ 
+     schema_version: Literal[REVIEW_RESULT_SCHEMA_VERSION]
+-    task_id: StrictStr
+-    base: StrictStr
+-    head: StrictStr
++    task_id: str
++    base: str
++    head: str
+     ac_results: list[ReviewACResult]
+     findings: list["ReviewFinding"]
+-    tests_run: list[StrictStr]
+-    tests_passed: list[StrictStr]
++    tests_run: list[str] | bool | None = Field(default_factory=list)
++    tests_passed: list[str] | bool | None = Field(default_factory=list)
+ 
+ 
+ class ReviewFinding(BaseModel):
+     """A structured, location-specific finding from a reviewer."""
+ 
+-    model_config = ConfigDict(extra="forbid", strict=True)
++    model_config = ConfigDict(extra="ignore", strict=False)
+ 
+-    id: StrictStr
+-    severity: StrictStr
+-    category: StrictStr
+-    file: StrictStr
+-    line: StrictInt
+-    description: StrictStr
++    id: str
++    severity: str
++    category: str
++    file: str
++    line: int
++    description: str
+ 
+ 
+ class GateRecordCreate(BaseModel):
+diff --git a/backend/app/workers/agent_runner.py b/backend/app/workers/agent_runner.py
+index f407d92..d733e50 100644
+--- a/backend/app/workers/agent_runner.py
++++ b/backend/app/workers/agent_runner.py
+@@ -708,6 +708,7 @@ def run_agent(
+         run.status = "running"
+         run.attempt = attempt
+         run.started_at = started_at
++        run.result_ref = f"{base_ref}.."
+         db.commit()
+ 
+         def record_pid(pid: int) -> None:

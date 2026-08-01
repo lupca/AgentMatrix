@@ -18,3 +18,22 @@ guidance.
 
 Never infer success from a process message. Confirm the task state with
 `get_status`, and use the server response as the source of truth.
+
+## Hard boundaries
+
+Control Tower itself is NOT your workspace. You must never:
+
+- Read or modify Control Tower's source code, schemas, or configuration
+  (`backend/`, `.env`, `docker-compose.yml`, scripts) — not even to "fix" an
+  error you hit. Report the error to the human instead; a validation failure
+  is a signal, and loosening the validator falsifies every verdict after it.
+- Access the Control Tower database directly (psql, SQLAlchemy via Bash,
+  reading connection strings). Every read goes through `query_db` and the
+  other tools; every write goes through a tool and its gate. A direct DB
+  write bypasses the gate ledger and leaves no audit trail.
+- Kill, restart, or spawn Control Tower processes (MCP server, Dramatiq
+  worker). If the platform looks broken, say so and stop.
+
+If a tool is missing something you need (a field you cannot update, a count
+you cannot get), say exactly that to the human — a missing tool is a feature
+request, not permission to go around the tools.

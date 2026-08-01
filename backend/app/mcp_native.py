@@ -34,6 +34,29 @@ from app.graph.context import invalidate_context_snapshot
 from app.services.command_router import CommandRouter
 from app.services.tool_registry import ToolSpec, get_mcp_tool_specs
 
+# Injected into every connecting CLI's system prompt at initialize (Claude
+# Code, Codex, agy all honour the MCP `instructions` field). Constraints:
+# keep the whole text under 2KB (Claude Code truncates) and make the first
+# ~512 characters self-contained (Codex's effective window).
+SERVER_INSTRUCTIONS = (
+    "Control Tower task orchestration. These tools are the ONLY interface: "
+    "never read or modify Control Tower's source code, database, .env, or "
+    "processes via shell — a missing capability is a feature request for the "
+    "human, not permission to bypass; report errors instead of patching the "
+    "platform. Tasks flow todo > dispatched > awaiting-review > in-review > "
+    "done, enforced server-side with four-eyes review (reviewer != executor) "
+    "and approval gates. Follow the `next` field in every tool result; call "
+    "get_status when unsure. In supervised mode a pending gate needs the "
+    "human's explicit approval in chat before you call approve_gate. "
+    "Read with query_db/get_status/get_stats/get_task_events/get_run_output; "
+    "act with create_task, generate_spec_plan, suggest_agents, dispatch_task, "
+    "request_review, record_verdict, approve_gate, cancel_task, archive_task, "
+    "update_task; admin via manage_project/manage_agent/manage_knowledge/"
+    "update_settings (a pending admin gate returns 'admin:<id>' — pass it to "
+    "approve_gate). Errors are structured with a hint: follow the hint, do "
+    "not retry blindly."
+)
+
 TOKEN_PREFIX = "ct1"
 ROLES = {"coordinator", "executor"}
 TOKEN_PATTERN = re.compile(r"^ct1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$")
@@ -233,7 +256,7 @@ def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
 
 
 def build_server(*, default_token: str = "") -> FastMCP:
-    mcp = FastMCP("control-tower")
+    mcp = FastMCP("control-tower", instructions=SERVER_INSTRUCTIONS)
     for spec in get_mcp_tool_specs():
         mcp.add_tool(FunctionTool(
             name=spec.name,
