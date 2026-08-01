@@ -144,50 +144,52 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="query_db",
             description=(
-                "Read-only lookup across Control Tower entities not already "
-                "covered by the context snapshot. Returns compact rows "
-                "(id/title/status/...), never full rows or secrets."
+                "Read-only database query using raw SQL (v2). "
+                "Only a single SELECT or WITH statement is allowed. "
+                "Use this to answer complex analytical questions or explore data. "
+                "Do NOT access the DB directly via other means.\n"
+                "Schema Summary:\n"
+                "- tasks (id, title, status [todo, dispatched, awaiting-review, in-review, done, cancelled, failed], project, executor, reviewer, priority, mode)\n"
+                "- projects (id, name, status, repo_root, mode)\n"
+                "- agents (id, name, role [coordinator, executor, reviewer, spec_plan], status, agent_type [cli, api], model)\n"
+                "- sessions (id, title, status, context_level, project_id, task_id)\n"
+                "- agent_runs (id, task_id, agent_id, kind [execute, review], status [queued, running, success, failed, cancelled], attempt)\n"
+                "- knowledge_items (id, title, category, project, author, content)\n"
+                "- audit_log (id, task_id, action, actor, created_at)\n"
+                "- settings (key, value)\n\n"
+                "Examples:\n"
+                "SELECT project, count(*) FROM tasks WHERE status='dispatched' GROUP BY project\n"
+                "SELECT id, status FROM agents WHERE role='executor'"
             ),
             parameters={
                 "type": "object",
                 "properties": {
+                    "sql": {
+                        "type": "string",
+                        "description": "A single raw SQL SELECT/WITH statement. Result is limited to 500 rows.",
+                    },
                     "entity": {
                         "type": "string",
-                        "enum": [
-                            "tasks",
-                            "projects",
-                            "agents",
-                            "sessions",
-                            "knowledge",
-                            "usage",
-                            "settings",
-                        ],
-                        "description": "Entity to query.",
+                        "description": "[DEPRECATED] Entity to query.",
                     },
                     "filters": {
                         "type": "object",
-                        "description": (
-                            "Equality filters; allowed field names vary per "
-                            "entity (e.g. tasks: status/project/executor)."
-                        ),
+                        "description": "[DEPRECATED] Equality filters.",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max rows to return (<=50).",
-                        "default": 20,
+                        "description": "[DEPRECATED] Max rows to return.",
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "Row offset for pagination.",
-                        "default": 0,
+                        "description": "[DEPRECATED] Row offset.",
                     },
                     "include_archived": {
                         "type": "boolean",
-                        "description": "Include archived rows (default false).",
-                        "default": False,
+                        "description": "[DEPRECATED] Include archived rows.",
                     },
                 },
-                "required": ["entity"],
+                "required": [],
             },
             handler="query_db",
             tier="eager",

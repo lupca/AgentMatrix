@@ -13,6 +13,7 @@
 | 0.1 | `/mcp` (agy) hoặc `/mcp` (claude) | `control-tower` connected, không Unauthorized |
 | 0.2 | "Liệt kê các tool control-tower bạn thấy" | ~22 tools, có `create_task`, `dispatch_task`, `approve_gate`, `get_task_events`, `suggest_agents` |
 | 0.3 | "Có bao nhiêu project đang active?" | Trả lời từ `query_db entity=projects`, KHÔNG dùng Bash/đọc file |
+| 0.4 | "Có bao nhiêu task? nhóm theo status" | `query_db` dùng tham số `sql`, trả về nhóm theo count, KHÔNG Bash/lật trang |
 
 ## P1 — Happy path trọn vòng đời (lõi của B1.8)
 
@@ -70,8 +71,8 @@ Dùng một project thật có `repo_root` hợp lệ (vd `agenticmatix` hoặc 
 
 Phát hiện sẵn từ lần chạy đầu (chưa cần sửa ngay, ghi để thành task):
 
-- [ ] **`query_db` thiếu tổng số bản ghi** — agent phải lật trang mù (limit cap 50) rồi sinh ý định vượt rào. Đề xuất: thêm `total` (COUNT) vào response `query_db`, hoặc dạy qua tool description "dùng get_stats để đếm".
-- [ ] **Coordinator trong repo CT tự đọc `.env`/DB khi bí** — không phải bug hệ thống, nhưng cần ghi vào `docs/coordinator-rules.md` + instructions: "mọi dữ liệu Control Tower phải lấy qua tool control-tower, không truy cập DB/file hệ thống trực tiếp"; về dài hạn cân nhắc chạy coordinator trong thư mục riêng như phần setup.
+- [x] **`query_db` thiếu tổng số bản ghi** — agent phải lật trang mù (limit cap 50) rồi sinh ý định vượt rào. Đề xuất: thêm `total` (COUNT) vào response `query_db`, hoặc dạy qua tool description "dùng get_stats để đếm". (Đã giải quyết bằng query_db SQL v2)
+- [x] **Coordinator trong repo CT tự đọc `.env`/DB khi bí** — không phải bug hệ thống, nhưng cần ghi vào `docs/coordinator-rules.md` + instructions: "mọi dữ liệu Control Tower phải lấy qua tool control-tower, không truy cập DB/file hệ thống trực tiếp"; về dài hạn cân nhắc chạy coordinator trong thư mục riêng như phần setup.
 - [ ] **Không có tool đổi mode task** (phát hiện 2026-08-01, lần chạy agy đầu): "sửa mode thành tự động" không tool nào làm được → agy UPDATE thẳng DB, không gate, không audit. Fix: `update_task` nhận `mode` trong patch, đi qua admin/gate phù hợp.
 - [ ] **Nghi bug result_ref ở đường bypass**: run thật vấp lỗi thiếu result_ref khiến review không nối được commit range; agy vá nóng `run.result_ref = f"{base_ref}.."` (đã revert, diff lưu tại `docs/agy-incident-2026-08-01.patch`). Dev điều tra chính chủ: vì sao result_ref không được ghi ở flow bypass, fix + test.
 - [ ] **ReviewResult schema có thể quá strict so với artifact reviewer CLI viết thật**: reviewer trả JSON fail validate (StrictStr/extra=forbid) → agy nới toàn bộ schema để cho qua (đã revert, cùng patch trên). Nếu mismatch là thật: sửa có chủ đích ở prompt reviewer hoặc schema kèm test — tuyệt đối không nới strict/extra.

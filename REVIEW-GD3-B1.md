@@ -1,5 +1,46 @@
 # Review GĐ3 Bước 0–B1 (commits 449e622, d74121e, d9c86d8, faff559)
 
+## VÒNG 5 — verify query_db SQL v2 sau fix (2026-08-01) — **PASS, live-tested**
+
+Đã kiểm chứng SỐNG trên Postgres thật (role tạo thành công qua docker exec; `DATABASE_URL_READONLY` cấu hình; server restart): GROUP BY/COUNT chạy ok; `SELECT api_key FROM agents` và `SELECT messages FROM sessions` → **permission denied từ GRANT** (lớp 1 hoạt động thật); UPDATE / CTE-DML / SELECT INTO / pg_sleep → guard reject; DML-trong-CTE-của-subquery → hóa ra Postgres cấm từ cú pháp (FeatureNotSupported) — không phải lỗ; `pg_read_file` → InsufficientPrivilege (không cần banned-list); **audit ghi đủ 9/9 câu kể cả rejected**. `SET LOCAL statement_timeout` đúng. 77 test pass. Blocker #1, #2 (phần chính), #3, #4 vòng 4: ĐÓNG.
+
+Còn lại mức nhắc (không chặn):
+- [ ] Description: `tasks.status` vẫn thiếu `changes-requested` (agent_runs đã sửa đúng).
+- [ ] `docker-compose.yml` service `mcp`/`worker` chưa có env `DATABASE_URL_READONLY` — deploy container sẽ thiếu đường readonly (host script thì ổn).
+- [ ] Password `ct_readonly_user` hardcode `readonly` — ổn cho localhost dev, tham số hóa khi deploy thật.
+- [ ] `statement_timeout` hardcode 10s — plan muốn tunable qua `SETTINGS_WHITELIST` (backlog).
+- [ ] Env hygiene: `pglast` chỉ có trong `backend/venv`; root `.venv` pip hỏng — thống nhất một venv.
+
+## VÒNG 4 — review query_db SQL v2 (working tree, 2026-08-01) — các mục chính đã fix ở vòng 5
+
+Đã xác minh ĐÚNG: kiến trúc bám sát plan (sql_guard + pglast, engine readonly riêng có fallback lỗi tường minh thay vì âm thầm dùng engine thường, envelope truncated + hint, description có schema + examples + 995 chars < 2KB, nhánh `entity` cũ giữ deprecated); 5 test guard pass (trong `backend/venv`).
+
+### 1. [BLOCKER] Không có đường kết nối readonly nào chạy được
+- `ct_readonly` tạo NOLOGIN nhưng không có user LOGIN + `GRANT ct_readonly TO ...` → không thể viết `DATABASE_URL_READONLY` trỏ vào nó.
+- Script gọi `psql` trên host — máy không có psql (Postgres chạy docker) → đã chạy thử: fail, role KHÔNG được tạo. Phải chạy qua `docker exec control_tower_db psql`.
+- GRANT liệt kê bảng `session_events` — **không tồn tại** (đúng tên: `session_event_cursors`) → script chết giữa chừng kể cả khi có psql.
+- `.env.example` chưa có `DATABASE_URL_READONLY`.
+
+### 2. [HIGH] sql_guard còn 3 lỗ ghi-được nếu URL readonly bị cấu hình lười (trỏ user thường)
+- `SELECT ... INTO new_table` — SelectStmt hợp lệ với guard nhưng TẠO BẢNG (thiếu check `intoClause`).
+- `WITH x AS (DELETE FROM tasks RETURNING *) SELECT * FROM x` — DML núp trong CTE, guard chỉ check type top-level (thiếu duyệt `withClause.ctes[].ctequery`).
+- `SELECT ... FOR UPDATE` — khóa row (thiếu check `lockingClause`).
+Lớp 2 (read-only txn) chặn được lúc execute, nhưng defense-in-depth nghĩa là guard phải tự chặn — nhất là khi lớp 1 (role) hiện chưa tồn tại (mục 1). Banned functions thiếu: `pg_read_file`, `pg_ls_dir`, `lo_import`/`lo_export`, `pg_terminate_backend`, `pg_cancel_backend`, `set_config`.
+
+### 3. [MEDIUM] Audit chỉ ghi khi query THÀNH CÔNG
+Câu bị guard reject hoặc DB error không để lại vết — đúng những câu đáng audit nhất (dò tìm/thăm dò). Plan yêu cầu audit mọi câu, kể cả bị từ chối.
+
+### 4. [MEDIUM] `SET statement_timeout` không LOCAL → dính vĩnh viễn vào connection trong pool
+Cả hai lệnh nên là `SET LOCAL ...` trong cùng transaction với query (SET thường là session-level, connection trả về pool mang theo timeout — pool pollution).
+
+### 5. [LOW] Schema summary trong description dạy SAI enum
+`agent_runs.status` thật là `queued/running/success/failed/timeout` (description ghi `queued, in-progress, completed, failed`); `tasks.status` thiếu `changes-requested`. Agent sẽ WHERE theo giá trị không tồn tại và kết luận "không có dữ liệu".
+
+### 6. [LOW] Env hygiene
+`pglast` chỉ có trong `backend/venv`; root `.venv` pip hỏng (shebang trỏ đường dẫn project cũ `control-tower-v2`) — ai chạy test bằng `.venv` sẽ ImportError. Cần thống nhất một venv hoặc ghi rõ trong README test chạy bằng `backend/venv`.
+
+---
+
 ## VÒNG 3 — review MCP_ATTACH_PLAN implementation (2026-08-01) — **ĐÃ FIX TOÀN BỘ**
 
 Trạng thái sau fix: #1 role coordinator truyền đúng + bỏ task scope ảo, có test decode token assert role/task_id cho cả hai đường và test dispatcher-level; #2 `_ensure_git_exclude` dùng `git rev-parse --git-path info/exclude` (trỏ đúng common dir), có test worktree git thật assert `git status` sạch; #3 agy merge key `control-tower` vào config có sẵn + backup `.ct-orig`, `detach_mcp` restore nguyên văn thay vì xóa (backup cả khi JSON gốc hỏng), có test merge/restore; #4 emit `TaskEvent mcp_attach_failed` khi attach fail; #5 log warning khi `run.cli` rỗng. Cleanup hai đường đều đi qua `detach_mcp`. 237 tests pass.

@@ -354,19 +354,22 @@ class CommandRouter:
                 'top_n': args.get('top_n', 3),
             }, ensure_ascii=False)
         elif canonical_name == 'query_db':
-            entity = str(args.get('entity', '')).strip()
-            if not entity:
-                return {'error': 'entity is required'}
-            filters = args.get('filters') or {}
-            if not isinstance(filters, Mapping):
-                return {'error': 'filters must be a JSON object'}
-            limit = args.get('limit', 20)
-            offset = args.get('offset', 0)
-            tokens = [entity]
-            tokens.extend(f'{key}={value}' for key, value in filters.items())
-            tokens.append(f'limit={limit}')
-            tokens.append(f'offset={offset}')
-            command_args = ' '.join(str(token) for token in tokens)
+            if 'sql' in args:
+                command_args = json.dumps({'sql': args['sql']})
+            else:
+                entity = str(args.get('entity', '')).strip()
+                if not entity:
+                    return {'error': 'entity or sql is required'}
+                filters = args.get('filters') or {}
+                if not isinstance(filters, Mapping):
+                    return {'error': 'filters must be a JSON object'}
+                limit = args.get('limit', 20)
+                offset = args.get('offset', 0)
+                tokens = [entity]
+                tokens.extend(f'{key}={value}' for key, value in filters.items())
+                tokens.append(f'limit={limit}')
+                tokens.append(f'offset={offset}')
+                command_args = ' '.join(str(token) for token in tokens)
         elif canonical_name == 'dispatch_task':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
@@ -684,6 +687,69 @@ class CommandRouter:
         return {'status': 'success', 'repo_root': repo_root, 'files': result}
 
     async def _handle_query_db(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args.strip().startswith('{') else None
+        except json.JSONDecodeError:
+            payload = None
+
+        if payload and 'sql' in payload:
+            from app.services.sql_guard import validate_select, SQLGuardError
+            from app.db.base import get_readonly_db
+            from sqlalchemy import text
+            
+            sql = payload['sql']
+            
+            session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
+            task_id = session.task_id if session else None
+            
+            def log_audit(status, details):
+                audit = AuditLog(
+                    task_id=task_id,
+                    action="query_db_sql",
+                    actor=f"chat:{session_id or 'anonymous'}",
+                    details={"sql": sql, "status": status, **details}
+                )
+                self.db.add(audit)
+                self.db.commit()
+
+            try:
+                guarded_sql = validate_select(sql)
+            except SQLGuardError as e:
+                log_audit("rejected", {"reason": str(e)})
+                return {'error': str(e), 'hint': "Chỉ chấp nhận một câu SELECT duy nhất. Xem describe schema trong tool description."}
+            
+            try:
+                readonly_db_gen = get_readonly_db()
+                readonly_db = next(readonly_db_gen)
+            except RuntimeError as e:
+                log_audit("error", {"reason": str(e)})
+                return {'error': str(e)}
+            
+            try:
+                readonly_db.execute(text("SET TRANSACTION READ ONLY"))
+                readonly_db.execute(text("SET LOCAL statement_timeout = '10s'"))
+                result = readonly_db.execute(text(guarded_sql))
+                rows = [dict(row._mapping) for row in result]
+                truncated = len(rows) > 500
+                if truncated:
+                    rows = rows[:500]
+                
+                log_audit("success", {"truncated": truncated, "row_count": len(rows)})
+                
+                resp = {
+                    "rows": rows,
+                    "row_count": len(rows),
+                    "truncated": truncated,
+                }
+                if truncated:
+                    resp["hint"] = "Kết quả bị cắt ở 500 dòng — thêm WHERE, hoặc dùng COUNT(*)/GROUP BY để tổng hợp thay vì lật trang."
+                return resp
+            except Exception as e:
+                log_audit("error", {"reason": str(e)})
+                return {'error': f"Database error: {str(e)}"}
+            finally:
+                readonly_db.close()
+
         parts = args.strip().split()
         if not parts:
             return {'error': 'Usage: /query <entity> [field=value ...] [limit=N] [offset=N]'}
