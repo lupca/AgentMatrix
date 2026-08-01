@@ -26,8 +26,19 @@ def upgrade() -> None:
     op.create_index("ix_inbox_items_project_id", "inbox_items", ["project_id"])
     # query_db runs as ct_readonly_user; without an explicit grant a fresh
     # machine (no default privileges) cannot read the new table (review F-001).
+    # Guarded: on a brand-new database migrations run BEFORE
+    # create-readonly-role.sh, so the role may not exist yet — that script
+    # grants SELECT on all tables when it does run (review round-3 F-001).
     if op.get_bind().dialect.name == "postgresql":
-        op.execute("GRANT SELECT ON inbox_items TO ct_readonly_user")
+        op.execute(
+            """
+            DO $$ BEGIN
+                IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'ct_readonly_user') THEN
+                    GRANT SELECT ON inbox_items TO ct_readonly_user;
+                END IF;
+            END $$;
+            """
+        )
 
 
 def downgrade() -> None:
