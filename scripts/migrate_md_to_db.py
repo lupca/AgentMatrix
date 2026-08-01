@@ -25,12 +25,15 @@ CT_ROOT = Path(os.getenv("CT_ROOT", "/home/lupca/projects/control-tower"))
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://ct:secret@localhost:5433/control_tower")
 
 # Tables to clear (order matters for FK constraints)
+# agents is deliberately NOT cleared: DB rows carry api_key/base_url for
+# API-backed agents that have no markdown profile, plus measured
+# success_rate — clearing would destroy them (agent_accounts cascades).
+# Agents are upserted instead; see the ON CONFLICT clause below.
 TABLES_TO_CLEAR = [
     "task_dependencies",
     "gate_records",
     "tasks",
     "projects",
-    "agents",
     "knowledge_items",
 ]
 
@@ -393,6 +396,22 @@ def migrate(dry_run: bool = False, clear: bool = True):
                                    cli, provider, is_default, agent_type, success_rate, status)
                 VALUES (:id, :name, :role, :capabilities, :type, :model, :effort,
                        :cli, :provider, :is_default, :agent_type, :success_rate, :status)
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    role = EXCLUDED.role,
+                    capabilities = EXCLUDED.capabilities,
+                    type = EXCLUDED.type,
+                    model = COALESCE(EXCLUDED.model, agents.model),
+                    effort = COALESCE(EXCLUDED.effort, agents.effort),
+                    cli = COALESCE(EXCLUDED.cli, agents.cli),
+                    provider = COALESCE(EXCLUDED.provider, agents.provider),
+                    is_default = EXCLUDED.is_default,
+                    agent_type = EXCLUDED.agent_type,
+                    status = EXCLUDED.status,
+                    -- measured in production; the md value is only an
+                    -- initial estimate, never overwrite a real score
+                    success_rate = agents.success_rate,
+                    updated_at = now()
             """), {
                 'id': a['id'],
                 'name': a['name'],
