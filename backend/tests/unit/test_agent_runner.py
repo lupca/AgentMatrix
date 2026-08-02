@@ -196,6 +196,38 @@ def test_run_agent_executes_in_an_isolated_worktree_and_cleans_up(worker_db, git
     assert head in log
 
 
+def test_worktree_base_ref_uses_prior_head_for_re_dispatch(
+    worker_db, monkeypatch, git_repo_root
+):
+    prior_head = runner._parse_result_ref(git_repo_root)
+    assert prior_head
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    run.result_ref = f"{prior_head}..{prior_head}"
+    db.commit()
+    db.close()
+
+    create_calls = []
+    real_create = runner.WorktreeManager.create
+
+    def capture_create(manager, run_id, base_ref):
+        create_calls.append((run_id, base_ref))
+        return real_create(manager, run_id, base_ref)
+
+    monkeypatch.setattr(runner.WorktreeManager, "create", capture_create)
+
+    result = runner.run_agent.fn(
+        "run-001",
+        "RUN-001",
+        "echo change > change.txt && git add change.txt && git commit -q -m change",
+        git_repo_root,
+        5,
+    )
+
+    assert result == 0
+    assert create_calls == [("run-001", prior_head)]
+
+
 def test_run_agent_falls_back_to_sequential_when_worktree_unsupported(
     worker_db, monkeypatch, git_repo_root
 ):

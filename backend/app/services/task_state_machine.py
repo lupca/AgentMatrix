@@ -240,6 +240,28 @@ class TaskStateMachine:
         task.current_round_id = round_id
         return task_round
 
+    def prior_executor_result_ref(self, task: Task) -> str | None:
+        """Return the immediately prior executor range for a re-dispatch.
+
+        A changes-requested task has already completed its previous execute
+        round.  Prefer the round snapshot when available, with the task
+        projection as a compatibility fallback for older/imported rows.
+        """
+        prior_round = (
+            self.db.query(TaskRound)
+            .filter(
+                TaskRound.task_id == task.id,
+                TaskRound.result_ref.isnot(None),
+            )
+            .order_by(TaskRound.round_no.desc())
+            .first()
+        )
+        return (prior_round.result_ref if prior_round else None) or task.result_ref
+
+    def prior_executor_head(self, task: Task) -> str | None:
+        """Return the prior executor head, if the task has a committed range."""
+        return head_of(self.prior_executor_result_ref(task))
+
     def record_dispatch_decision(
         self,
         *,
@@ -471,6 +493,13 @@ class TaskStateMachine:
                 idempotency_key=idempotency_key,
                 dispatch_decision_id=payload.get("dispatch_decision_id"),
             )
+            if kind == "execute" and task.status == "changes-requested":
+                prior_head = self.prior_executor_head(task)
+                if prior_head:
+                    # The worker extracts the left side as the worktree base.
+                    # Keeping a range-shaped ref preserves that existing
+                    # execution path while making the prior head explicit.
+                    run.result_ref = f"{prior_head}..{prior_head}"
             self.db.add(run)
             self.cas_status(task, "dispatched")
             task.current_gate = "dispatch"

@@ -232,6 +232,8 @@ def _infer_cli(model: str | None, agent_id: str) -> str:
 def _task_prompt(task: Task, result_path: str | None = None) -> str:
     details = task.raw_input or task.title
     sections = [f"Execute task {task.id}: {task.title}", details]
+    if task.status == "changes-requested":
+        sections.append(_review_feedback(task))
     if task.acceptance_criteria:
         sections.append(
             "Acceptance criteria:\n"
@@ -277,6 +279,40 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
             "A task with no commit has no result-ref and cannot be reviewed."
         )
     return "\n\n".join(sections)
+
+
+def _review_feedback(task: Task) -> str:
+    """Render reviewer feedback as a compact, human-readable task section."""
+    lines = [
+        "Review feedback to address — you are fixing issues, not starting over",
+        f"Verdict: {task.verdict or 'changes'}",
+    ]
+    findings = task.findings or []
+    if not findings:
+        lines.append("No structured findings were provided; re-check the review and tests.")
+        return "\n".join(lines)
+
+    for index, finding in enumerate(findings, start=1):
+        if isinstance(finding, dict):
+            file_name = finding.get("file") or "unknown file"
+            line = finding.get("line") or "unknown line"
+            severity = finding.get("severity") or "unspecified"
+            description = finding.get("description") or finding.get("message") or "No description"
+        else:
+            file_name = "unknown file"
+            line = "unknown line"
+            severity = "unspecified"
+            description = str(finding)
+        lines.extend(
+            [
+                f"Finding {index}:",
+                f"  file: {file_name}",
+                f"  line: {line}",
+                f"  severity: {severity}",
+                f"  description: {description}",
+            ]
+        )
+    return "\n".join(lines)
 
 
 def _is_review_task(task: Task) -> bool:
