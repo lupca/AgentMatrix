@@ -727,6 +727,23 @@ class TaskStateMachine:
                 f"{selection_reason}. Approve?"
             )
         input_hash = TaskValidator.input_hash(request_payload)
+
+        # Reject stale pending gates BEFORE idempotency check - a new request
+        # should clean up orphaned gates even if this specific request is idempotent.
+        # Must commit here because idempotency check may return early.
+        effective_mode = self.validator.mode_for_task(task)
+        if effective_mode == "supervised":
+            rejected_count = self._reject_pending_gates(
+                task,
+                gate_type=gate_type,
+                reason="Superseded by newer gate request",
+                actor="system:stale-cleanup",
+                idempotency_suffix="auto-rejected",
+            )
+            if rejected_count > 0:
+                self.sync_awaiting_approval(task)
+                self.db.commit()
+
         existing = self.validator.idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
             self.validator.reject_if_stale_dispatch_record(existing)
@@ -741,16 +758,6 @@ class TaskStateMachine:
                 self.db.refresh(task)
             return self.result_for_record(task, existing)
         self.validator.assert_status(task, expected_status)
-        effective_mode = self.validator.mode_for_task(task)
-        if effective_mode == "supervised":
-            self._reject_pending_gates(
-                task,
-                gate_type=gate_type,
-                reason="Superseded by newer gate request",
-                actor="system:stale-cleanup",
-                idempotency_suffix="auto-rejected",
-            )
-            self.sync_awaiting_approval(task)
         if gate_type == "dispatch":
             decision = self.validator.check_brakes(
                 task,
