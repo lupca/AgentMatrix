@@ -672,6 +672,33 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="admin",
         ),
         ToolSpec(
+            name="manage_notes",
+            description="Save, semantically search, link, list, or archive agent notes.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["save", "search", "link", "list", "archive"]},
+                    "id": {"type": "string", "description": "Note id."},
+                    "title": {"type": "string"},
+                    "content": {"type": "string"},
+                    "note_type": {"type": "string", "enum": ["fact", "decision", "observation", "procedure", "preference"]},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "embedding": {"type": "array", "items": {"type": "number"}, "description": "1536-dimensional embedding for pgvector search."},
+                    "project_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "default": 10},
+                },
+                "required": ["action"],
+            },
+            handler="manage_notes",
+            tier="deferred",
+            permission="write",
+            entity="agent_notes",
+            slash_alias=None,
+            group="research",
+        ),
+        ToolSpec(
             name="update_settings",
             description=(
                 "Update a whitelisted system setting (see query_db "

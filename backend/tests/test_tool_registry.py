@@ -25,8 +25,8 @@ def db_session():
     session.close()
 
 
-def test_registry_has_twenty_three_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 27
+def test_registry_has_tools_with_unique_names():
+    assert len(TOOL_REGISTRY) == 28
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
@@ -49,6 +49,7 @@ def test_registry_has_twenty_three_tools_with_unique_names():
         'manage_project',
         'manage_agent',
         'manage_knowledge',
+        'manage_notes',
         'update_settings',
         'update_task',
         'get_minimal_context',
@@ -143,6 +144,7 @@ def test_get_group_tool_definitions_returns_deferred_tools_by_group():
     assert {t['name'] for t in research} == {
         'get_minimal_context',
         'get_impact_radius',
+        'manage_notes',
     }
 
     assert get_group_tool_definitions('nonexistent') is None

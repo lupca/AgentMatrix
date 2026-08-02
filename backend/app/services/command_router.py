@@ -10,6 +10,7 @@ from app.db.models import (
     Agent,
     AgentRun,
     AgentOutputChunk,
+    AgentNote,
     AuditLog,
     GateRecord,
     KnowledgeItem,
@@ -470,6 +471,11 @@ class CommandRouter:
                 return {'error': 'action is required'}
             command_args = json.dumps(args, ensure_ascii=False)
         elif canonical_name == 'manage_knowledge':
+            action = str(args.get('action', '')).strip()
+            if not action:
+                return {'error': 'action is required'}
+            command_args = json.dumps(args, ensure_ascii=False)
+        elif canonical_name == 'manage_notes':
             action = str(args.get('action', '')).strip()
             if not action:
                 return {'error': 'action is required'}
@@ -1976,6 +1982,143 @@ class CommandRouter:
             'title': item.title,
             'status': item.status,
         }
+
+    @staticmethod
+    def _note_snapshot(note: AgentNote, distance=None) -> dict[str, Any]:
+        result = {
+            'id': note.id,
+            'title': note.title,
+            'content': note.content,
+            'note_type': note.note_type,
+            'tags': note.tags or [],
+            'project_ids': [project.id for project in note.projects],
+            'task_ids': [task.id for task in note.tasks],
+            'created_at': note.created_at.isoformat() if note.created_at else None,
+            'archived_at': note.archived_at.isoformat() if note.archived_at else None,
+        }
+        if distance is not None:
+            result['distance'] = float(distance)
+        return result
+
+    async def _handle_manage_notes(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {'error': 'Invalid manage_notes payload'}
+        if not isinstance(payload, Mapping):
+            return {'error': 'Payload must be a JSON object'}
+
+        action = str(payload.get('action', '')).strip().lower()
+        note_id = str(payload.get('id', '')).strip() or None
+        limit = min(100, max(1, int(payload.get('limit', 10) or 10)))
+
+        if action == 'save':
+            title = str(payload.get('title', '')).strip()
+            content = str(payload.get('content', '')).strip()
+            if not title or not content:
+                return {'error': 'title and content are required'}
+            note = AgentNote(
+                id=note_id or None,
+                title=title,
+                content=content,
+                note_type=str(payload.get('note_type') or 'fact'),
+                tags=payload.get('tags') or [],
+                embedding=payload.get('embedding'),
+                author=f"chat:{session_id or 'anonymous'}",
+            )
+            self.db.add(note)
+            self.db.flush()
+            project_id = str(payload.get('project_id', '')).strip() or None
+            task_id = str(payload.get('task_id', '')).strip() or None
+            if project_id:
+                project = self.db.get(Project, project_id)
+                if not project:
+                    return {'error': f'Project not found: {project_id}'}
+                note.projects.append(project)
+            if task_id:
+                task = self.db.get(Task, task_id)
+                if not task:
+                    return {'error': f'Task not found: {task_id}'}
+                note.tasks.append(task)
+            self.db.commit()
+            return {'action': 'note_saved', **self._note_snapshot(note)}
+
+        if action == 'link':
+            if not note_id:
+                return {'error': 'id is required for link'}
+            note = self.db.get(AgentNote, note_id)
+            if not note:
+                return {'error': f'Note not found: {note_id}'}
+            project_id = str(payload.get('project_id', '')).strip() or None
+            task_id = str(payload.get('task_id', '')).strip() or None
+            if not project_id and not task_id:
+                return {'error': 'project_id or task_id is required for link'}
+            if project_id:
+                project = self.db.get(Project, project_id)
+                if not project:
+                    return {'error': f'Project not found: {project_id}'}
+                if project not in note.projects:
+                    note.projects.append(project)
+            if task_id:
+                task = self.db.get(Task, task_id)
+                if not task:
+                    return {'error': f'Task not found: {task_id}'}
+                if task not in note.tasks:
+                    note.tasks.append(task)
+            self.db.commit()
+            return {'action': 'note_linked', **self._note_snapshot(note)}
+
+        if action == 'archive':
+            if not note_id:
+                return {'error': 'id is required for archive'}
+            note = self.db.get(AgentNote, note_id)
+            if not note:
+                return {'error': f'Note not found: {note_id}'}
+            note.archive()
+            self.db.commit()
+            return {'action': 'note_archived', **self._note_snapshot(note)}
+
+        if action in {'list', 'search'}:
+            query = str(payload.get('query') or payload.get('q') or '').strip()
+            filters = [AgentNote.archived_at.is_(None)]
+            if payload.get('project_id'):
+                filters.append(AgentNote.projects.any(Project.id == str(payload['project_id'])))
+            if payload.get('task_id'):
+                filters.append(AgentNote.tasks.any(Task.id == str(payload['task_id'])))
+            if action == 'search' and not query and not payload.get('embedding'):
+                return {'error': 'query or embedding is required for search'}
+
+            distance = None
+            if payload.get('embedding') and self.db.bind.dialect.name == 'postgresql':
+                from sqlalchemy import text
+                vector_value = "[" + ",".join(str(float(item)) for item in payload['embedding']) + "]"
+                scope_sql = ""
+                params = {'embedding': vector_value, 'limit': limit}
+                if payload.get('project_id'):
+                    scope_sql += " AND EXISTS (SELECT 1 FROM note_projects np WHERE np.note_id = agent_notes.id AND np.project_id = :project_id)"
+                    params['project_id'] = str(payload['project_id'])
+                if payload.get('task_id'):
+                    scope_sql += " AND EXISTS (SELECT 1 FROM note_tasks nt WHERE nt.note_id = agent_notes.id AND nt.task_id = :task_id)"
+                    params['task_id'] = str(payload['task_id'])
+                rows = self.db.execute(text(f"""
+                    SELECT id, embedding <=> CAST(:embedding AS vector) AS distance
+                    FROM agent_notes
+                    WHERE archived_at IS NULL AND embedding IS NOT NULL{scope_sql}
+                    ORDER BY embedding <=> CAST(:embedding AS vector)
+                    LIMIT :limit
+                """), params).mappings().all()
+                ranked = {row['id']: row['distance'] for row in rows}
+                notes = self.db.query(AgentNote).filter(AgentNote.id.in_(ranked)).all()
+                notes.sort(key=lambda note: ranked[note.id])
+                return {'action': 'notes_searched', 'notes': [self._note_snapshot(note, ranked[note.id]) for note in notes]}
+
+            statement = self.db.query(AgentNote).filter(*filters)
+            if query:
+                statement = statement.filter((AgentNote.title.ilike(f'%{query}%')) | (AgentNote.content.ilike(f'%{query}%')))
+            notes = statement.order_by(AgentNote.updated_at.desc()).limit(limit).all()
+            return {'action': 'notes_searched' if action == 'search' else 'notes_listed', 'notes': [self._note_snapshot(note) for note in notes]}
+
+        return {'error': "Unknown action '%s'. Valid actions: save, search, link, list, archive" % action}
 
     async def _handle_update_task(self, args: str, session_id: str) -> dict:
         try:

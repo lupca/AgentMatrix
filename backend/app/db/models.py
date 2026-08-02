@@ -20,9 +20,32 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import validates, relationship
 from sqlalchemy.sql import func
+from sqlalchemy.types import TypeDecorator
+from sqlalchemy.ext.compiler import compiles
 from app.db.base import Base
 from app.db.mixins import ArchivableMixin
 from app.graph.state import FourEyesViolation
+
+
+class Vector(TypeDecorator):
+    """pgvector-compatible vector that remains usable in SQLite unit tests."""
+
+    impl = Text
+    cache_ok = True
+
+    def __init__(self, dimensions: int = 1536, **kwargs):
+        self.dimensions = dimensions
+        super().__init__(**kwargs)
+
+    def process_bind_param(self, value, dialect):
+        if value is None or isinstance(value, str):
+            return value
+        return "[" + ",".join(str(float(item)) for item in value) + "]"
+
+
+@compiles(Vector, "postgresql")
+def _compile_vector(element, compiler, **kwargs):
+    return f"vector({element.dimensions})"
 
 
 class ContextLevel(str, Enum):
@@ -219,6 +242,7 @@ class Task(ArchivableMixin, Base):
         foreign_keys="TaskDependency.depends_on_task_id",
         cascade="all, delete-orphan",
     )
+    notes = relationship("AgentNote", secondary="note_tasks", back_populates="tasks")
     task_events = relationship("TaskEvent", back_populates="task", cascade="all, delete-orphan")
 
     __table_args__ = (
@@ -653,6 +677,7 @@ class Project(ArchivableMixin, Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     rules = relationship("ProjectRule", back_populates="project", cascade="all, delete-orphan")
+    notes = relationship("AgentNote", secondary="note_projects", back_populates="projects")
 
 
 class ProjectRule(Base):
@@ -1109,6 +1134,37 @@ class KnowledgeItem(ArchivableMixin, Base):
     status = Column(String(20), nullable=False, default="active", server_default="active")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class AgentNote(ArchivableMixin, Base):
+    __tablename__ = "agent_notes"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    title = Column(String(300), nullable=False)
+    content = Column(Text, nullable=False)
+    note_type = Column(String(30), nullable=False, default="fact", server_default="fact")
+    tags = Column(JSON, nullable=False, default=list, server_default="[]")
+    embedding = Column(Vector(1536), nullable=True)
+    author = Column(String(50), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    projects = relationship("Project", secondary="note_projects", back_populates="notes")
+    tasks = relationship("Task", secondary="note_tasks", back_populates="notes")
+
+
+class NoteProject(Base):
+    __tablename__ = "note_projects"
+
+    note_id = Column(String(36), ForeignKey("agent_notes.id", ondelete="CASCADE"), primary_key=True)
+    project_id = Column(String(50), ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True)
+
+
+class NoteTask(Base):
+    __tablename__ = "note_tasks"
+
+    note_id = Column(String(36), ForeignKey("agent_notes.id", ondelete="CASCADE"), primary_key=True)
+    task_id = Column(String(20), ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True)
 
 
 class TaskEvent(Base):
