@@ -94,6 +94,38 @@ def test_review_prompt_requires_versioned_json_result(tmp_path):
     assert "one item per acceptance criterion" in prompt
 
 
+def test_task_prompt_includes_findings_on_changes_requested(tmp_path):
+    task = Task(
+        id="FIX-001",
+        project="p",
+        title="Fix review findings",
+        status="changes-requested",
+        verdict="changes",
+        findings=[
+            {
+                "file": "backend/app/example.py",
+                "line": 42,
+                "severity": "high",
+                "description": "Validate the user-controlled path before opening it.",
+            }
+        ],
+        acceptance_criteria=["Tests pass"],
+    )
+    agent = Agent(id="@agent", name="Agent", role="executor", cli="codex")
+    project = Project(id="p", name="Project", repo_root=str(tmp_path))
+
+    command, _, _ = build_dispatch_command(task, agent, project)
+    prompt = shlex.split(command)[-1]
+
+    assert "Review feedback to address" in prompt
+    assert "you are fixing issues, not starting over" in prompt
+    assert "Verdict: changes" in prompt
+    assert "file: backend/app/example.py" in prompt
+    assert "line: 42" in prompt
+    assert "severity: high" in prompt
+    assert "Validate the user-controlled path before opening it." in prompt
+
+
 def test_build_review_command_embeds_explicit_from_to_range(tmp_path):
     task = Task(
         id="REV-002",

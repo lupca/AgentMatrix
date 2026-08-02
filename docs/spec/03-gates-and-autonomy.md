@@ -79,7 +79,12 @@ verdict approved tồn tại — vì vậy KHÔNG được emit event giữa ch�
   payload bất biến của gate.
 - Verdict fail → changes-requested → `dispatch_task` chấp nhận re-dispatch
   thẳng từ đó (vòng replan, CTV2-234 đã sửa — constraint terminal chỉ còn
-  áp cho done, migration 037).
+  áp cho done, migration 037). Re-dispatch execute lấy head của round vừa
+  review (ưu tiên `TaskRound.result_ref`, fallback `Task.result_ref`) làm base
+  của worktree `ct-run/<run_id>`, nên executor tiếp tục trên commit cũ thay vì
+  bắt đầu lại từ main. Prompt cũng có mục **Review feedback to address** với
+  verdict và từng finding theo file/line/severity/description; full history
+  của các round cũ không thuộc scope.
 - Task read-only: tag `no-commit` + executor in `RESULT_REF: none` (worktree
   phải thật sự không có commit) → done qua gate verdict hệ thống
   (reviewer `@system-no-commit`, minh bạch trong ledger — CTV2-235).

@@ -1222,6 +1222,61 @@ def test_dispatch_creates_task_round_and_links_it_to_task(orchestration, db_sess
     assert round_.started_at is not None
 
 
+def test_request_dispatch_changes_requested_seeds_prior_result_ref(
+    orchestration, db_session
+):
+    task = _task(db_session, "REDISPATCH-001", mode="bypass")
+    task.status = "changes-requested"
+    task.result_ref = "task-base..task-head"
+    db_session.add(
+        TaskRound(
+            task_id=task.id,
+            round_no=1,
+            result_ref="round-base..prior-head",
+            status="changes-requested",
+        )
+    )
+    task.findings = [
+        {
+            "file": "app/example.py",
+            "line": 7,
+            "severity": "medium",
+            "description": "Handle the empty input case.",
+        }
+    ]
+    task.verdict = "changes"
+    db_session.commit()
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="redispatch-1",
+    )
+
+    assert result.applied is True
+    assert result.agent_run.result_ref == "prior-head..prior-head"
+    outbox = next(
+        event
+        for event in db_session.query(OutboxEvent).all()
+        if event.payload.get("run_id") == result.agent_run.id
+    )
+    assert outbox.payload["task_id"] == task.id
+
+
+def test_todo_dispatch_does_not_seed_a_prior_result_ref(orchestration, db_session):
+    task = _task(db_session, "REDISPATCH-002", mode="bypass")
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="redispatch-2",
+    )
+
+    assert result.agent_run.result_ref is None
+
+
 def test_second_dispatch_after_replan_opens_a_second_round(orchestration, db_session):
     task = _task(db_session, "ROUND-002", mode="bypass")
 
