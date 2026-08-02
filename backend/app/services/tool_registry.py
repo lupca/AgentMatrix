@@ -585,9 +585,25 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "description": "Agent id (required for update/disable).",
                     },
                     "name": {"type": "string"},
-                    "role": {"type": "string"},
+                    "role": {
+                        "type": "string",
+                        "enum": ["executor", "reviewer", "coordinator", "spec_plan"],
+                        "description": "Primary role (legacy). Prefer 'roles' for multi-role agents.",
+                    },
+                    "roles": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["executor", "reviewer", "coordinator", "spec_plan"],
+                        },
+                        "description": "Agent roles. Most agents have [executor, reviewer].",
+                    },
                     "status": {"type": "string"},
-                    "capabilities": {"type": "array", "items": {"type": "string"}},
+                    "capabilities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Agent capabilities (code, backend, review, architecture, etc.)",
+                    },
                     "model": {"type": "string"},
                     "effort": {"type": "string"},
                     "cli": {"type": "string"},
