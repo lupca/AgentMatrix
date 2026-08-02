@@ -16,28 +16,18 @@ NOTE_TYPES = ("fact", "decision", "observation", "procedure", "preference")
 def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        # Try to create pgvector extension, fallback to TEXT if not available
-        has_vector = False
-        try:
-            result = bind.execute(sa.text("SELECT 1 FROM pg_available_extensions WHERE name = 'vector'"))
-            if result.fetchone():
-                op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-                has_vector = True
-        except Exception:
-            pass
-
+        op.execute("CREATE EXTENSION IF NOT EXISTS vector")
         op.execute(
             "CREATE TYPE note_type AS ENUM (" + ", ".join(f"'{value}'" for value in NOTE_TYPES) + ")"
         )
-        embedding_type = "vector(1536)" if has_vector else "TEXT"
-        op.execute(f"""
+        op.execute("""
             CREATE TABLE agent_notes (
                 id VARCHAR(36) PRIMARY KEY,
                 title VARCHAR(300) NOT NULL,
                 content TEXT NOT NULL,
                 note_type note_type NOT NULL DEFAULT 'fact',
                 tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-                embedding {embedding_type},
+                embedding vector(1536),
                 author VARCHAR(50),
                 archived_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -72,13 +62,7 @@ def upgrade() -> None:
     op.create_index("ix_agent_notes_note_type", "agent_notes", ["note_type"])
     op.create_index("ix_agent_notes_archived_at", "agent_notes", ["archived_at"])
     if bind.dialect.name == "postgresql":
-        # Only create vector index if pgvector is available
-        try:
-            result = bind.execute(sa.text("SELECT 1 FROM pg_extension WHERE extname = 'vector'"))
-            if result.fetchone():
-                op.execute("CREATE INDEX ix_agent_notes_embedding ON agent_notes USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)")
-        except Exception:
-            pass
+        op.execute("CREATE INDEX ix_agent_notes_embedding ON agent_notes USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)")
         op.execute("""
             DO $$ BEGIN
                 IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'ct_readonly_user') THEN

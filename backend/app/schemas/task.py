@@ -35,6 +35,9 @@ class ReviewACResult(BaseModel):
     # criterion_id/status pair is the required v1 contract.
     ac_index: StrictInt | None = None
     ac_text: StrictStr | None = None
+    # Legacy aliases used by some reviewer prompts
+    legacy_ac_index: StrictInt | None = None
+    legacy_ac_text: StrictStr | None = None
     # Legacy alias for status. The reviewer prompt has always asked for this
     # key, so with extra="forbid" it must be a real field, not a property —
     # otherwise every artifact that follows the prompt fails validation.
