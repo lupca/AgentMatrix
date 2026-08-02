@@ -22,100 +22,122 @@ CAPABILITIES = (
     "audit-logging", "spot-check-runtime", "ac-generation", "process-design", "confirmation",
     "creative", "deep-research", "final-decision", "follows-explicit-instructions",
     "follows-instructions", "reliable", "code-review",
-    # Existing values observed in legacy agent JSON profiles.
     "coordinator", "spec_plan", "execute", "python", "react", "typescript", "general",
 )
 
 
-def _enum(name: str, values: tuple[str, ...]) -> sa.Enum:
-    return sa.Enum(*values, name=name, native_enum=True)
-
-
 def upgrade() -> None:
     bind = op.get_bind()
+
     if bind.dialect.name == "postgresql":
-        _enum("agent_role", ROLES).create(bind, checkfirst=True)
-        _enum("agent_capability", CAPABILITIES).create(bind, checkfirst=True)
+        # Create ENUM types using raw SQL to avoid SQLAlchemy double-create issue
+        roles_sql = "CREATE TYPE agent_role AS ENUM (" + ", ".join(f"'{r}'" for r in ROLES) + ")"
+        caps_sql = "CREATE TYPE agent_capability AS ENUM (" + ", ".join(f"'{c}'" for c in CAPABILITIES) + ")"
+        bind.execute(sa.text(roles_sql))
+        bind.execute(sa.text(caps_sql))
 
-    op.create_table(
-        "role_types",
-        sa.Column("role", _enum("agent_role", ROLES), nullable=False),
-        sa.PrimaryKeyConstraint("role"),
-    )
-    op.create_table(
-        "capability_types",
-        sa.Column("capability", _enum("agent_capability", CAPABILITIES), nullable=False),
-        sa.PrimaryKeyConstraint("capability"),
-    )
-    op.create_table(
-        "agent_roles",
-        sa.Column("agent_id", sa.String(length=50), nullable=False),
-        sa.Column("role", _enum("agent_role", ROLES), nullable=False),
-        sa.ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["role"], ["role_types.role"]),
-        sa.PrimaryKeyConstraint("agent_id", "role"),
-    )
-    op.create_table(
-        "agent_capabilities",
-        sa.Column("agent_id", sa.String(length=50), nullable=False),
-        sa.Column("capability", _enum("agent_capability", CAPABILITIES), nullable=False),
-        sa.ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["capability"], ["capability_types.capability"]),
-        sa.PrimaryKeyConstraint("agent_id", "capability"),
-    )
+        # Create tables with String columns that reference the ENUM
+        bind.execute(sa.text("""
+            CREATE TABLE role_types (
+                role agent_role PRIMARY KEY
+            )
+        """))
+        bind.execute(sa.text("""
+            CREATE TABLE capability_types (
+                capability agent_capability PRIMARY KEY
+            )
+        """))
+        bind.execute(sa.text("""
+            CREATE TABLE agent_roles (
+                agent_id VARCHAR(50) NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                role agent_role NOT NULL REFERENCES role_types(role),
+                PRIMARY KEY (agent_id, role)
+            )
+        """))
+        bind.execute(sa.text("""
+            CREATE TABLE agent_capabilities (
+                agent_id VARCHAR(50) NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+                capability agent_capability NOT NULL REFERENCES capability_types(capability),
+                PRIMARY KEY (agent_id, capability)
+            )
+        """))
+    else:
+        # SQLite fallback - use String columns
+        op.create_table(
+            "role_types",
+            sa.Column("role", sa.String(50), nullable=False),
+            sa.PrimaryKeyConstraint("role"),
+        )
+        op.create_table(
+            "capability_types",
+            sa.Column("capability", sa.String(100), nullable=False),
+            sa.PrimaryKeyConstraint("capability"),
+        )
+        op.create_table(
+            "agent_roles",
+            sa.Column("agent_id", sa.String(50), nullable=False),
+            sa.Column("role", sa.String(50), nullable=False),
+            sa.ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(["role"], ["role_types.role"]),
+            sa.PrimaryKeyConstraint("agent_id", "role"),
+        )
+        op.create_table(
+            "agent_capabilities",
+            sa.Column("agent_id", sa.String(50), nullable=False),
+            sa.Column("capability", sa.String(100), nullable=False),
+            sa.ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="CASCADE"),
+            sa.ForeignKeyConstraint(["capability"], ["capability_types.capability"]),
+            sa.PrimaryKeyConstraint("agent_id", "capability"),
+        )
 
-    op.bulk_insert(
-        sa.table("role_types", sa.column("role", sa.String())),
-        [{"role": role} for role in ROLES],
-    )
-    op.bulk_insert(
-        sa.table("capability_types", sa.column("capability", sa.String())),
-        [{"capability": capability} for capability in CAPABILITIES],
-    )
+    # Seed lookup tables
+    for role in ROLES:
+        bind.execute(sa.text("INSERT INTO role_types (role) VALUES (:role)"), {"role": role})
+    for cap in CAPABILITIES:
+        bind.execute(sa.text("INSERT INTO capability_types (capability) VALUES (:cap)"), {"cap": cap})
 
-    # Only recognized enum values are copied into the canonical tables. The
-    # deprecated JSON columns remain intact, so an installation can audit or
-    # remediate legacy values before a future cleanup migration. Reading rows
-    # through SQLAlchemy keeps this data migration valid on PostgreSQL and in
-    # lightweight SQLite migration tests alike.
+    # Migrate existing data
     agents = sa.table(
         "agents", sa.column("id", sa.String()), sa.column("role", sa.String()),
         sa.column("capabilities", sa.JSON()),
     )
-    role_rows: list[dict[str, str]] = []
-    capability_rows: list[dict[str, str]] = []
     valid_roles = set(ROLES)
     valid_capabilities = set(CAPABILITIES)
+
     for row in bind.execute(sa.select(agents)).mappings():
+        agent_id = row["id"]
+
+        # Migrate role
         if row["role"] in valid_roles:
-            role_rows.append({"agent_id": row["id"], "role": row["role"]})
+            bind.execute(
+                sa.text("INSERT INTO agent_roles (agent_id, role) VALUES (:aid, :role)"),
+                {"aid": agent_id, "role": row["role"]}
+            )
+
+        # Migrate capabilities
         values = row["capabilities"] or []
         if isinstance(values, str):
             try:
                 values = json.loads(values)
             except json.JSONDecodeError:
                 values = []
-        for capability in dict.fromkeys(values if isinstance(values, list) else []):
-            if capability in valid_capabilities:
-                capability_rows.append({"agent_id": row["id"], "capability": capability})
-    if role_rows:
-        op.bulk_insert(
-            sa.table("agent_roles", sa.column("agent_id", sa.String()), sa.column("role", sa.String())),
-            role_rows,
-        )
-    if capability_rows:
-        op.bulk_insert(
-            sa.table("agent_capabilities", sa.column("agent_id", sa.String()), sa.column("capability", sa.String())),
-            capability_rows,
-        )
+
+        seen = set()
+        for cap in (values if isinstance(values, list) else []):
+            if cap in valid_capabilities and cap not in seen:
+                seen.add(cap)
+                bind.execute(
+                    sa.text("INSERT INTO agent_capabilities (agent_id, capability) VALUES (:aid, :cap)"),
+                    {"aid": agent_id, "cap": cap}
+                )
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
     op.drop_table("agent_capabilities")
     op.drop_table("agent_roles")
     op.drop_table("capability_types")
     op.drop_table("role_types")
-    bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        _enum("agent_capability", CAPABILITIES).drop(bind, checkfirst=True)
-        _enum("agent_role", ROLES).drop(bind, checkfirst=True)
+        bind.execute(sa.text("DROP TYPE IF EXISTS agent_capability"))
+        bind.execute(sa.text("DROP TYPE IF EXISTS agent_role"))
