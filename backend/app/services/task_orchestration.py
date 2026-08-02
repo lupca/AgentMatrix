@@ -2,217 +2,141 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
-import uuid
-from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
-from typing import Any, Literal
+from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import func, or_, update
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.db.models import (
-    Agent,
-    AgentRun,
-    AgentAccount,
-    AuditLog,
-    DispatchCandidate,
-    DispatchDecision,
     GateRecord,
-    LLMUsage,
     Project,
-    RunResourceUsage,
-    Setting,
     Task,
     TaskDependency,
-    TaskRound,
 )
-from app.db.models import Session as SessionModel
-from app.services.agent_matcher import AgentMatcher, POLICY_VERSION as AGENT_MATCHER_POLICY_VERSION
+from app.services.agent_matcher import AgentMatcher
 from app.services.command_builder import build_dispatch_command, build_review_command
 from app.services.landing import LandingResult, head_of, land_result
 from app.services.outbox import record_run_requested
 from app.services.task_event_service import emit_task_event
+from app.services.task_state_machine import (
+    GateDecision,
+    TaskStateMachine,
+    TransitionResult,
+    _split_result_range,
+)
+from app.services.task_validators import (
+    AutonomyPolicy,
+    BrakeDecision,
+    BrakeViolationError,
+    DependencyCycleError,
+    IdempotencyConflictError,
+    ModeViolationError,
+    OrchestrationError,
+    PrerequisiteError,
+    StaleIdempotencyRecordError,
+    TaskNotFoundError,
+    TaskValidator,
+    TransitionConflictError,
+)
 
 logger = logging.getLogger(__name__)
 
-GateDecision = Literal["approved", "rejected"]
-
-
-class OrchestrationError(RuntimeError):
-    """Base error for a rejected orchestration intent."""
-
-
-class TaskNotFoundError(OrchestrationError):
-    pass
-
-
-class TransitionConflictError(OrchestrationError):
-    pass
-
-
-class ModeViolationError(OrchestrationError):
-    pass
-
-
-class PrerequisiteError(OrchestrationError):
-    pass
-
-
-class IdempotencyConflictError(OrchestrationError):
-    pass
-
-
-class StaleIdempotencyRecordError(OrchestrationError):
-    """A cached gate record refers to a run that is no longer active.
-
-    Returning this record's cached ``applied=True`` result would tell the
-    caller a dispatch is in flight when in fact nothing is running. Callers
-    must retry with a new idempotency key rather than reusing the stale one.
-    """
-
-
-class BrakeViolationError(OrchestrationError):
-    """An autonomy or budget brake stopped forward progress."""
-
-
-class DependencyCycleError(OrchestrationError):
-    """A requested task_dependencies edge would close a cycle (or self-loop)."""
-
-
-@dataclass(frozen=True)
-class BrakeDecision:
-    allowed: bool
-    reason: str | None = None
-    code: str | None = None
-    queue: bool = False
-    cost_usd: Decimal = Decimal("0")
-    retry_after_seconds: int | None = None
-    observations: dict[str, Any] | None = None
-
-
-def _split_result_range(result_ref: str) -> tuple[str | None, str | None]:
-    """Expose the committed review range to the review gate/run context."""
-    if ".." not in result_ref:
-        return None, result_ref
-    base, head = result_ref.split("..", 1)
-    return base or None, head or None
-
-
-@dataclass(frozen=True)
-class TransitionResult:
-    task: Task
-    gate_record: GateRecord
-    applied: bool
-    agent_run: AgentRun | None = None
-    context: dict[str, Any] | None = None
-
-    @property
-    def status(self) -> str:
-        return self.gate_record.status
+# Re-export all exception types, dataclasses, and functions for backwards compatibility
+__all__ = [
+    "OrchestrationError",
+    "TaskNotFoundError",
+    "TransitionConflictError",
+    "ModeViolationError",
+    "PrerequisiteError",
+    "IdempotencyConflictError",
+    "StaleIdempotencyRecordError",
+    "BrakeViolationError",
+    "DependencyCycleError",
+    "BrakeDecision",
+    "AutonomyPolicy",
+    "GateDecision",
+    "TransitionResult",
+    "TaskOrchestrationService",
+    "build_dispatch_command",
+    "build_review_command",
+    "record_run_requested",
+    "emit_task_event",
+    "head_of",
+    "land_result",
+    "LandingResult",
+    "AgentMatcher",
+]
 
 
 class TaskOrchestrationService:
     """The only application service allowed to mutate task lifecycle fields."""
 
-    MODES = {"supervised", "plan-only", "bypass"}
+    MODES = TaskValidator.MODES
     GATED_ACTIONS = {"spec_plan", "dispatch", "review_order", "verdict"}
     PATCHABLE_FIELDS = {"plan", "acceptance_criteria", "priority", "tags", "raw_input"}
-    # A run in any of these statuses is unconditionally no longer "in flight".
-    # "failed" is deliberately excluded here: the worker retries a failed run
-    # in place (status goes back to "queued") until its attempts are
-    # exhausted, so a persisted "failed" status only means dead once
-    # ``attempt >= max_attempts`` — see `_reject_if_stale_dispatch_record`.
-    _DEAD_RUN_STATUSES = {"success", "timeout", "cancelled"}
-    _UNAVAILABLE_REVIEWER_STATUSES = {"disabled", "offline", "deprecated"}
+    _DEAD_RUN_STATUSES = TaskValidator._DEAD_RUN_STATUSES
+    _UNAVAILABLE_REVIEWER_STATUSES = TaskValidator._UNAVAILABLE_REVIEWER_STATUSES
 
-    @dataclass(frozen=True)
-    class AutonomyPolicy:
-        autonomy: str = "supervised"
-        auto_max_risk: str = "normal"
-        auto_max_rounds: int = 3
-
-    # Unknown risk labels, including legacy labels such as ``medium``, are
-    # deliberately ineligible for automatic execution (fail safe).
-    _RISK_LEVELS = {"low": 0, "normal": 1, "high": 2}
-    _AUTONOMY_VALUES = {"plan-only", "supervised", "auto"}
-
-    def resolve_autonomy(self, project: Project | str | None) -> AutonomyPolicy:
-        """Resolve project policy over global settings, failing safe per key."""
-        project_row = (
-            project
-            if isinstance(project, Project)
-            else (self.db.get(Project, project) if project is not None else None)
-        )
-        override = project_row.autonomy_policy if project_row is not None else None
-        override = override if isinstance(override, dict) else {}
-
-        def value(key: str, default: Any) -> Any:
-            if key in override:
-                return override[key]
-            row = self.db.get(Setting, key)
-            return default if row is None else row.value
-
-        autonomy = value("autonomy", "supervised")
-        if not isinstance(autonomy, str) or autonomy.strip().lower() not in self._AUTONOMY_VALUES:
-            autonomy = "supervised"
-        else:
-            autonomy = autonomy.strip().lower()
-
-        max_risk = value("auto_max_risk", "normal")
-        if not isinstance(max_risk, str) or max_risk.strip().lower() not in {"low", "normal"}:
-            max_risk = "normal"
-        else:
-            max_risk = max_risk.strip().lower()
-
-        try:
-            max_rounds = int(value("auto_max_rounds", 3))
-        except (TypeError, ValueError):
-            max_rounds = 3
-        max_rounds = max(1, max_rounds)
-        return self.AutonomyPolicy(autonomy, max_risk, max_rounds)
-
-    def mode_for_task(self, task: Task, *, risk: str | None = None) -> str:
-        # Non-default modes are explicit per-task governance choices. Keep
-        # them stable while allowing the default supervised snapshot to be
-        # re-resolved when the project/global autonomy policy changes.
-        if task.mode in {"plan-only", "bypass"}:
-            return task.mode
-        policy = self.resolve_autonomy(task.project)
-        if policy.autonomy == "plan-only":
-            return "plan-only"
-        if policy.autonomy != "auto":
-            return "supervised"
-        normalized_risk = (risk if risk is not None else task.risk or "").strip().lower()
-        if normalized_risk not in self._RISK_LEVELS:
-            return "supervised"
-        if self._RISK_LEVELS[normalized_risk] > self._RISK_LEVELS[policy.auto_max_risk]:
-            return "supervised"
-        return "bypass"
+    AutonomyPolicy = AutonomyPolicy
 
     def __init__(self, db: Session):
         self.db = db
+        self.validator = TaskValidator(db)
+        self.state_machine = TaskStateMachine(db)
 
+    # Autonomy & mode helpers
+    def resolve_autonomy(self, project: Project | str | None) -> AutonomyPolicy:
+        return self.validator.resolve_autonomy(project)
+
+    def mode_for_task(self, task: Task, *, risk: str | None = None) -> str:
+        return self.validator.mode_for_task(task, risk=risk)
+
+    @property
+    def autonomy_enabled(self) -> bool:
+        return self.validator.autonomy_enabled
+
+    @property
+    def max_cost_usd_per_task(self) -> Decimal:
+        return self.validator.max_cost_usd_per_task
+
+    @property
+    def max_concurrent_runs(self) -> int:
+        return self.validator.max_concurrent_runs
+
+    @property
+    def run_timeout_seconds(self) -> int:
+        return self.validator.run_timeout_seconds
+
+    @property
+    def max_active_seconds_per_run(self) -> int:
+        return self.validator.max_active_seconds_per_run
+
+    @property
+    def max_tool_calls_per_run(self) -> int:
+        return self.validator.max_tool_calls_per_run
+
+    @property
+    def max_no_progress_seconds(self) -> int:
+        return self.validator.max_no_progress_seconds
+
+    def check_brakes(
+        self,
+        task: Task,
+        *,
+        for_spawn: bool = False,
+        audit: bool = False,
+        run_id: str | None = None,
+        agent_id: str | None = None,
+    ) -> BrakeDecision:
+        return self.validator.check_brakes(
+            task, for_spawn=for_spawn, audit=audit, run_id=run_id, agent_id=agent_id
+        )
+
+    # Transition entry point
     def transition(self, action: str, **kwargs: Any) -> TransitionResult:
         """Generic entry point used by adapters that select an action dynamically."""
-        handlers = {
-            "dispatch": self.request_dispatch,
-            "review_order": self.request_review,
-            "verdict": self.request_verdict,
-            "execution_succeeded": self.record_execution_success,
-            "execution_failed": self.record_execution_failure,
-            "cancel": self.cancel_run,
-            "decide": self.decide_gate,
-        }
-        try:
-            handler = handlers[action]
-        except KeyError as exc:
-            raise OrchestrationError(f"Unknown transition action: {action}") from exc
-        return handler(**kwargs)
+        return self.state_machine.transition(action, **kwargs)
 
     def request_dispatch(
         self,
@@ -226,155 +150,16 @@ class TaskOrchestrationService:
         expected_status: str | None = None,
         effort: str | None = None,
     ) -> TransitionResult:
-        if kind not in {"execute", "review"}:
-            raise PrerequisiteError(f"Invalid dispatch kind: {kind}")
-        task = self._task(task_id)
-        if kind == "execute" and (task.open_questions or []):
-            question_count = len(task.open_questions)
-            raise PrerequisiteError(
-                f"Spec has {question_count} unanswered open questions; answer them and "
-                "re-run generate_spec_plan before dispatch."
-            )
-        if expected_status is None:
-            if kind == "review":
-                expected_status = "awaiting-review"
-            elif task.status in {"failed", "changes-requested"}:
-                # Retry of a failed task, or a replan round after a fail
-                # verdict (CTV2-234) — both re-dispatch without SQL surgery.
-                expected_status = task.status
-            else:
-                expected_status = "todo"
-        elif kind == "execute" and expected_status not in {
-            "todo", "failed", "changes-requested",
-        }:
-            # Execute dispatch accepts "todo" (normal), "failed" (retry), or
-            # "changes-requested" (replan round after a fail verdict).
-            # Review dispatch may target other pre-states like "awaiting-review".
-            raise PrerequisiteError(
-                "execute dispatch requires expected_status in "
-                "{'todo', 'failed', 'changes-requested'}"
-            )
-        if not (task.acceptance_criteria or []) and not task.legacy_no_ac:
-            raise PrerequisiteError(
-                "dispatch requires acceptance_criteria; run the spec/plan gate "
-                "first (or set legacy_no_ac for pre-existing tasks)"
-            )
-        agent = self.db.get(Agent, agent_id)
-        if agent is None:
-            raise PrerequisiteError(f"Agent {agent_id} not found")
-        if kind == "review":
-            self._require_independent(task.executor, agent_id)
-        project = self.db.get(Project, task.project)
-        resolved_effort = effort or agent.effort or "medium"
-        resolved_timeout = timeout_seconds or self.run_timeout_seconds
-        try:
-            command, repo_root, cli = build_dispatch_command(
-                task,
-                agent,
-                project,
-                effort=resolved_effort,
-                db=self.db,
-            )
-        except ValueError as exc:
-            raise PrerequisiteError(str(exc)) from exc
-
-        dispatch_decision_id = self._record_dispatch_decision(
-            task=task,
-            kind=kind,
-            idempotency_key=idempotency_key,
-            selected_agent_id=agent_id,
-        )
-
-        return self._request_gate(
-            task=task,
-            gate_type="dispatch",
+        return self.state_machine.request_dispatch(
+            task_id=task_id,
+            agent_id=agent_id,
             actor=actor,
             idempotency_key=idempotency_key,
+            timeout_seconds=timeout_seconds,
+            kind=kind,
             expected_status=expected_status,
-            payload={
-                "agent_id": agent_id,
-                "command": command,
-                "repo_root": repo_root,
-                "cli": cli,
-                "timeout_seconds": resolved_timeout,
-                "kind": kind,
-                "agent_role": "reviewer" if kind == "review" else "executor",
-                "effort": resolved_effort,
-                "brake_agent_id": agent_id,
-                "dispatch_decision_id": dispatch_decision_id,
-            },
+            effort=effort,
         )
-
-    def _record_dispatch_decision(
-        self,
-        *,
-        task: Task,
-        kind: str,
-        idempotency_key: str,
-        selected_agent_id: str,
-    ) -> str:
-        """Score every agent for this dispatch and persist the decision (CTV2-202).
-
-        Runs before the gate/idempotency machinery in ``_request_gate`` so the
-        AgentRun it may lead to (immediately, or later on supervised
-        approval) can link back to it via ``dispatch_decision_id``. The
-        decision id is derived deterministically from
-        (task_id, idempotency_key, kind) rather than randomly generated, so a
-        retried call with the same idempotency key reuses the same row
-        instead of inserting a duplicate every time `_request_gate` replays
-        an already-decided/idempotent request.
-        """
-        decision_id = str(
-            uuid.uuid5(
-                uuid.NAMESPACE_URL,
-                f"dispatch-decision:{task.id}:{idempotency_key}:{kind}",
-            )
-        )
-        if self.db.get(DispatchDecision, decision_id) is not None:
-            return decision_id
-
-        exclude_agent_id = task.executor if kind == "review" else None
-        scoring = AgentMatcher(self.db).score_candidates(
-            task, top_n=1, exclude_agent_id=exclude_agent_id
-        )
-        selected = next(
-            (c for c in scoring.candidates if c.agent_id == selected_agent_id), None
-        )
-        top_choice = scoring.suggestions[0].agent_id if scoring.suggestions else None
-
-        self.db.add(
-            DispatchDecision(
-                id=decision_id,
-                task_id=task.id,
-                task_round_id=task.current_round_id,
-                kind=kind,
-                policy_version=AGENT_MATCHER_POLICY_VERSION,
-                task_feature_snapshot=scoring.feature_snapshot,
-                selected_agent_id=selected_agent_id,
-                selected_score=selected.final_score if selected else None,
-                selection_reason=(
-                    selected.reason
-                    if selected and selected.reason
-                    else "selected outside matcher ranking"
-                ),
-                exploration=False,
-                human_override=bool(top_choice) and top_choice != selected_agent_id,
-            )
-        )
-        self.db.add_all(
-            DispatchCandidate(
-                dispatch_decision_id=decision_id,
-                agent_id=candidate.agent_id,
-                eligible=candidate.eligible,
-                rejection_reason=candidate.rejection_reason,
-                predicted_pass1=candidate.predicted_pass1,
-                predicted_runtime=candidate.predicted_runtime,
-                quota_pressure=candidate.quota_pressure,
-                final_score=candidate.final_score,
-            )
-            for candidate in scoring.candidates
-        )
-        return decision_id
 
     def request_review(
         self,
@@ -387,78 +172,14 @@ class TaskOrchestrationService:
         timeout_seconds: int | None = None,
         expected_status: str = "awaiting-review",
     ) -> TransitionResult:
-        task = self._task(task_id)
-        if not task.result_ref or not task.result_ref.strip():
-            raise PrerequisiteError("result_ref is required before review")
-        if not reviewer or not reviewer.strip():
-            raise PrerequisiteError("reviewer is required")
-        reviewer = reviewer.strip()
-        if not task.executor or not task.executor.strip():
-            raise PrerequisiteError("executor is required")
-        agent = self.db.get(Agent, reviewer)
-        invalid_reason: str | None = None
-        if self._principal(task.executor) == self._principal(reviewer):
-            invalid_reason = (
-                "violates four-eyes; reviewer must differ from executor "
-                f"{task.executor!r}"
-            )
-        elif agent is None:
-            invalid_reason = "does not exist"
-        elif (agent.status or "").strip().lower() in self._UNAVAILABLE_REVIEWER_STATUSES:
-            invalid_reason = f"has status {agent.status!r}"
-        if invalid_reason is not None:
-            suggestions = AgentMatcher(self.db).suggest_agents(
-                task, top_n=3, exclude_agent_id=task.executor
-            )
-            suggestion_text = ", ".join(item.agent_id for item in suggestions)
-            if not suggestion_text:
-                suggestion_text = "none currently available"
-            raise PrerequisiteError(
-                f"Requested reviewer {reviewer!r} is invalid: {invalid_reason}. "
-                f"Valid reviewer suggestions: {suggestion_text}"
-            )
-        self._require_independent(task.executor, reviewer)
-        base_ref, head_ref = _split_result_range(task.result_ref)
-        if not base_ref or not head_ref:
-            raise PrerequisiteError(
-                "result_ref must be a recorded base..head range before review "
-                "(the review boundary is never inferred)"
-            )
-        project = self.db.get(Project, task.project)
-        resolved_timeout = timeout_seconds or self.run_timeout_seconds
-        try:
-            command, repo_root, cli = build_review_command(
-                task,
-                agent,
-                project,
-                base_ref,
-                head_ref,
-                db=self.db,
-            )
-        except ValueError as exc:
-            raise PrerequisiteError(str(exc)) from exc
-
-        return self._request_gate(
-            task=task,
-            gate_type="review_order",
+        return self.state_machine.request_review(
+            task_id=task_id,
+            reviewer=reviewer,
             actor=actor,
             idempotency_key=idempotency_key,
+            selection_reason=selection_reason,
+            timeout_seconds=timeout_seconds,
             expected_status=expected_status,
-            payload={
-                "reviewer": reviewer,
-                "result_ref": task.result_ref,
-                "base_ref": base_ref,
-                "head_ref": head_ref,
-                "command": command,
-                "repo_root": repo_root,
-                "cli": cli,
-                "timeout_seconds": resolved_timeout,
-                "selection_reason": (
-                    selection_reason.strip()
-                    if selection_reason and selection_reason.strip()
-                    else f"{reviewer} was explicitly requested by {actor}"
-                ),
-            },
         )
 
     def request_verdict(
@@ -472,29 +193,14 @@ class TaskOrchestrationService:
         findings: list[Any] | None = None,
         expected_status: str = "in-review",
     ) -> TransitionResult:
-        task = self._task(task_id)
-        normalized_verdict = verdict.strip().lower()
-        if normalized_verdict not in {"pass", "changes"}:
-            raise PrerequisiteError("Verdict must be pass or changes")
-        self._validate_verdict_prerequisites(
-            task,
-            actor=actor,
-            verdict=normalized_verdict,
+        return self.state_machine.request_verdict(
+            task_id=task_id,
+            verdict=verdict,
             ac_results=ac_results,
-        )
-        return self._request_gate(
-            task=task,
-            gate_type="verdict",
             actor=actor,
             idempotency_key=idempotency_key,
+            findings=findings,
             expected_status=expected_status,
-            payload={
-                "verdict": normalized_verdict,
-                "ac_results": ac_results,
-                "findings": findings or [],
-                "result_ref": task.result_ref,
-                "reviewer": task.reviewer,
-            },
         )
 
     def decide_gate(
@@ -505,122 +211,11 @@ class TaskOrchestrationService:
         actor: str,
         idempotency_key: str,
     ) -> TransitionResult:
-        if decision not in {"approved", "rejected"}:
-            raise PrerequisiteError("Decision must be approved or rejected")
-        pending = (
-            self.db.query(GateRecord)
-            .filter(GateRecord.id == gate_record_id)
-            .with_for_update()
-            .first()
-        )
-        if pending is None or pending.status != "pending":
-            raise TransitionConflictError(
-                f"Pending gate record {gate_record_id} not found"
-            )
-        task = self._task(pending.task_id)
-        decision_payload = {
-            "pending_id": pending.id,
-            "decision": decision,
-            "gate_type": pending.gate_type,
-        }
-        input_hash = self._input_hash(decision_payload)
-        existing = self._idempotent_record(task.id, idempotency_key, input_hash)
-        if existing is not None:
-            # No staleness guard here (unlike `_request_gate`): this key is
-            # keyed off the decision itself (gate_record_id + decision), not
-            # off a dispatch attempt, so it has no attempt/nonce component to
-            # roll forward. The cached record is an immutable historical
-            # fact — "this decision was made and it created run X" — which
-            # stays true and safely replayable no matter how run X later
-            # finishes. Rejecting it as "stale" here previously turned any
-            # replay of an already-decided gate (e.g. a duplicate
-            # POST /gates/{id}/decision) into a permanent, unrecoverable
-            # error once the created run went terminal (CTV2-088 round 2).
-            return self._result_for_record(task, existing)
-
-        prior_decision = (
-            self.db.query(GateRecord)
-            .filter(
-                GateRecord.parent_id == pending.id,
-                GateRecord.status.in_(["approved", "rejected"]),
-            )
-            .first()
-        )
-        if prior_decision is not None:
-            raise TransitionConflictError(
-                f"Gate record {pending.id} was already {prior_decision.status}"
-            )
-
-        effective_decision = decision
-        reason: str | None = None
-        if task.mode == "plan-only" and pending.gate_type in {"dispatch", "verdict"}:
-            effective_decision = "rejected"
-            reason = "plan-only mode blocks this transition"
-
-        run: AgentRun | None = None
-        output_ref: str | None = None
-        self._deferred_landing_event = None
-        if effective_decision == "approved":
-            run, output_ref = self._apply_gate(
-                task,
-                pending.gate_type,
-                pending.input_payload or {},
-                idempotency_key=pending.idempotency_key,
-            )
-
-        record = self._ledger_record(
-            task=task,
-            gate_type=pending.gate_type,
-            status=effective_decision,
+        return self.state_machine.decide_gate(
+            gate_record_id=gate_record_id,
+            decision=decision,
             actor=actor,
             idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=decision_payload,
-            output_ref=output_ref,
-            output_payload=self._gate_output(task, pending.gate_type),
-            error_message=reason,
-            parent_id=pending.id,
-        )
-        if getattr(self, "_deferred_landing_event", None) is None:
-            task.awaiting_approval = False
-            task.approval_prompt = None
-        elif self._deferred_landing_event[0] == "landed":
-            task.awaiting_approval = False
-            task.approval_prompt = None
-        self._audit(task, record, reason=reason)
-        landing_event = getattr(self, "_deferred_landing_event", None)
-        self._deferred_landing_event = None
-        if landing_event is not None:
-            emit_task_event(
-                task_id=task.id,
-                event_type=landing_event[0],
-                payload=landing_event[1],
-                db=self.db,
-            )
-        emit_task_event(
-            task_id=task.id,
-            event_type="gate_passed" if effective_decision == "approved" else "gate_rejected",
-            payload={
-                "gate": pending.gate_type,
-                "gate_record_id": record.id,
-                "reason": reason,
-            },
-            db=self.db,
-        )
-        self.db.commit()
-        self.db.refresh(task)
-        self.db.refresh(record)
-        self._resolve_gate_notification(task.id, pending.gate_type, pending.id, effective_decision)
-        if run is not None:
-            self.db.refresh(run)
-        if pending.gate_type == "verdict" and task.status == "done":
-            self.wake_dependents(task.id)
-        return TransitionResult(
-            task=task,
-            gate_record=record,
-            applied=effective_decision == "approved",
-            agent_run=run,
-            context=(pending.input_payload or {}) if run is not None else None,
         )
 
     def record_execution_success(
@@ -633,39 +228,14 @@ class TaskOrchestrationService:
         expected_status: str = "dispatched",
         run_id: str | None = None,
     ) -> TransitionResult:
-        task = self._task(task_id)
-        payload = {
-            "expected_status": expected_status,
-            "result_ref": result_ref,
-            "run_id": run_id,
-        }
-        input_hash = self._input_hash(payload)
-        existing = self._idempotent_record(task_id, idempotency_key, input_hash)
-        if existing is not None:
-            return self._result_for_record(task, existing)
-        self._assert_status(task, expected_status)
-        now = datetime.now(timezone.utc)
-        self._cas_status(task, "awaiting-review")
-        task.current_gate = "review_order"
-        task.result_ref = result_ref
-        task.error = None
-        task.updated_at = now
-        record = self._ledger_record(
-            task=task,
-            gate_type="execution",
-            status="approved",
+        return self.state_machine.record_execution_success(
+            task_id=task_id,
+            result_ref=result_ref,
             actor=actor,
             idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=payload,
-            output_ref=result_ref or run_id,
-            output_payload={"status": "awaiting-review", "run_id": run_id},
+            expected_status=expected_status,
+            run_id=run_id,
         )
-        self._audit(task, record)
-        self.db.commit()
-        self.db.refresh(task)
-        self.db.refresh(record)
-        return TransitionResult(task, record, True)
 
     def record_execution_failure(
         self,
@@ -677,37 +247,14 @@ class TaskOrchestrationService:
         expected_status: str = "dispatched",
         run_id: str | None = None,
     ) -> TransitionResult:
-        task = self._task(task_id)
-        payload = {
-            "expected_status": expected_status,
-            "error": error,
-            "run_id": run_id,
-        }
-        input_hash = self._input_hash(payload)
-        existing = self._idempotent_record(task_id, idempotency_key, input_hash)
-        if existing is not None:
-            return self._result_for_record(task, existing)
-        self._assert_status(task, expected_status)
-        self._cas_status(task, "failed")
-        task.error = error
-        task.updated_at = datetime.now(timezone.utc)
-        record = self._ledger_record(
-            task=task,
-            gate_type="execution",
-            status="rejected",
+        return self.state_machine.record_execution_failure(
+            task_id=task_id,
+            error=error,
             actor=actor,
             idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=payload,
-            output_ref=run_id,
-            error_message=error,
+            expected_status=expected_status,
+            run_id=run_id,
         )
-        self._audit(task, record, reason=error)
-        self.db.commit()
-        self.db.refresh(task)
-        self.db.refresh(record)
-        self.wake_dependents(task_id)
-        return TransitionResult(task, record, True)
 
     def record_review_failure(
         self,
@@ -719,74 +266,21 @@ class TaskOrchestrationService:
         expected_status: str = "in-review",
         run_id: str | None = None,
     ) -> TransitionResult:
-        """Escalate a review run that produced no usable, schema-valid result.
-
-        A missing or malformed review artifact must never be treated as an
-        implicit pass — it is routed to the same human-escalation shape as a
-        safety-brake trip (``status="failed"`` + ``awaiting_approval``)
-        rather than left stuck in ``in-review`` or silently advanced.
-        """
-        task = self._task(task_id)
-        payload = {
-            "expected_status": expected_status,
-            "error": error,
-            "run_id": run_id,
-        }
-        input_hash = self._input_hash(payload)
-        existing = self._idempotent_record(task_id, idempotency_key, input_hash)
-        if existing is not None:
-            return self._result_for_record(task, existing)
-        self._assert_status(task, expected_status)
-        now = datetime.now(timezone.utc)
-        self._cas_status(task, "failed")
-        task.error = error
-        task.awaiting_approval = True
-        task.approval_prompt = f"Review result invalid or missing: {error}"
-        task.updated_at = now
-        record = self._ledger_record(
-            task=task,
-            gate_type="review_result",
-            status="rejected",
+        return self.state_machine.record_review_failure(
+            task_id=task_id,
+            error=error,
             actor=actor,
             idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=payload,
-            output_ref=run_id,
-            error_message=error,
+            expected_status=expected_status,
+            run_id=run_id,
         )
-        self._audit(task, record, reason=error)
-        self.db.commit()
-        self.db.refresh(task)
-        self.db.refresh(record)
-        self.wake_dependents(task_id)
-        return TransitionResult(task, record, True)
 
     def escalate_task(
         self, *, task_id: str, reason: str, actor: str = "system"
     ) -> GateRecord:
-        """Record a blocked/escalated task state through the lifecycle ledger."""
-        task = self._task(task_id)
-        self._cas_status(task, "failed")
-        task.error = reason
-        task.awaiting_approval = True
-        task.approval_prompt = reason
-        task.updated_at = datetime.now(timezone.utc)
-        payload = {"reason": reason, "task_status": "failed"}
-        record = self._ledger_record(
-            task=task,
-            gate_type="escalation",
-            status="rejected",
-            actor=actor,
-            idempotency_key=str(uuid.uuid4()),
-            input_hash=self._input_hash(payload),
-            payload=payload,
-            error_message=reason,
+        return self.state_machine.escalate_task(
+            task_id=task_id, reason=reason, actor=actor
         )
-        self._audit(task, record, reason=reason)
-        self.db.commit()
-        self.db.refresh(task)
-        self.db.refresh(record)
-        return record
 
     def record_dispatch_queue_failure(
         self,
@@ -796,45 +290,9 @@ class TaskOrchestrationService:
         actor: str,
         idempotency_key: str,
     ) -> TransitionResult:
-        run = self.db.get(AgentRun, run_id)
-        if run is None:
-            raise TransitionConflictError(f"Run {run_id} not found")
-        task = self._task(run.task_id)
-        # A review-kind run reaches this from "in-review" (set by the
-        # review_order gate), not "dispatched" like an execute run; failure
-        # rolls the task back to "awaiting-review" so review can be
-        # re-requested, rather than all the way to "todo".
-        expected_status = "in-review" if run.kind == "review" else "dispatched"
-        reset_status = "awaiting-review" if run.kind == "review" else "todo"
-        payload = {"run_id": run_id, "error": error}
-        input_hash = self._input_hash(payload)
-        existing = self._idempotent_record(task.id, idempotency_key, input_hash)
-        if existing is not None:
-            return self._result_for_record(task, existing)
-        self._assert_status(task, expected_status)
-        now = datetime.now(timezone.utc)
-        run.status = "failed"
-        run.error_message = error
-        run.completed_at = now
-        self._cas_status(task, reset_status)
-        task.error = error
-        task.updated_at = now
-        record = self._ledger_record(
-            task=task,
-            gate_type="dispatch_queue",
-            status="rejected",
-            actor=actor,
-            idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=payload,
-            output_ref=run_id,
-            error_message=error,
+        return self.state_machine.record_dispatch_queue_failure(
+            run_id=run_id, error=error, actor=actor, idempotency_key=idempotency_key
         )
-        self._audit(task, record, reason=error)
-        self.db.commit()
-        self.db.refresh(task)
-        self.db.refresh(record)
-        return TransitionResult(task, record, True, agent_run=run)
 
     def cancel_run(
         self,
@@ -843,52 +301,9 @@ class TaskOrchestrationService:
         actor: str,
         idempotency_key: str,
     ) -> TransitionResult:
-        run = self.db.get(AgentRun, run_id)
-        if run is None:
-            raise TransitionConflictError(f"Run {run_id} not found")
-        task = self._task(run.task_id)
-        payload = {"run_id": run_id}
-        input_hash = self._input_hash(payload)
-        existing = self._idempotent_record(task.id, idempotency_key, input_hash)
-        if existing is not None:
-            return self._result_for_record(task, existing)
-        if run.status not in {"queued", "running"}:
-            raise TransitionConflictError(
-                f"Cannot cancel run in status: {run.status}"
-            )
-        now = datetime.now(timezone.utc)
-        run.status = "cancelled"
-        run.error_message = "Cancelled by user"
-        run.completed_at = now
-        if task.status == "dispatched":
-            self._cas_status(task, "todo")
-        task.updated_at = now
-        record = self._ledger_record(
-            task=task,
-            gate_type="cancellation",
-            status="approved",
-            actor=actor,
-            idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=payload,
-            output_ref=run_id,
-            output_payload={"run_status": "cancelled", "task_status": task.status},
+        return self.state_machine.cancel_run(
+            run_id=run_id, actor=actor, idempotency_key=idempotency_key
         )
-        self._audit(task, record)
-        emit_task_event(
-            task_id=task.id,
-            event_type="cancelled",
-            payload={
-                "run_id": run.id,
-                "cancelled_by": actor,
-            },
-            db=self.db,
-        )
-        self.db.commit()
-        self.db.refresh(task)
-        self.db.refresh(record)
-        self.db.refresh(run)
-        return TransitionResult(task, record, True, agent_run=run)
 
     def update_task_fields(
         self,
@@ -897,37 +312,9 @@ class TaskOrchestrationService:
         patch: dict[str, Any],
         actor: str,
     ) -> Task:
-        """Edit plan/acceptance_criteria/priority/tags without touching status.
-
-        Status transitions stay exclusive to the gate flow (dispatch/review/
-        verdict); this is metadata-only and always writes an AuditLog row.
-        """
-        task = self._task(task_id)
-        if not actor or not actor.strip():
-            raise PrerequisiteError("actor is required")
-        if not patch:
-            raise PrerequisiteError("patch must include at least one field")
-        unknown = set(patch) - self.PATCHABLE_FIELDS
-        if unknown:
-            raise PrerequisiteError(
-                f"Cannot patch fields: {', '.join(sorted(unknown))}. "
-                f"Allowed fields: {', '.join(sorted(self.PATCHABLE_FIELDS))}"
-            )
-
-        for field, value in patch.items():
-            setattr(task, field, value)
-        task.updated_at = datetime.now(timezone.utc)
-        self.db.add(
-            AuditLog(
-                task_id=task.id,
-                action="update_task",
-                actor=actor,
-                details={"patch": patch},
-            )
+        return self.state_machine.update_task_fields(
+            task_id=task_id, patch=patch, actor=actor
         )
-        self.db.commit()
-        self.db.refresh(task)
-        return task
 
     def write_spec_plan(
         self,
@@ -943,94 +330,18 @@ class TaskOrchestrationService:
         spec_clarity: str,
         open_questions: list[str],
     ) -> Task:
-        """Persist the spec/plan gate's LLM output onto a task ('todo' only).
-
-        This is the sole write path for a task's AC/plan/files/tests/risk on
-        the way into dispatch: `request_dispatch` refuses tasks with empty
-        `acceptance_criteria`, so this call (or an explicit `legacy_no_ac`
-        backfill) is what actually opens the dispatch gate for a new task.
-        """
-        task = self._task(task_id)
-        if not actor or not actor.strip():
-            raise PrerequisiteError("actor is required")
-        self._assert_status(task, "todo")
-        if not acceptance_criteria:
-            raise PrerequisiteError("acceptance_criteria must not be empty")
-        if spec_clarity not in {"high", "medium", "low"}:
-            raise PrerequisiteError("spec_clarity must be high, medium, or low")
-
-        task.acceptance_criteria = acceptance_criteria
-        task.plan = plan
-        task.files = files
-        task.tests = tests
-        task.risk = risk
-        task.spec_clarity = spec_clarity
-        task.open_questions = open_questions
-        # Existing explicitly governed tasks (notably legacy bypass tasks)
-        # retain their mode; newly created tasks start supervised and are
-        # resolved from the autonomy policy when their risk is known.
-        if task.mode == "supervised":
-            task.mode = self.mode_for_task(task, risk=risk)
-        task.flows = flows
-        task.current_gate = "plan"
-        if open_questions or spec_clarity != "high":
-            questions = "\n".join(
-                f"{index}) {question}" for index, question in enumerate(open_questions, 1)
-            )
-            task.awaiting_approval = True
-            question_block = f"\n{questions}" if questions else ""
-            task.approval_prompt = (
-                f"Spec chưa đủ rõ (clarity={spec_clarity}). Trả lời các câu hỏi sau "
-                f"rồi chạy lại generate_spec_plan:{question_block}"
-            )
-        else:
-            task.open_questions = []
-            task.awaiting_approval = False
-            task.approval_prompt = None
-        task.updated_at = datetime.now(timezone.utc)
-        payload = {
-            "acceptance_criteria": acceptance_criteria,
-            "plan": plan,
-            "files": files,
-            "tests": tests,
-            "risk": risk,
-            "flows": flows,
-            "spec_clarity": spec_clarity,
-            "open_questions": open_questions,
-        }
-        # Spec clarity changes the lifecycle projection even though the task
-        # remains todo. Compare-and-set the observed version so two planners
-        # cannot silently overwrite each other's escalation state.
-        self._cas_status(task, task.status)
-        record = self._ledger_record(
-            task=task,
-            gate_type="spec_plan",
-            status="approved",
+        return self.state_machine.write_spec_plan(
+            task_id=task_id,
             actor=actor,
-            idempotency_key=str(uuid.uuid4()),
-            input_hash=self._input_hash(payload),
-            payload=payload,
-            output_payload=self._gate_output(task, "spec_plan"),
+            acceptance_criteria=acceptance_criteria,
+            plan=plan,
+            files=files,
+            tests=tests,
+            risk=risk,
+            flows=flows,
+            spec_clarity=spec_clarity,
+            open_questions=open_questions,
         )
-        self._audit(task, record)
-        self.db.add(
-            AuditLog(
-                task_id=task.id,
-                action="spec_plan_generated",
-                actor=actor,
-                details={
-                    "ac_count": len(acceptance_criteria),
-                    "files": files,
-                    "flows": flows,
-                    "risk": risk,
-                    "spec_clarity": spec_clarity,
-                    "open_question_count": len(open_questions),
-                },
-            )
-        )
-        self.db.commit()
-        self.db.refresh(task)
-        return task
 
     def reopen_for_replan(
         self,
@@ -1040,55 +351,15 @@ class TaskOrchestrationService:
         idempotency_key: str,
         expected_status: str = "changes-requested",
     ) -> TransitionResult:
-        """Reopen a changes-requested task back to `todo` for another round.
-
-        Mechanical only: it does not regenerate acceptance_criteria/plan
-        content. A real content replan is a separate, explicit call into
-        `write_spec_plan` before the task is re-dispatched; this method just
-        clears the terminal `changes-requested` state so `request_dispatch`
-        (which requires status "todo") can run again.
-        """
-        task = self._task(task_id)
-        payload = {"expected_status": expected_status}
-        input_hash = self._input_hash(payload)
-        existing = self._idempotent_record(task_id, idempotency_key, input_hash)
-        if existing is not None:
-            return self._result_for_record(task, existing)
-        self._assert_status(task, expected_status)
-        self._cas_status(task, "todo")
-        task.current_gate = "plan"
-        task.verdict = None
-        task.updated_at = datetime.now(timezone.utc)
-        record = self._ledger_record(
-            task=task,
-            gate_type="replan",
-            status="approved",
+        return self.state_machine.reopen_for_replan(
+            task_id=task_id,
             actor=actor,
             idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=payload,
-            output_payload={"task_status": task.status},
+            expected_status=expected_status,
         )
-        self._audit(task, record)
-        self.db.commit()
-        self.db.refresh(task)
-        self.db.refresh(record)
-        return TransitionResult(task, record, True)
 
     def changes_round_count(self, task_id: str) -> int:
-        """Return the highest persisted TaskRound number for a task.
-
-        Used as the round counter by the orchestration driver
-        (`advance_task`). TaskRound is the source of truth for dispatch
-        history; GateRecord also contains replan records, but those records
-        do not represent dispatch rounds and may exist for legacy tasks.
-        """
-        return int(
-            self.db.query(func.max(TaskRound.round_no))
-            .filter(TaskRound.task_id == task_id)
-            .scalar()
-            or 0
-        )
+        return self.state_machine.changes_round_count(task_id)
 
     def add_dependency(
         self,
@@ -1097,1240 +368,77 @@ class TaskOrchestrationService:
         depends_on_task_id: str,
         actor: str,
     ) -> TaskDependency:
-        """Record that ``task_id`` cannot dispatch until ``depends_on_task_id`` is done.
-
-        Rejects a self-dependency and any edge that would close a cycle in
-        the existing dependency graph (checked by DFS before the row is
-        written) -- both are ``DependencyCycleError`` so callers can treat
-        them identically.
-        """
-        if task_id == depends_on_task_id:
-            raise DependencyCycleError(f"Task {task_id} cannot depend on itself")
-        if self.db.get(Task, task_id) is None:
-            raise TaskNotFoundError(f"Task {task_id} not found")
-        if self.db.get(Task, depends_on_task_id) is None:
-            raise TaskNotFoundError(f"Task {depends_on_task_id} not found")
-
-        existing = self.db.get(TaskDependency, (task_id, depends_on_task_id))
-        if existing is not None:
-            return existing
-
-        if self._creates_cycle(task_id, depends_on_task_id):
-            raise DependencyCycleError(
-                f"Adding dependency {task_id} -> {depends_on_task_id} would "
-                "create a cycle"
-            )
-
-        edge = TaskDependency(task_id=task_id, depends_on_task_id=depends_on_task_id)
-        self.db.add(edge)
-        self.db.add(
-            AuditLog(
-                task_id=task_id,
-                action="add_dependency",
-                actor=actor,
-                details={"depends_on_task_id": depends_on_task_id},
-            )
+        return self.state_machine.add_dependency(
+            task_id=task_id, depends_on_task_id=depends_on_task_id, actor=actor
         )
-        self.db.commit()
-        self.db.refresh(edge)
-        return edge
-
-    def _creates_cycle(self, task_id: str, depends_on_task_id: str) -> bool:
-        """Would ``task_id -> depends_on_task_id`` close a cycle?
-
-        True iff ``depends_on_task_id`` can already reach ``task_id`` by
-        walking existing ``depends_on`` edges forward -- i.e. a path
-        ``depends_on_task_id -> ... -> task_id`` already exists, so adding
-        the new edge would complete the loop.
-        """
-        adjacency: dict[str, list[str]] = {}
-        for edge in self.db.query(TaskDependency).all():
-            adjacency.setdefault(edge.task_id, []).append(edge.depends_on_task_id)
-
-        stack = [depends_on_task_id]
-        visited: set[str] = set()
-        while stack:
-            current = stack.pop()
-            if current == task_id:
-                return True
-            if current in visited:
-                continue
-            visited.add(current)
-            stack.extend(adjacency.get(current, []))
-        return False
 
     def unmet_dependencies(self, task_id: str) -> list[Task]:
-        """Dependencies of ``task_id`` that have not reached ``done``."""
-        dep_ids = self._dependency_ids(task_id)
-        if not dep_ids:
-            return []
-        return (
-            self.db.query(Task)
-            .filter(Task.id.in_(dep_ids), Task.status != "done")
-            .all()
-        )
+        return self.validator.unmet_dependencies(task_id)
 
     def failed_dependencies(self, task_id: str) -> list[str]:
-        """Dependency ids of ``task_id`` that are missing or ``failed``.
-
-        A missing/failed dependency can never reach ``done``, so it must
-        escalate the dependent task instead of leaving it parked forever.
-        """
-        dep_ids = self._dependency_ids(task_id)
-        if not dep_ids:
-            return []
-        found = {
-            row.id: row
-            for row in self.db.query(Task).filter(Task.id.in_(dep_ids)).all()
-        }
-        return [
-            dep_id
-            for dep_id in dep_ids
-            if dep_id not in found or found[dep_id].status == "failed"
-        ]
-
-    def _dependency_ids(self, task_id: str) -> list[str]:
-        return [
-            row.depends_on_task_id
-            for row in self.db.query(TaskDependency.depends_on_task_id)
-            .filter(TaskDependency.task_id == task_id)
-            .all()
-        ]
+        return self.validator.failed_dependencies(task_id)
 
     def dependent_task_ids(self, task_id: str) -> list[str]:
-        """Ids of every task whose dependency graph includes ``task_id``."""
-        return [
-            row.task_id
-            for row in self.db.query(TaskDependency.task_id)
-            .filter(TaskDependency.depends_on_task_id == task_id)
-            .all()
-        ]
+        return self.validator.dependent_task_ids(task_id)
 
     def wake_dependents(self, task_id: str) -> None:
-        """Nudge the orchestration driver for every task waiting on ``task_id``.
-
-        Called after ``task_id`` reaches a terminal status (``done`` or
-        ``failed``) so a dependent parked on it is not left waiting until
-        some unrelated trigger happens to re-check it. Deferred import
-        avoids a module cycle (``agent_runner`` imports this service at
-        module scope); safe to call unconditionally even when ``task_id``
-        has no dependents.
-        """
-        from app.workers.agent_runner import advance_task
-
-        for dependent_id in self.dependent_task_ids(task_id):
-            try:
-                advance_task.send(dependent_id, "dependency_closed")
-            except Exception:
-                logger.warning(
-                    "Could not enqueue advance_task for dependent %s of %s",
-                    dependent_id,
-                    task_id,
-                    exc_info=True,
-                )
-
-    def _request_gate(
-        self,
-        *,
-        task: Task,
-        gate_type: str,
-        actor: str,
-        idempotency_key: str,
-        expected_status: str,
-        payload: dict[str, Any],
-    ) -> TransitionResult:
-        self._validate_common(task, actor, idempotency_key)
-        request_payload = {
-            **payload,
-            "expected_status": expected_status,
-            "gate_type": gate_type,
-        }
-        if gate_type == "review_order":
-            reviewer = str(request_payload.get("reviewer") or "").strip()
-            selection_reason = str(
-                request_payload.get("selection_reason") or "not provided"
-            ).strip()
-            request_payload["approval_prompt"] = (
-                f"Reviewer đề xuất: {reviewer} — lý do: "
-                f"{selection_reason}. Approve?"
-            )
-        input_hash = self._input_hash(request_payload)
-        existing = self._idempotent_record(task.id, idempotency_key, input_hash)
-        if existing is not None:
-            # Note on CTV2-088 round 2 / AC2 ("status check before returning
-            # an idempotent record"): `_assert_status(task, expected_status)`
-            # is deliberately NOT run unconditionally ahead of this branch.
-            # `expected_status` is the task's *pre*-transition state; once a
-            # cached record has already applied (bypass mode, or an approved
-            # supervised decision), the task has by design moved past it, so
-            # asserting it here would turn every legitimate idempotent replay
-            # into a hard error — verified against
-            # `test_bypass_dispatch_is_audited_and_idempotent`, which relies
-            # on a same-key replay after the first call already advanced
-            # task.status. The state check AC2 actually calls for — never
-            # returning `applied=True` when the current state doesn't back
-            # that claim — is enforced here via
-            # `_reject_if_stale_dispatch_record`, which inspects the
-            # referenced AgentRun rather than the task's pre-transition
-            # status; see its docstring for why that is the correct
-            # substitute rather than a literal statement reorder.
-            self._reject_if_stale_dispatch_record(existing)
-            return self._result_for_record(task, existing)
-        if gate_type == "dispatch":
-            decision = self.check_brakes(
-                task,
-                for_spawn=True,
-                audit=True,
-                agent_id=payload.get("brake_agent_id"),
-            )
-            if not decision.allowed and not decision.queue:
-                raise BrakeViolationError(decision.reason or "Safety brake engaged")
-        self._assert_status(task, expected_status)
-        if gate_type == "dispatch":
-            active_run = (
-                self.db.query(AgentRun)
-                .filter(
-                    AgentRun.task_id == task.id,
-                    AgentRun.status.in_(["queued", "running"]),
-                )
-                .first()
-            )
-            if active_run is not None:
-                raise TransitionConflictError(
-                    f"Task {task.id} already has active run: {active_run.id}"
-                )
-
-        effective_mode = self.mode_for_task(task)
-        if effective_mode == "plan-only" and gate_type in {"dispatch", "verdict"}:
-            record = self._ledger_record(
-                task=task,
-                gate_type=gate_type,
-                status="rejected",
-                actor=actor,
-                idempotency_key=idempotency_key,
-                input_hash=input_hash,
-                payload=request_payload,
-                error_message="plan-only mode blocks this transition",
-            )
-            self._audit(task, record, reason=record.error_message)
-            self.db.commit()
-            raise ModeViolationError(record.error_message)
-
-        if effective_mode == "supervised":
-            record = self._ledger_record(
-                task=task,
-                gate_type=gate_type,
-                status="pending",
-                actor=actor,
-                idempotency_key=idempotency_key,
-                input_hash=input_hash,
-                payload=request_payload,
-            )
-            task.awaiting_approval = True
-            task.approval_prompt = request_payload.get("approval_prompt") or (
-                f"Approve {gate_type} gate for task {task.id} "
-                f"(request {idempotency_key})?"
-            )
-            self._audit(task, record)
-            self.db.commit()
-            self.db.refresh(task)
-            self.db.refresh(record)
-            self._notify_gate_pending(task, record)
-            return TransitionResult(task, record, False)
-
-        run, output_ref = self._apply_gate(
-            task, gate_type, request_payload, idempotency_key=idempotency_key
-        )
-        record = self._ledger_record(
-            task=task,
-            gate_type=gate_type,
-            status="approved",
-            actor=actor,
-            idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=request_payload,
-            output_ref=output_ref,
-            output_payload=self._gate_output(task, gate_type),
-        )
-        self._audit(task, record)
-        self.db.commit()
-        self.db.refresh(task)
-        self.db.refresh(record)
-        if run is not None:
-            self.db.refresh(run)
-        if gate_type == "verdict" and task.status == "done":
-            self.wake_dependents(task.id)
-        return TransitionResult(
-            task,
-            record,
-            True,
-            agent_run=run,
-            context=request_payload if run is not None else None,
-        )
-
-    def _notify_gate_pending(self, task: Task, record: GateRecord) -> None:
-        """Emit a gate_pending event into task_events table (CTV2-115)."""
-        emit_task_event(
-            task_id=task.id,
-            event_type="gate_pending",
-            kind="decision",
-            payload={
-                "gate": record.gate_type,
-                "gate_record_id": record.id,
-            },
-            db=self.db,
-        )
-
-    def _resolve_gate_notification(
-        self,
-        task_id: str,
-        gate_type: str,
-        gate_record_id: int,
-        state: str,
-    ) -> None:
-        """Close a pending inbox notice so a later pending state can notify."""
-        global_session = (
-            self.db.query(SessionModel)
-            .filter(
-                SessionModel.context_level == "global",
-                SessionModel.status == "active",
-            )
-            .order_by(SessionModel.last_activity_at.desc())
-            .first()
-        )
-        if global_session is None:
-            return
-        messages = list(global_session.messages or [])
-        changed = False
-        for message in messages:
-            if (
-                message.get("kind") == "gate_notification"
-                and message.get("task_id") == task_id
-                and message.get("gate") == gate_type
-                and message.get("gate_record_id") == gate_record_id
-                and message.get("notification_state") == "pending"
-            ):
-                message["notification_state"] = state
-                changed = True
-        if changed:
-            global_session.messages = messages
-            global_session.message_count = len(messages)
-            global_session.last_activity_at = datetime.now(timezone.utc)
-            self.db.commit()
-
-    def _start_round(
-        self,
-        task: Task,
-        *,
-        agent_id: str,
-        run_id: str,
-        now: datetime,
-    ) -> TaskRound:
-        """Open a new TaskRound for an execute dispatch (CTV2-201).
-
-        One row per execute-dispatch attempt, numbered from the highest
-        ``round_no`` seen for this task so far -- history from earlier
-        rounds (dispatch/review agents, verdicts) is preserved instead of
-        being overwritten the way the flat `Task` columns are.
-        """
-        next_round_no = (
-            self.db.query(func.max(TaskRound.round_no))
-            .filter(TaskRound.task_id == task.id)
-            .scalar()
-            or 0
-        ) + 1
-        round_id = str(uuid.uuid4())
-        task_round = TaskRound(
-            id=round_id,
-            task_id=task.id,
-            round_no=next_round_no,
-            status="dispatched",
-            executor_agent_id=agent_id,
-            executor_run_id=run_id,
-            started_at=now,
-        )
-        self.db.add(task_round)
-        # Flush the round's INSERT ahead of the task's UPDATE: tasks and
-        # task_rounds reference each other (task_rounds.task_id -> tasks.id,
-        # tasks.current_round_id -> task_rounds.id), so without this the
-        # unit of work can order the FK-setting UPDATE before the row it
-        # points at exists and the database rejects it.
-        self.db.flush()
-        task.current_round_id = round_id
-        return task_round
-
-    def _land_verdict_result(self, task: Task) -> LandingResult:
-        """Merge the reviewed head into the project's integration branch.
-
-        Skips (ok, no landed_ref) when landing does not apply — no repo_root,
-        repo_root not a git repository, or a result_ref that carries no head
-        commit (legacy imports). Real merge failures come back ok=False and
-        must block the done transition.
-        """
-        import os
-
-        project = self.db.get(Project, task.project) if task.project else None
-        repo_root = getattr(project, "repo_root", None)
-        head = head_of(task.result_ref)
-        if not repo_root or not head:
-            return LandingResult(ok=True, skipped_reason="no repo_root or head commit")
-        return land_result(
-            os.path.abspath(repo_root),
-            head,
-            f"Merge {task.id}: {task.title} (verdict pass, reviewer {task.reviewer})",
-        )
+        self.state_machine.wake_dependents(task_id)
 
     def complete_no_commit_task(
         self, *, task_id: str, actor: str, run_id: str | None = None
     ) -> dict:
-        """Finish a read-only task (research, context-gen) that commits nothing.
-
-        CTV2-235: RESULT_REF is mandatory in the normal path, so a task whose
-        whole job is reading/analyzing always ended "failed" even after doing
-        its work. Opt-in only: the task must carry the 'no-commit' tag, and
-        the caller must have verified the worktree really has no commits.
-        The diff-review cycle is skipped (there is no diff); the system
-        records an explicit auto-verdict gate row so the ledger shows exactly
-        what happened instead of pretending a reviewer approved it.
-        """
-        task = self._task(task_id)
-        tags = [str(t).lower() for t in (task.tags or [])]
-        if "no-commit" not in tags:
-            raise PrerequisiteError(
-                "RESULT_REF: none is only accepted for tasks tagged "
-                "'no-commit'; commit your work or tag the task."
-            )
-        now = datetime.utcnow()
-        payload = {
-            "kind": "no_commit_completion",
-            "run_id": run_id,
-            "note": "read-only task: no diff to review, auto-pass recorded by system",
-        }
-        self._ledger_record(
-            task=task,
-            gate_type="verdict",
-            status="approved",
-            actor=actor,
-            idempotency_key=f"no-commit:{task.id}:{run_id or 'manual'}",
-            input_hash=self._input_hash(payload),
-            payload=payload,
-            output_ref="pass",
-            output_payload={"verdict": "pass"},
+        return self.state_machine.complete_no_commit_task(
+            task_id=task_id, actor=actor, run_id=run_id
         )
-        task.result_ref = "no-commit"
-        task.verdict = "pass"
-        if not task.reviewer:
-            # ck_tasks_done_invariants needs a reviewer distinct from the
-            # executor; name the system so nobody mistakes this for four-eyes.
-            task.reviewer = "@system-no-commit"
-        self._cas_status(task, "done")
-        task.completed_at = now
-        task.final_result_ref = task.result_ref
-        task.final_verdict = "pass"
-        task.awaiting_approval = False
-        task.approval_prompt = None
-        task.error = None
-        emit_task_event(
-            task_id=task.id,
-            event_type="done",
-            payload={"no_commit": True, "run_id": run_id},
-            db=self.db,
-        )
-        self.db.commit()
-        return {"action": "no_commit_completed", "task_id": task.id, "status": task.status}
 
     def land_task(self, *, task_id: str, actor: str) -> dict:
-        """Retry/backfill landing for a pass-verdict task (CTV2-238).
+        return self.state_machine.land_task(task_id=task_id, actor=actor)
 
-        Covers two cases: a task stuck after a landing failure (verdict
-        recorded, still in-review, awaiting_approval), and a legacy done
-        task whose branch was never merged (landed_ref is NULL).
-        """
-        task = self._task(task_id)
-        if (task.verdict or task.final_verdict) != "pass":
-            raise PrerequisiteError(
-                f"Task {task_id} has no pass verdict; landing only applies "
-                "to reviewed results."
-            )
-        landing = self._land_verdict_result(task)
-        if not landing.ok:
-            task.awaiting_approval = True
-            task.approval_prompt = (
-                f"Landing {task.result_ref} failed: {landing.error} — "
-                "fix the repo, then call land_task again."
-            )
-            task.error = f"landing_failed: {landing.error}"
-            self.db.commit()
-            return {"action": "landing_failed", "task_id": task.id, "error": landing.error}
-
-        now = datetime.utcnow()
-        if task.status != "done":
-            self._cas_status(task, "done")
-            task.completed_at = now
-            task.final_result_ref = task.result_ref
-            task.final_verdict = "pass"
-        task.awaiting_approval = False
-        task.approval_prompt = None
-        task.error = None
-        if landing.landed_ref:
-            task.landed_ref = landing.landed_ref
-            emit_task_event(
-                task_id=task.id,
-                event_type="landed",
-                payload={
-                    "landed_ref": landing.landed_ref,
-                    "result_ref": task.result_ref,
-                    "actor": actor,
-                },
-                db=self.db,
-            )
-        self.db.commit()
-        return {
-            "action": "landed" if landing.landed_ref else "landing_skipped",
-            "task_id": task.id,
-            "status": task.status,
-            "landed_ref": landing.landed_ref,
-            "skipped_reason": landing.skipped_reason,
-        }
-
-    def _record_verdict_on_round(
-        self,
-        task: Task,
-        *,
-        verdict: str,
-        now: datetime,
-    ) -> None:
-        """Fold a verdict's outcome into the task's current TaskRound.
-
-        A no-op when the task has no current round -- e.g. tests and other
-        callers that drive a task straight into `in-review` without going
-        through `request_dispatch` first.
-        """
-        if not task.current_round_id:
-            return
-        current_round = self.db.get(TaskRound, task.current_round_id)
-        if current_round is None:
-            return
-        review_run = self._terminal_review_run(task.id)
-        current_round.verdict = verdict
-        current_round.findings_ref = task.findings
-        current_round.reviewer_agent_id = task.reviewer
-        current_round.reviewer_run_id = review_run.id if review_run else None
-        current_round.result_ref = task.result_ref
-        current_round.status = task.status
-        current_round.completed_at = now
-
-    def _apply_gate(
-        self,
-        task: Task,
-        gate_type: str,
-        payload: dict[str, Any],
-        *,
-        idempotency_key: str | None = None,
-    ) -> tuple[AgentRun | None, str | None]:
-        self._assert_status(task, str(payload["expected_status"]))
-        now = datetime.now(timezone.utc)
-        if gate_type == "dispatch":
-            run_id = str(uuid.uuid4())
-            kind = str(payload.get("kind", "execute"))
-            agent_role = str(payload.get("agent_role", "executor"))
-            if kind == "review":
-                self._require_independent(task.executor, str(payload["agent_id"]))
-            run = AgentRun(
-                id=run_id,
-                task_id=task.id,
-                agent_id=str(payload["agent_id"]),
-                cli=str(payload["cli"]),
-                command=str(payload["command"]),
-                kind=kind,
-                agent_role=agent_role,
-                status="queued",
-                timeout_seconds=int(payload["timeout_seconds"]),
-                effort=payload.get("effort"),
-                idempotency_key=idempotency_key,
-                dispatch_decision_id=payload.get("dispatch_decision_id"),
-            )
-            self.db.add(run)
-            self._cas_status(task, "dispatched")
-            task.current_gate = "dispatch"
-            if kind == "review":
-                task.reviewer = str(payload["agent_id"])
-                run.task_round_id = task.current_round_id
-            else:
-                task.executor = str(payload["agent_id"])
-                task_round = self._start_round(
-                    task, agent_id=str(payload["agent_id"]), run_id=run_id, now=now
-                )
-                run.task_round_id = task_round.id
-            task.dispatched_at = now
-            task.error = None
-            task.awaiting_approval = False
-            task.approval_prompt = None
-            # Same transaction as the AgentRun insert above (CTV2-205): a
-            # crash before this commit loses the run entirely (nothing was
-            # ever persisted), and a crash after it leaves an unpublished
-            # OutboxEvent for outbox_publisher to pick up instead of a
-            # "queued" run with no Dramatiq message behind it.
-            record_run_requested(self.db, run, str(payload["repo_root"]))
-            emit_task_event(
-                task_id=task.id,
-                event_type="dispatched",
-                payload={
-                    "run_id": run_id,
-                    "agent": str(payload["agent_id"]),
-                    "cli": str(payload["cli"]),
-                },
-                db=self.db,
-            )
-            return run, run_id
-        if gate_type == "review_order":
-            reviewer = str(payload["reviewer"])
-            if not task.result_ref or not task.result_ref.strip():
-                raise PrerequisiteError("result_ref is required before review")
-            self._require_independent(task.executor, reviewer)
-            run_id = str(uuid.uuid4())
-            # A cancelled/failed earlier review keeps its (round, kind,
-            # attempt) slot — uq_agent_runs_round_kind_attempt — so a
-            # re-ordered review must claim the next attempt number, not 1.
-            prior_attempts = (
-                self.db.query(func.coalesce(func.max(AgentRun.attempt), 0))
-                .filter(
-                    AgentRun.task_round_id == task.current_round_id,
-                    AgentRun.kind == "review",
-                )
-                .scalar()
-            )
-            run = AgentRun(
-                id=run_id,
-                task_id=task.id,
-                agent_id=reviewer,
-                cli=str(payload["cli"]),
-                command=str(payload["command"]),
-                kind="review",
-                agent_role="reviewer",
-                status="queued",
-                timeout_seconds=int(payload["timeout_seconds"]),
-                idempotency_key=idempotency_key,
-                task_round_id=task.current_round_id,
-                attempt=int(prior_attempts) + 1,
-            )
-            self.db.add(run)
-            task.reviewer = reviewer
-            self._cas_status(task, "in-review")
-            task.current_gate = "verdict"
-            task.awaiting_approval = False
-            task.approval_prompt = None
-            record_run_requested(self.db, run, str(payload["repo_root"]))
-            return run, run_id
-        if gate_type == "verdict":
-            verdict = str(payload["verdict"])
-            self._validate_verdict_prerequisites(
-                task,
-                actor=str(payload["reviewer"]),
-                verdict=verdict,
-                ac_results=payload["ac_results"],
-            )
-            task.verdict = verdict
-            task.findings = payload.get("findings") or []
-            task.current_gate = "verdict"
-            task.awaiting_approval = False
-            task.approval_prompt = None
-            if verdict == "pass":
-                # done must mean the code is on main (CTV2-238): land first,
-                # and refuse to claim done when landing applies but fails.
-                landing = self._land_verdict_result(task)
-                if not landing.ok:
-                    task.awaiting_approval = True
-                    task.approval_prompt = (
-                        f"Verdict is pass but landing {task.result_ref} failed: "
-                        f"{landing.error} — fix the repo, then call land_task."
-                    )
-                    task.error = f"landing_failed: {landing.error}"
-                    self._record_verdict_on_round(task, verdict=verdict, now=now)
-                    # emit_task_event COMMITS internally; the deferred
-                    # done-verdict trigger and the not-yet-inserted decision
-                    # row make any mid-apply commit here fatal. decide_gate
-                    # emits this after the ledger record.
-                    self._deferred_landing_event = (
-                        "landing_failed",
-                        {"result_ref": task.result_ref, "error": landing.error},
-                    )
-                    return None, verdict
-                self._cas_status(task, "done")
-                task.completed_at = now
-                task.final_result_ref = task.result_ref
-                task.final_verdict = verdict
-                if landing.landed_ref:
-                    task.landed_ref = landing.landed_ref
-                    self._deferred_landing_event = (
-                        "landed",
-                        {
-                            "landed_ref": landing.landed_ref,
-                            "result_ref": task.result_ref,
-                        },
-                    )
-            else:
-                self._cas_status(task, "changes-requested")
-                task.completed_at = None
-            self._record_verdict_on_round(task, verdict=verdict, now=now)
-            return None, verdict
-        raise OrchestrationError(f"Unsupported gate type: {gate_type}")
-
-    @property
-    def autonomy_enabled(self) -> bool:
-        return self._setting("autonomy_enabled", settings.AUTONOMY_ENABLED, bool)
-
-    @property
-    def max_cost_usd_per_task(self) -> Decimal:
-        value = self._setting(
-            "max_cost_usd_per_task", settings.MAX_COST_USD_PER_TASK, Decimal
-        )
-        return max(Decimal("0"), value)
-
-    @property
-    def max_concurrent_runs(self) -> int:
-        return max(1, self._setting("max_concurrent_runs", settings.MAX_CONCURRENT_RUNS, int))
-
-    @property
-    def run_timeout_seconds(self) -> int:
-        return max(1, self._setting("run_timeout_seconds", settings.RUN_TIMEOUT_SECONDS, int))
-
-    @property
-    def max_active_seconds_per_run(self) -> int:
-        return max(1, self._setting("max_active_seconds_per_run", settings.MAX_ACTIVE_SECONDS_PER_RUN, int))
-
-    @property
-    def max_tool_calls_per_run(self) -> int:
-        return max(1, self._setting("max_tool_calls_per_run", settings.MAX_TOOL_CALLS_PER_RUN, int))
-
-    @property
-    def max_no_progress_seconds(self) -> int:
-        return max(1, self._setting("max_no_progress_seconds", settings.MAX_NO_PROGRESS_SECONDS, int))
-
-    def check_brakes(
-        self,
-        task: Task,
-        *,
-        for_spawn: bool = False,
-        audit: bool = False,
-        run_id: str | None = None,
-        agent_id: str | None = None,
-    ) -> BrakeDecision:
-        """Evaluate brakes in a stable order and return debugging context."""
-        cost = self._task_cost(task)
-        active_query = self.db.query(AgentRun.id).filter(AgentRun.status.in_(["queued", "running"]))
-        if run_id:
-            active_query = active_query.filter(AgentRun.id != run_id)
-        active = len(active_query.order_by(AgentRun.id).with_for_update().all()) if for_spawn else int(
-            self.db.query(AgentRun.id).filter(AgentRun.status.in_(["queued", "running"])).count()
-        )
-        observations: dict[str, Any] = {
-            "active_runs": active,
-            "max_concurrent": self.max_concurrent_runs,
-            "task_cost": str(cost),
-            "cost_limit": str(self.max_cost_usd_per_task),
-            "agent_id": agent_id,
-            "max_active_seconds_per_run": self.max_active_seconds_per_run,
-            "max_tool_calls_per_run": self.max_tool_calls_per_run,
-            "max_no_progress_seconds": self.max_no_progress_seconds,
-        }
-        # Check for pending (not failed) dependencies - queue the run to retry later.
-        # Failed dependency escalation is handled by _blocked_by_dependencies in agent_runner.
-        dep_ids = self._dependency_ids(task.id)
-        deps = list(self.db.query(Task).filter(Task.id.in_(dep_ids)).all()) if dep_ids else []
-        pending_deps = [d for d in deps if d.status not in {"done", "failed"}]
-        if task.status in {"done", "cancelled"}:
-            decision = BrakeDecision(False, f"Task is terminal: {task.status}", "terminal", observations=observations)
-        elif task.awaiting_approval:
-            decision = BrakeDecision(False, "Task has a pending gate", "pending_gate", observations=observations)
-        elif pending_deps:
-            dep_ids_str = ", ".join(str(d.id) for d in pending_deps[:3])
-            decision = BrakeDecision(False, f"Waiting for dependencies: {dep_ids_str}", "dependency_pending", queue=True, observations=observations)
-        elif not self.autonomy_enabled:
-            decision = BrakeDecision(False, "Autonomy is disabled", "autonomy_disabled", observations=observations)
-        elif cost >= self.max_cost_usd_per_task:
-            reason = f"Task cost limit reached: ${cost:.8f} >= ${self.max_cost_usd_per_task:.8f}"
-            decision = BrakeDecision(False, reason, "cost_limit", cost_usd=cost, observations=observations)
-        else:
-            agent = self.db.get(Agent, agent_id) if agent_id else None
-            if agent_id and agent is None:
-                decision = BrakeDecision(False, f"Agent {agent_id} not found", "agent_capability", observations=observations)
-            elif agent is not None and agent.status not in {"idle", "active"}:
-                decision = BrakeDecision(False, f"Agent {agent.id} is unavailable: {agent.status}", "agent_capability", retry_after_seconds=60, observations=observations)
-            else:
-                account = self.db.query(AgentAccount).filter(AgentAccount.agent_id == agent_id).first() if agent_id else None
-                if account is not None and (account.status not in {"healthy", "active"} or account.health_score <= 0):
-                    decision = BrakeDecision(False, f"Agent account is unhealthy: {account.status}", "account_health", queue=True, retry_after_seconds=60, observations=observations)
-                elif run_id and (run := self.db.get(AgentRun, run_id)) is not None:
-                    usage = self.db.get(RunResourceUsage, run_id)
-                    active_seconds = float(usage.active_seconds if usage else 0)
-                    tool_calls = int(usage.tool_calls if usage else 0)
-                    last_activity = run.updated_at or run.started_at
-                    if last_activity is None:
-                        no_progress_seconds = 0
-                    else:
-                        if last_activity.tzinfo is None:
-                            last_activity = last_activity.replace(tzinfo=timezone.utc)
-                        no_progress_seconds = max(0, int((datetime.now(timezone.utc) - last_activity).total_seconds()))
-                    observations.update({"active_seconds": active_seconds, "tool_calls": tool_calls, "no_progress_seconds": no_progress_seconds})
-                    if active_seconds >= self.max_active_seconds_per_run:
-                        decision = BrakeDecision(False, "Run active-time limit reached", "active_time_limit", observations=observations)
-                    elif tool_calls >= self.max_tool_calls_per_run:
-                        decision = BrakeDecision(False, "Run tool-call limit reached", "tool_calls_limit", observations=observations)
-                    elif no_progress_seconds >= self.max_no_progress_seconds:
-                        decision = BrakeDecision(False, "Run made no progress within the allowed interval", "no_progress_limit", retry_after_seconds=60, observations=observations)
-                    elif for_spawn and active >= self.max_concurrent_runs:
-                        decision = BrakeDecision(False, f"Concurrent run limit reached: {active} >= {self.max_concurrent_runs}", "concurrency_limit", queue=True, retry_after_seconds=30, cost_usd=cost, observations=observations)
-                    else:
-                        decision = BrakeDecision(True, cost_usd=cost, observations=observations)
-                elif for_spawn and active >= self.max_concurrent_runs:
-                    decision = BrakeDecision(False, f"Concurrent run limit reached: {active} >= {self.max_concurrent_runs}", "concurrency_limit", queue=True, retry_after_seconds=30, cost_usd=cost, observations=observations)
-                else:
-                    decision = BrakeDecision(True, cost_usd=cost, observations=observations)
-
-        if audit:
-            self._record_brake(task, decision)
-        return decision
-
-    def _record_brake(self, task: Task, decision: BrakeDecision) -> None:
-        if decision.code in {"autonomy_disabled", "cost_limit"}:
-            self._cas_status(task, "failed")
-            task.error = decision.reason
-            task.awaiting_approval = True
-            task.approval_prompt = f"Escalated by safety brake: {decision.reason}"
-            payload = {"code": decision.code, "reason": decision.reason}
-            record = self._ledger_record(
-                task=task,
-                gate_type="safety_brake",
-                status="rejected",
-                actor="system:safety-brake",
-                idempotency_key=str(uuid.uuid4()),
-                input_hash=self._input_hash(payload),
-                payload=payload,
-                error_message=decision.reason,
-            )
-            self._audit(task, record, reason=decision.reason)
-        if not decision.allowed:
-            self.db.add(
-                AuditLog(
-                    task_id=task.id,
-                    action=f"brake:{decision.code}",
-                    actor="system:safety-brake",
-                    details={
-                        "code": decision.code,
-                        "reason": decision.reason,
-                        "cost_usd": str(decision.cost_usd),
-                        "max_cost_usd_per_task": str(self.max_cost_usd_per_task),
-                        "max_concurrent_runs": self.max_concurrent_runs,
-                        "decision": self._json_safe(asdict(decision)),
-                    },
-                )
-            )
-        self.db.commit()
-        if decision.code in {"autonomy_disabled", "cost_limit"}:
-            self.wake_dependents(task.id)
-
-    @staticmethod
-    def _json_safe(value: Any) -> Any:
-        if isinstance(value, Decimal):
-            return str(value)
-        if isinstance(value, dict):
-            return {key: TaskOrchestrationService._json_safe(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [TaskOrchestrationService._json_safe(item) for item in value]
-        return value
-
-    def _task_cost(self, task: Task) -> Decimal:
-        value = (
-            self.db.query(func.coalesce(func.sum(LLMUsage.cost_usd), 0))
-            .outerjoin(AgentRun, LLMUsage.agent_run_id == AgentRun.id)
-            .filter(or_(LLMUsage.task_id == task.id, AgentRun.task_id == task.id))
-            .scalar()
-        )
-        try:
-            return Decimal(str(value or 0))
-        except (InvalidOperation, ValueError):
-            return Decimal("0")
-
-    def _setting(self, key: str, default: Any, converter: Any) -> Any:
-        row = self.db.get(Setting, key)
-        value = default if row is None else row.value
-        if converter is bool:
-            if isinstance(value, str):
-                return value.strip().lower() in {"1", "true", "yes", "on"}
-            return bool(value)
-        try:
-            return converter(value)
-        except (TypeError, ValueError, InvalidOperation):
-            return default
-
-    def _validate_verdict_prerequisites(
-        self,
-        task: Task,
-        *,
-        actor: str,
-        verdict: str,
-        ac_results: Any,
-    ) -> None:
-        self._assert_status(task, "in-review")
-        if not task.executor or not task.executor.strip():
-            raise PrerequisiteError("executor is required for verdict")
-        if not task.reviewer or not task.reviewer.strip():
-            raise PrerequisiteError("reviewer is required for verdict")
-        self._require_independent(task.executor, task.reviewer)
-        # The reviewer identity that authorizes a verdict is never taken from
-        # the caller-supplied `actor` (a coordinator/LLM tool call could claim
-        # to *be* task.reviewer). It must instead come from a terminal
-        # AgentRun(kind="review") this service itself created and completed —
-        # that is the only proof an independent review actually ran.
-        review_run = self._terminal_review_run(task.id)
-        if review_run is None:
-            raise PrerequisiteError(
-                "verdict requires a completed review run for this task"
-            )
-        if self._principal(review_run.agent_id) != self._principal(task.reviewer):
-            raise PrerequisiteError(
-                "The completed review run's agent does not match the task's "
-                "assigned reviewer"
-            )
-        if not task.result_ref or not task.result_ref.strip():
-            raise PrerequisiteError("result_ref is required for verdict")
-        evaluations = self._evaluation_results(ac_results)
-        required_count = len(task.acceptance_criteria or [])
-        if len(evaluations) < required_count:
-            raise PrerequisiteError(
-                "Acceptance-criteria evaluation results are incomplete"
-            )
-        if verdict == "pass" and not all(evaluations):
-            raise PrerequisiteError(
-                "A passing verdict requires every acceptance criterion to pass"
-            )
-
-    @staticmethod
-    def _evaluation_results(ac_results: Any) -> list[bool]:
-        if isinstance(ac_results, dict):
-            values = list(ac_results.values())
-        elif isinstance(ac_results, list):
-            values = ac_results
-        else:
-            raise PrerequisiteError(
-                "Acceptance-criteria evaluation results are required"
-            )
-        if not values:
-            raise PrerequisiteError(
-                "Acceptance-criteria evaluation results are required"
-            )
-        results: list[bool] = []
-        for value in values:
-            if isinstance(value, bool):
-                results.append(value)
-                continue
-            if isinstance(value, dict):
-                if isinstance(value.get("passed"), bool):
-                    results.append(value["passed"])
-                    continue
-                status = str(value.get("status", "")).strip().lower()
-                if status in {"pass", "passed", "met", "fail", "failed", "unmet"}:
-                    results.append(status in {"pass", "passed", "met"})
-                    continue
-            raise PrerequisiteError(
-                "Each acceptance-criteria result needs a boolean passed value"
-            )
-        return results
-
+    # Internal helper methods mapped for compatibility with tests / callers
     def _task(self, task_id: str) -> Task:
-        task = (
-            self.db.query(Task)
-            .filter(Task.id == task_id)
-            .with_for_update()
-            .first()
-        )
-        if task is None:
-            raise TaskNotFoundError(f"Task {task_id} not found")
-        return task
-
-    def _idempotent_record(
-        self,
-        task_id: str,
-        idempotency_key: str,
-        input_hash: str,
-    ) -> GateRecord | None:
-        record = (
-            self.db.query(GateRecord)
-            .filter(
-                GateRecord.task_id == task_id,
-                GateRecord.idempotency_key == idempotency_key,
-            )
-            .first()
-        )
-        if record is not None and record.input_hash != input_hash:
-            raise IdempotencyConflictError(
-                f"Idempotency key {idempotency_key!r} was reused with different input"
-            )
-        return record
-
-    def _reject_if_stale_dispatch_record(self, record: GateRecord) -> None:
-        """Guard against handing back a dispatch "success" for a dead run.
-
-        Only called from `_request_gate`'s idempotent-record lookup — the
-        one place where a caller (via the command router's attempt-numbered
-        key) is expected to mint a fresh idempotency key per genuinely new
-        dispatch attempt. In normal operation that attempt bump already keeps
-        a retry from ever colliding with a dead run's key, which makes this a
-        defense-in-depth check for callers that construct keys directly
-        (e.g. tests, or a future caller that reuses a key deliberately) —
-        not the primary defense. Do NOT call this from `decide_gate`: that
-        key has no attempt component and its cached record is an immutable
-        decision, not a retryable request (see the comment there).
-
-        A cached dispatch-gate record whose AgentRun has already left
-        queued/running (succeeded, timed out, cancelled, or failed with all
-        attempts exhausted) is no longer "in flight". Returning it as
-        ``applied=True`` would make a caller believe a run is actively
-        executing when none is; the caller must obtain a fresh idempotency
-        key (e.g. a new attempt number) and retry instead. A "failed" run
-        that hasn't exhausted its attempts is excluded: the worker retries it
-        in place (status goes back to "queued"), so it is still in flight.
-        """
-        effective = record
-        if effective.status == "pending":
-            # Mirror `_result_for_record`'s pending -> decision resolution:
-            # in supervised mode the record cached under the idempotency key
-            # is the pending parent, while the approve/reject decision (and
-            # the dispatched run) lives on a child record. Checking the
-            # parent's status directly always sees "pending" and never fires,
-            # which is exactly how this guard went dead in supervised mode.
-            decision = (
-                self.db.query(GateRecord)
-                .filter(GateRecord.parent_id == effective.id)
-                .order_by(GateRecord.id.desc())
-                .first()
-            )
-            if decision is not None:
-                effective = decision
-        if effective.gate_type != "dispatch" or effective.status != "approved":
-            return
-        if not effective.output_ref:
-            return
-        run = self.db.get(AgentRun, effective.output_ref)
-        if run is None:
-            return
-        is_terminal = run.status in self._DEAD_RUN_STATUSES or (
-            run.status == "failed" and run.attempt >= run.max_attempts
-        )
-        if is_terminal:
-            raise StaleIdempotencyRecordError(
-                f"Idempotency key {effective.idempotency_key!r} refers to run "
-                f"{run.id!r} which is already terminal (status={run.status!r}, "
-                f"attempt={run.attempt}/{run.max_attempts}); retry dispatch "
-                "with a new idempotency key"
-            )
-
-    def _result_for_record(
-        self,
-        task: Task,
-        record: GateRecord,
-    ) -> TransitionResult:
-        effective = record
-        payload_source = record
-        if record.status == "pending":
-            decision = (
-                self.db.query(GateRecord)
-                .filter(GateRecord.parent_id == record.id)
-                .order_by(GateRecord.id.desc())
-                .first()
-            )
-            if decision is not None:
-                effective = decision
-        elif record.parent_id is not None:
-            parent = self.db.get(GateRecord, record.parent_id)
-            if parent is not None:
-                payload_source = parent
-
-        run = (
-            self.db.get(AgentRun, effective.output_ref)
-            if effective.gate_type == "dispatch" and effective.output_ref
-            else None
-        )
-        return TransitionResult(
-            task=task,
-            gate_record=effective,
-            applied=effective.status == "approved",
-            agent_run=run,
-            context=payload_source.input_payload if run is not None else None,
-        )
-
-    def _ledger_record(
-        self,
-        *,
-        task: Task,
-        gate_type: str,
-        status: str,
-        actor: str,
-        idempotency_key: str,
-        input_hash: str,
-        payload: dict[str, Any],
-        output_ref: str | None = None,
-        output_payload: dict[str, Any] | None = None,
-        error_message: str | None = None,
-        parent_id: int | None = None,
-    ) -> GateRecord:
-        record = GateRecord(
-            task_id=task.id,
-            gate_type=gate_type,
-            status=status,
-            actor=actor,
-            mode=task.mode,
-            idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            output_ref=output_ref,
-            parent_id=parent_id,
-            executor=task.executor,
-            reviewer=task.reviewer,
-            input_payload=payload,
-            output_payload=output_payload,
-            error_message=error_message,
-        )
-        self.db.add(record)
-        return record
-
-    def _audit(
-        self,
-        task: Task,
-        record: GateRecord,
-        *,
-        reason: str | None = None,
-    ) -> None:
-        self.db.flush()
-        self.db.add(
-            AuditLog(
-                task_id=task.id,
-                action=f"transition:{record.gate_type}:{record.status}",
-                actor=record.actor,
-                details={
-                    "gate_record_id": record.id,
-                    "idempotency_key": record.idempotency_key,
-                    "input_hash": record.input_hash,
-                    "mode": record.mode,
-                    "status": task.status,
-                    "reason": reason,
-                },
-            )
-        )
-
-    @staticmethod
-    def _gate_output(task: Task, gate_type: str) -> dict[str, Any]:
-        return {
-            "gate_type": gate_type,
-            "task_status": task.status,
-            "current_gate": task.current_gate,
-            "executor": task.executor,
-            "reviewer": task.reviewer,
-            "result_ref": task.result_ref,
-            "verdict": task.verdict,
-        }
-
-    @classmethod
-    def _validate_common(
-        cls,
-        task: Task,
-        actor: str,
-        idempotency_key: str,
-    ) -> None:
-        if task.mode not in cls.MODES:
-            raise ModeViolationError(f"Unsupported task mode: {task.mode}")
-        if not actor or not actor.strip():
-            raise PrerequisiteError("actor is required")
-        if not idempotency_key or not idempotency_key.strip():
-            raise PrerequisiteError("idempotency_key is required")
-        if len(idempotency_key) > 100:
-            raise PrerequisiteError("idempotency_key must be at most 100 characters")
-
-    @staticmethod
-    def _assert_status(task: Task, expected_status: str) -> None:
-        if task.status != expected_status:
-            raise TransitionConflictError(
-                f"Task {task.id} expected status {expected_status!r}, "
-                f"found {task.status!r}"
-            )
+        return self.validator.task(task_id)
 
     def _cas_status(self, task: Task, new_status: str) -> None:
-        """Move ``task.status`` forward with a compare-and-set UPDATE.
+        self.state_machine.cas_status(task, new_status)
 
-        `_task()` already takes `SELECT ... FOR UPDATE` on this row, which
-        serializes writers on Postgres. This is the second, independent
-        guard: an `UPDATE ... WHERE status = :expected AND version =
-        :expected_version` that only succeeds if nothing changed the row
-        since it was read in *this* transaction. It is what actually
-        protects a backend without real row locks (SQLite, in tests) and is
-        cheap insurance everywhere else -- a losing concurrent writer gets a
-        hard `TransitionConflictError` instead of silently clobbering a
-        state it never observed.
-        """
-        # The session runs with autoflush=False: attribute changes made just
-        # before a transition (awaiting_approval=False, verdict, ...) are
-        # only in memory, while the CAS below is a raw UPDATE evaluated
-        # against the DB row. Flush first so row-level constraints (e.g.
-        # ck_tasks_terminal_not_awaiting_approval) see the whole transition,
-        # not the raw status flip against stale column values.
-        self.db.flush()
-        expected_status = task.status
-        expected_version = task.version
-        result = self.db.execute(
-            update(Task)
-            .where(
-                Task.id == task.id,
-                Task.status == expected_status,
-                Task.version == expected_version,
-            )
-            .values(status=new_status, version=expected_version + 1)
-            .execution_options(synchronize_session=False)
-        )
-        if result.rowcount != 1:
-            raise TransitionConflictError(
-                f"Task {task.id} status changed concurrently while "
-                f"transitioning {expected_status!r} -> {new_status!r} "
-                f"(expected version {expected_version})"
-            )
-        task.status = new_status
-        task.version = expected_version + 1
+    def _assert_status(self, task: Task, expected_status: str) -> None:
+        self.validator.assert_status(task, expected_status)
 
-    def _terminal_review_run(self, task_id: str) -> AgentRun | None:
-        return (
-            self.db.query(AgentRun)
-            .filter(
-                AgentRun.task_id == task_id,
-                AgentRun.kind == "review",
-                AgentRun.status == "success",
-            )
-            .order_by(AgentRun.queued_at.desc())
-            .first()
-        )
+    def _input_hash(self, payload: dict[str, Any]) -> str:
+        return TaskValidator.input_hash(payload)
 
-    @classmethod
-    def _require_independent(
-        cls,
-        executor: str | None,
-        reviewer: str | None,
-    ) -> None:
-        if not executor or not executor.strip():
-            raise PrerequisiteError("executor is required")
-        if not reviewer or not reviewer.strip():
-            raise PrerequisiteError("reviewer is required")
-        if cls._principal(executor) == cls._principal(reviewer):
-            raise PrerequisiteError("Reviewer must differ from executor")
+    def _require_independent(self, executor: str | None, reviewer: str | None) -> None:
+        self.validator.require_independent(executor, reviewer)
 
-    @staticmethod
-    def _principal(value: str) -> str:
-        return value.strip().casefold()
+    def _principal(self, value: str) -> str:
+        return TaskValidator.principal(value)
 
-    @staticmethod
-    def _input_hash(payload: dict[str, Any]) -> str:
-        encoded = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            default=str,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+    def _ledger_record(self, **kwargs: Any) -> GateRecord:
+        return self.state_machine.ledger_record(**kwargs)
+
+    def _audit(self, task: Task, record: GateRecord, reason: str | None = None) -> None:
+        self.state_machine.audit(task, record, reason=reason)
+
+    def _idempotent_record(self, task_id: str, idempotency_key: str, input_hash: str) -> GateRecord | None:
+        return self.validator.idempotent_record(task_id, idempotency_key, input_hash)
+
+    def _reject_if_stale_dispatch_record(self, record: GateRecord) -> None:
+        self.validator.reject_if_stale_dispatch_record(record)
+
+    def _result_for_record(self, task: Task, record: GateRecord) -> TransitionResult:
+        return self.state_machine.result_for_record(task, record)
+
+    def _request_gate(self, **kwargs: Any) -> TransitionResult:
+        return self.state_machine.request_gate(**kwargs)
+
+    def _apply_gate(self, **kwargs: Any) -> tuple[Any, str | None]:
+        return self.state_machine.apply_gate(**kwargs)
+
+    def _validate_verdict_prerequisites(self, task: Task, *, actor: str, verdict: str, ac_results: Any) -> None:
+        self.validator.validate_verdict_prerequisites(task, actor=actor, verdict=verdict, ac_results=ac_results)
+
+    def _validate_common(self, task: Task, actor: str, idempotency_key: str) -> None:
+        TaskValidator.validate_common(task, actor, idempotency_key)
+
+    def _evaluation_results(self, ac_results: Any) -> list[bool]:
+        return TaskValidator.evaluation_results(ac_results)
