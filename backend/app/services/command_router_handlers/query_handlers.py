@@ -451,6 +451,24 @@ class QueryHandlersMixin:
             'rows': serialized,
         }
 
+    @staticmethod
+    def _knowledge_snapshot(item: KnowledgeItem, distance=None) -> dict[str, Any]:
+        result = {
+            'id': item.id,
+            'title': item.title,
+            'category': item.category,
+            'content': item.content,
+            'tags': item.tags or [],
+            'project': item.project,
+            'author': item.author,
+            'status': item.status,
+            'created_at': item.created_at.isoformat() if item.created_at else None,
+            'archived_at': item.archived_at.isoformat() if item.archived_at else None,
+        }
+        if distance is not None:
+            result['distance'] = float(distance)
+        return result
+
     async def _handle_manage_knowledge(self, args: str, session_id: str) -> dict:
         try:
             payload = json.loads(args) if args else {}
@@ -462,8 +480,11 @@ class QueryHandlersMixin:
         action = str(payload.get('action', '')).strip()
         raw_id = payload.get('id')
         item_id = str(raw_id).strip() if raw_id else None
-        fields = {k: v for k, v in payload.items() if k not in ('action', 'id')}
+        fields = {k: v for k, v in payload.items() if k not in ('action', 'id', 'query', 'q', 'limit')}
         actor = f"chat:{session_id or 'anonymous'}"
+        limit = min(100, max(1, int(payload.get('limit', 20) or 20)))
+
+        embed_fn = _get_embed_text()
 
         try:
             if action == 'create':
@@ -471,10 +492,25 @@ class QueryHandlersMixin:
                 if item_id:
                     create_fields['id'] = item_id
                 item = entity_admin.create_knowledge(self.db, create_fields)
+                # Embed content for semantic search
+                content_to_embed = f"{item.title}\n{item.content}"
+                try:
+                    item.embedding = embed_fn(content_to_embed, self.db)
+                except EmbeddingError:
+                    pass  # Embedding is optional, continue without it
+                self.db.flush()
             elif action == 'update':
                 if not item_id:
                     return {'error': 'id is required for update'}
                 item = entity_admin.update_knowledge(self.db, item_id, fields)
+                # Re-embed if content or title changed
+                if 'content' in fields or 'title' in fields:
+                    content_to_embed = f"{item.title}\n{item.content}"
+                    try:
+                        item.embedding = embed_fn(content_to_embed, self.db)
+                    except EmbeddingError:
+                        pass
+                    self.db.flush()
             elif action in {'archive', 'restore'}:
                 if not item_id:
                     return {'error': f'id is required for {action}'}
@@ -484,11 +520,58 @@ class QueryHandlersMixin:
                 except ArchiveError as exc:
                     return {'error': str(exc)}
                 item = self.db.get(KnowledgeItem, item_id)
+            elif action in {'list', 'search'}:
+                query = str(payload.get('query') or payload.get('q') or '').strip()
+                filters = [KnowledgeItem.status == 'active']
+                if payload.get('project'):
+                    filters.append(KnowledgeItem.project == str(payload['project']))
+                if payload.get('category'):
+                    filters.append(KnowledgeItem.category == str(payload['category']))
+                if action == 'search' and not query and not payload.get('embedding'):
+                    return {'error': 'query or embedding is required for search'}
+
+                search_embedding = payload.get('embedding')
+                if query:
+                    try:
+                        search_embedding = embed_fn(query, self.db)
+                    except EmbeddingError as exc:
+                        return {'error': f'Embedding failed: {exc}'}
+
+                # Semantic search with pgvector
+                if search_embedding and self.db.bind.dialect.name == 'postgresql':
+                    from sqlalchemy import text
+                    vector_value = "[" + ",".join(str(float(item)) for item in search_embedding) + "]"
+                    scope_sql = ""
+                    params = {'embedding': vector_value, 'limit': limit}
+                    if payload.get('project'):
+                        scope_sql += " AND project = :project"
+                        params['project'] = str(payload['project'])
+                    if payload.get('category'):
+                        scope_sql += " AND category = :category"
+                        params['category'] = str(payload['category'])
+                    rows = self.db.execute(text(f"""
+                        SELECT id, embedding <=> CAST(:embedding AS vector) AS distance
+                        FROM knowledge_items
+                        WHERE status = 'active' AND embedding IS NOT NULL{scope_sql}
+                        ORDER BY embedding <=> CAST(:embedding AS vector)
+                        LIMIT :limit
+                    """), params).mappings().all()
+                    ranked = {row['id']: row['distance'] for row in rows}
+                    items = self.db.query(KnowledgeItem).filter(KnowledgeItem.id.in_(ranked)).all()
+                    items.sort(key=lambda ki: ranked[ki.id])
+                    return {'action': 'knowledge_searched', 'items': [self._knowledge_snapshot(ki, ranked[ki.id]) for ki in items]}
+
+                # Fallback: text search or list
+                statement = self.db.query(KnowledgeItem).filter(*filters)
+                if query:
+                    statement = statement.filter((KnowledgeItem.title.ilike(f'%{query}%')) | (KnowledgeItem.content.ilike(f'%{query}%')))
+                items = statement.order_by(KnowledgeItem.updated_at.desc()).limit(limit).all()
+                return {'action': 'knowledge_searched' if action == 'search' else 'knowledge_listed', 'items': [self._knowledge_snapshot(ki) for ki in items]}
             else:
                 return {
                     'error': (
                         f"Unknown action '{action}'. Valid actions: "
-                        "create, update, archive, restore"
+                        "create, update, archive, restore, list, search"
                     )
                 }
         except entity_admin.EntityError as exc:

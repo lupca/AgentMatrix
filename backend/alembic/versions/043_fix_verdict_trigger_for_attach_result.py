@@ -1,15 +1,16 @@
 """fix verdict trigger to accept attach_result gate type
 
-Revision ID: 043
-Revises: 042
+Revision ID: 043_fix_verdict_trigger
+Revises: 042_agent_notes
 Create Date: 2026-08-02
 """
 from alembic import op
+from typing import Sequence, Union
 
-revision = "043"
-down_revision = "042"
-branch_labels = None
-depends_on = None
+revision: str = "043_fix_verdict_trigger"
+down_revision: Union[str, None] = "042_agent_notes"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
