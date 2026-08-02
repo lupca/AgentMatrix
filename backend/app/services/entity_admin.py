@@ -14,7 +14,16 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from app.db.models import Agent, KnowledgeItem, Project, Setting
+from app.db.models import (
+    Agent,
+    AgentCapability,
+    AgentCapabilityLink,
+    AgentRole,
+    AgentRoleLink,
+    KnowledgeItem,
+    Project,
+    Setting,
+)
 from app.graph.context import invalidate_context_snapshot
 from app.services.crypto import encrypt_api_key
 
@@ -91,6 +100,7 @@ def archive_project(db: Session, project_id: str) -> Project:
 _AGENT_UPDATE_FIELDS = {
     "name",
     "role",
+    "roles",
     "capabilities",
     "status",
     "type",
@@ -127,6 +137,36 @@ def _validate_default_role(role: str, is_default: bool) -> None:
         )
 
 
+def _normalized_roles(data: dict[str, Any], fallback: list[str] | None = None) -> list[str]:
+    roles = data.get("roles")
+    if roles is None:
+        roles = [data.get("role")] if data.get("role") is not None else (fallback or [])
+    result = list(dict.fromkeys(str(value).strip() for value in roles if str(value).strip()))
+    invalid = set(result) - {item.value for item in AgentRole}
+    if invalid:
+        raise EntityValidationError(f"Unknown agent role(s): {', '.join(sorted(invalid))}")
+    return result
+
+
+def _normalized_capabilities(data: dict[str, Any], fallback: list[str] | None = None) -> list[str]:
+    values = data.get("capabilities", fallback or [])
+    result = list(dict.fromkeys(str(value).strip() for value in (values or []) if str(value).strip()))
+    invalid = set(result) - {item.value for item in AgentCapability}
+    if invalid:
+        raise EntityValidationError(f"Unknown agent capability(s): {', '.join(sorted(invalid))}")
+    return result
+
+
+def _sync_agent_links(db: Session, agent: Agent, roles: list[str], capabilities: list[str]) -> None:
+    agent.agent_roles.clear()
+    agent.agent_capabilities.clear()
+    db.flush()
+    agent.agent_roles.extend(AgentRoleLink(role=AgentRole(value)) for value in roles)
+    agent.agent_capabilities.extend(
+        AgentCapabilityLink(capability=AgentCapability(value)) for value in capabilities
+    )
+
+
 def unset_coordinator_defaults(db: Session, except_id: str | None = None) -> None:
     query = db.query(Agent).filter(Agent.role == "coordinator")
     if except_id:
@@ -137,9 +177,11 @@ def unset_coordinator_defaults(db: Session, except_id: str | None = None) -> Non
 def create_agent(db: Session, data: dict[str, Any]) -> Agent:
     agent_id = str(data.get("id", "")).strip()
     name = str(data.get("name", "")).strip()
-    role = str(data.get("role", "")).strip()
+    roles = _normalized_roles(data)
+    role = roles[0] if roles else ""
     if not agent_id or not name or not role:
-        raise EntityValidationError("id, name, and role are required")
+        raise EntityValidationError("id, name, and at least one role are required")
+    capabilities = _normalized_capabilities(data)
     if db.query(Agent).filter(Agent.id == agent_id).first() is not None:
         raise EntityConflictError(f"Agent with ID '{agent_id}' already exists.")
 
@@ -159,10 +201,11 @@ def create_agent(db: Session, data: dict[str, Any]) -> Agent:
         require_cli=has_explicit_type,
     )
 
-    fields = {k: v for k, v in data.items() if k in _AGENT_CREATE_FIELDS}
+    fields = {k: v for k, v in data.items() if k in _AGENT_CREATE_FIELDS and k != "roles"}
     fields["id"] = agent_id
     fields["name"] = name
     fields["role"] = role
+    fields["capabilities"] = capabilities
     fields["agent_type"] = agent_type
     if agent_type == "api":
         fields["api_key"] = api_key_encrypted or encrypt_api_key(api_key)
@@ -180,6 +223,8 @@ def create_agent(db: Session, data: dict[str, Any]) -> Agent:
 
     agent = Agent(**fields)
     db.add(agent)
+    db.flush()
+    _sync_agent_links(db, agent, roles, capabilities)
     db.commit()
     db.refresh(agent)
     invalidate_context_snapshot(db)
@@ -237,7 +282,9 @@ def update_agent(db: Session, agent_id: str, data: dict[str, Any]) -> Agent:
         patch["provider"] = None
         patch["base_url"] = None
 
-    target_role = patch.get("role", agent.role)
+    roles = _normalized_roles(patch, fallback=agent.normalized_roles)
+    target_role = roles[0] if roles else agent.role
+    capabilities = _normalized_capabilities(patch, fallback=agent.normalized_capabilities)
     target_default = patch.get("is_default", agent.is_default)
     _validate_default_role(target_role, target_default)
     if target_role != "coordinator":
@@ -246,7 +293,13 @@ def update_agent(db: Session, agent_id: str, data: dict[str, Any]) -> Agent:
         unset_coordinator_defaults(db, except_id=agent_id)
 
     for field, value in patch.items():
+        if field in {"roles", "capabilities"}:
+            continue
         setattr(agent, field, value)
+
+    agent.role = target_role
+    agent.capabilities = capabilities
+    _sync_agent_links(db, agent, roles, capabilities)
 
     db.commit()
     db.refresh(agent)

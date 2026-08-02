@@ -182,6 +182,10 @@ class AdminGateService:
             raise AdminPrerequisiteError(f"id is required for {action}")
         if action == "create":
             missing = _REQUIRED_CREATE_FIELDS.get(entity, set()) - set(payload)
+            if entity == "agents":
+                missing.discard("role")
+                if "role" not in payload and "roles" not in payload:
+                    missing.add("role or roles")
             if missing:
                 raise AdminPrerequisiteError(
                     f"Missing required fields: {', '.join(sorted(missing))}"

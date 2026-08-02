@@ -15,6 +15,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Enum as SAEnum,
     event,
 )
 from sqlalchemy.orm import validates, relationship
@@ -39,6 +40,102 @@ class SessionStatus(str, Enum):
 class AgentType(str, Enum):
     CLI = "cli"
     API = "api"
+
+
+class AgentRole(str, Enum):
+    EXECUTOR = "executor"
+    REVIEWER = "reviewer"
+    COORDINATOR = "coordinator"
+    SPEC_PLAN = "spec_plan"
+
+
+class AgentCapability(str, Enum):
+    CODE = "code"
+    BACKEND = "backend"
+    FRONTEND = "frontend"
+    REVIEW = "review"
+    RESEARCH = "research"
+    ARCHITECTURE = "architecture"
+    TESTING = "testing"
+    COORDINATION = "coordination"
+    DEVOPS = "devops"
+    INFRA = "infra"
+    API = "api"
+    DATABASE = "database"
+    DOCUMENTATION = "documentation"
+    REASONING = "reasoning"
+    VERIFICATION = "verification"
+    DIFF_READING = "diff-reading"
+    TEST_RUNNING = "test-running"
+    COMPLEX_BACKEND = "complex-backend"
+    COMPLEX_FRONTEND = "complex-frontend"
+    COMPLEX_ANALYSIS = "complex-analysis"
+    COMPLEX_LOGIC = "complex-logic"
+    COMPLEX_REFACTOR = "complex-refactor"
+    SIMPLE_TASKS = "simple-tasks"
+    FAST = "fast"
+    FAST_EXECUTION = "fast-execution"
+    FAST_ITERATION = "fast-iteration"
+    FULL_IMPLEMENTATION = "full-implementation"
+    CLEANUP = "cleanup"
+    MARKDOWN_CLEANUP = "markdown-cleanup"
+    SKILL_DESIGN = "skill-design"
+    SKILLS = "skills"
+    SPEC_PLANNING = "spec-planning"
+    DECOMPOSITION = "decomposition"
+    GRAPH_SOURCING = "graph-sourcing"
+    AUDIT_LOGGING = "audit-logging"
+    SPOT_CHECK_RUNTIME = "spot-check-runtime"
+    AC_GENERATION = "ac-generation"
+    PROCESS_DESIGN = "process-design"
+    CONFIRMATION = "confirmation"
+    CREATIVE = "creative"
+    DEEP_RESEARCH = "deep-research"
+    FINAL_DECISION = "final-decision"
+    FOLLOWS_EXPLICIT_INSTRUCTIONS = "follows-explicit-instructions"
+    FOLLOWS_INSTRUCTIONS = "follows-instructions"
+    RELIABLE = "reliable"
+    CODE_REVIEW = "code-review"
+    # Legacy JSON values retained as valid enum members during phase one.
+    COORDINATOR = "coordinator"
+    SPEC_PLAN = "spec_plan"
+    EXECUTE = "execute"
+    PYTHON = "python"
+    REACT = "react"
+    TYPESCRIPT = "typescript"
+    GENERAL = "general"
+
+
+class AgentRoleLink(Base):
+    __tablename__ = "agent_roles"
+
+    agent_id = Column(String(50), ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
+    role = Column(SAEnum(AgentRole, name="agent_role"), ForeignKey("role_types.role"), primary_key=True)
+    agent = relationship("Agent", back_populates="agent_roles")
+
+
+class AgentCapabilityLink(Base):
+    __tablename__ = "agent_capabilities"
+
+    agent_id = Column(String(50), ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
+    capability = Column(
+        SAEnum(AgentCapability, name="agent_capability"),
+        ForeignKey("capability_types.capability"),
+        primary_key=True,
+    )
+    agent = relationship("Agent", back_populates="agent_capabilities")
+
+
+class AgentRoleType(Base):
+    __tablename__ = "role_types"
+
+    role = Column(SAEnum(AgentRole, name="agent_role"), primary_key=True)
+
+
+class AgentCapabilityType(Base):
+    __tablename__ = "capability_types"
+
+    capability = Column(SAEnum(AgentCapability, name="agent_capability"), primary_key=True)
 
 
 class Task(ArchivableMixin, Base):
@@ -601,6 +698,24 @@ class Agent(ArchivableMixin, Base):
     legacy_profile = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    agent_roles = relationship("AgentRoleLink", back_populates="agent", cascade="all, delete-orphan")
+    agent_capabilities = relationship(
+        "AgentCapabilityLink", back_populates="agent", cascade="all, delete-orphan"
+    )
+
+    @property
+    def normalized_roles(self) -> list[str]:
+        values = [link.role.value if isinstance(link.role, AgentRole) else str(link.role) for link in self.agent_roles]
+        return values or ([self.role] if self.role else [])
+
+    @property
+    def normalized_capabilities(self) -> list[str]:
+        values = [
+            link.capability.value if isinstance(link.capability, AgentCapability) else str(link.capability)
+            for link in self.agent_capabilities
+        ]
+        return values or list(self.capabilities or [])
 
     @property
     def has_api_key(self) -> bool:

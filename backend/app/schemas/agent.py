@@ -5,13 +5,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 AgentTypeValue = Literal["cli", "api"]
 ProviderValue = Literal["anthropic", "google", "openai"]
+AgentRoleValue = Literal["executor", "reviewer", "coordinator", "spec_plan"]
 
 
 class AgentCreate(BaseModel):
     id: str
     name: str
-    role: str
-    capabilities: list[Any] | None = None
+    role: AgentRoleValue | None = None
+    roles: list[AgentRoleValue] | None = None
+    capabilities: list[str] | None = None
     status: str | None = "idle"
     type: str | None = None
     model: str | None = None
@@ -42,8 +44,9 @@ class AgentCreate(BaseModel):
 
 class AgentUpdate(BaseModel):
     name: str | None = None
-    role: str | None = None
-    capabilities: list[Any] | None = None
+    role: AgentRoleValue | None = None
+    roles: list[AgentRoleValue] | None = None
+    capabilities: list[str] | None = None
     status: str | None = None
     type: str | None = None
     model: str | None = None
@@ -60,7 +63,8 @@ class Agent(BaseModel):
     id: str
     name: str
     role: str
-    capabilities: list[Any] | None = Field(default_factory=list)
+    roles: list[AgentRoleValue] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
     status: str
     type: str | None = None
     model: str | None = None
@@ -76,6 +80,32 @@ class Agent(BaseModel):
     archived_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def serialize_normalized_links(cls, value: Any) -> Any:
+        if hasattr(value, "normalized_roles"):
+            return {
+                "id": value.id,
+                "name": value.name,
+                "role": value.role,
+                "roles": value.normalized_roles,
+                "capabilities": value.normalized_capabilities,
+                "status": value.status,
+                "type": value.type,
+                "model": value.model,
+                "effort": value.effort,
+                "cli": value.cli,
+                "agent_type": value.agent_type,
+                "provider": value.provider,
+                "base_url": value.base_url,
+                "has_api_key": value.has_api_key,
+                "is_default": value.is_default,
+                "created_at": value.created_at,
+                "updated_at": value.updated_at,
+                "archived_at": value.archived_at,
+            }
+        return value
 
 
 class AgentSuggestion(BaseModel):

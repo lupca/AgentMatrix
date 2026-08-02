@@ -219,7 +219,7 @@ class AgentMatcher:
         if excluded and agent.id.strip().casefold() == excluded:
             return "excluded from candidate pool (e.g. four-eyes)"
         if required_capabilities and not (
-            set(agent.capabilities or []) & required_capabilities
+            set(agent.normalized_capabilities) & required_capabilities
         ):
             return (
                 "missing required capability: "
@@ -279,8 +279,8 @@ class AgentMatcher:
     @staticmethod
     def _agent_terms(agent: Agent) -> set[str]:
         fields = (
-            agent.capabilities,
-            agent.role,
+            agent.normalized_capabilities,
+            agent.normalized_roles,
             agent.name,
             agent.model,
             agent.effort,
@@ -338,7 +338,7 @@ class AgentMatcher:
 
     @staticmethod
     def _work_type_boost(agent: Agent, work_type: str, task_terms: set[str]) -> float:
-        capabilities = {str(c).lower() for c in (agent.capabilities or [])}
+        capabilities = {str(c).lower() for c in agent.normalized_capabilities}
         if work_type in _ROUTED_WORK_TYPES:
             return 1.0 if work_type in capabilities else 0.3
         domain_terms = task_terms - set(_ROUTED_WORK_TYPES)
