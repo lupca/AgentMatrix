@@ -239,28 +239,44 @@ def _record_vendor_output(
 ) -> int:
     """Persist the raw line and its normalized events; return next event seq."""
     db.add(VendorRawEvent(run_id=run_id, seq=raw_seq, cli=cli or "unknown", raw_output=line))
-    next_seq = event_seq
-    for event in parse_vendor_event(cli, line):
+    events = list(parse_vendor_event(cli, line))
+    if not events:
+        return event_seq
+    # Allocate all needed sequences atomically
+    base_seq = _next_agent_event_seq(db, run_id, count=len(events))
+    for i, event in enumerate(events):
         _record_agent_event(
             db,
             run_id,
-            next_seq,
+            base_seq + i,
             event["event_type"],
             event["payload"],
             event["timestamp"],
         )
-        next_seq += 1
-    return next_seq
+    return base_seq + len(events)
 
 
-def _next_agent_event_seq(db: Session, run_id: str) -> int:
-    latest = (
-        db.query(AgentEvent.seq)
-        .filter(AgentEvent.run_id == run_id)
-        .order_by(AgentEvent.seq.desc())
-        .first()
+def _next_agent_event_seq(db: Session, run_id: str, count: int = 1) -> int:
+    """Atomically allocate `count` sequential event IDs for a run.
+
+    Uses UPDATE RETURNING for atomic increment - no race condition possible.
+    Returns the FIRST allocated seq. Caller can use seq, seq+1, ..., seq+count-1.
+    """
+    from sqlalchemy import text
+
+    result = db.execute(
+        text("""
+            UPDATE agent_runs
+            SET next_event_seq = next_event_seq + :count
+            WHERE id = :run_id
+            RETURNING next_event_seq - :count
+        """),
+        {"run_id": run_id, "count": count},
     )
-    return (latest[0] + 1) if latest else 0
+    row = result.fetchone()
+    if row is None:
+        raise ValueError(f"AgentRun {run_id} not found")
+    return row[0]
 
 
 def _next_chunk_index(db: Session, run_id: str) -> int:

@@ -836,6 +836,7 @@ class AgentRun(Base):
 
     output_lines = Column(Integer, nullable=False, default=0)
     output_bytes = Column(Integer, nullable=False, default=0)
+    next_event_seq = Column(Integer, nullable=False, default=0, server_default="0")
     attempt = Column(Integer, nullable=False, default=1)
     max_attempts = Column(Integer, nullable=False, default=3)
 

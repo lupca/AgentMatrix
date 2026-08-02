@@ -766,7 +766,8 @@ def execute_agent_run(
         explicit_result_ref: str | None = None
         active_chunk: AgentOutputChunk | None = None
         next_chunk_index = _next_chunk_index(db, run_id)
-        event_seq = _next_agent_event_seq(db, run_id)
+        # Allocate 2 sequences atomically for run.started + llm.requested
+        event_seq = _next_agent_event_seq(db, run_id, count=2)
         result: ProcessResult | None = None
 
         _record_agent_event(
@@ -866,10 +867,12 @@ def execute_agent_run(
         run.pid = None
         run.error_message = result.error
 
+        # Allocate seq for run.completed event
+        completed_seq = _next_agent_event_seq(db, run_id, count=1)
         _record_agent_event(
             db,
             run_id,
-            event_seq,
+            completed_seq,
             "run.completed",
             {
                 "status": result.status.value,
