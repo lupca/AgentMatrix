@@ -55,6 +55,44 @@ def _split_result_range(result_ref: str) -> tuple[str | None, str | None]:
     return base or None, head or None
 
 
+def update_agent_success_rate(
+    arg1: Any,
+    arg2: Any,
+    arg3: Any = None,
+    *,
+    db: Session | None = None,
+) -> float | None:
+    """Update an agent's success_rate using Exponential Moving Average (alpha=0.1).
+
+    Formula: new_rate = 0.1 * outcome + 0.9 * old_rate
+    Supports flexible argument calling conventions:
+      - update_agent_success_rate(db, agent_id, outcome)
+      - update_agent_success_rate(agent_id, outcome, db=...)
+    """
+    if isinstance(arg1, Session):
+        session = arg1
+        agent_id = str(arg2) if arg2 is not None else ""
+        outcome = float(arg3) if arg3 is not None else 0.0
+    else:
+        agent_id = str(arg1) if arg1 is not None else ""
+        outcome = float(arg2) if arg2 is not None else 0.0
+        session = db if db is not None else arg3
+
+    if not session or not agent_id:
+        return None
+
+    agent = session.query(Agent).filter(Agent.id == agent_id).first()
+    if not agent:
+        return None
+
+    old_rate = float(agent.success_rate) if agent.success_rate is not None else 0.0
+    new_rate = 0.1 * outcome + 0.9 * old_rate
+    agent.success_rate = new_rate
+    session.add(agent)
+    return new_rate
+
+
+
 @dataclass(frozen=True)
 class TransitionResult:
     task: Task
@@ -523,6 +561,7 @@ class TaskStateMachine:
                         "landing_failed",
                         {"result_ref": task.result_ref, "error": landing.error},
                     )
+                    self._update_verdict_agent_success_rates(task, verdict)
                     return None, verdict
                 self.cas_status(task, "done")
                 task.completed_at = now
@@ -541,8 +580,17 @@ class TaskStateMachine:
                 self.cas_status(task, "changes-requested")
                 task.completed_at = None
             self.record_verdict_on_round(task, verdict=verdict, now=now)
+            self._update_verdict_agent_success_rates(task, verdict)
             return None, verdict
         raise OrchestrationError(f"Unsupported gate type: {gate_type}")
+
+    def _update_verdict_agent_success_rates(self, task: Task, verdict: str) -> None:
+        outcome = 1.0 if verdict == "pass" else 0.0
+        if task.executor:
+            update_agent_success_rate(self.db, task.executor, outcome)
+        if task.reviewer:
+            update_agent_success_rate(self.db, task.reviewer, outcome)
+
 
     def request_gate(
         self,

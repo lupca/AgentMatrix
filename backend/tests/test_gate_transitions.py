@@ -7,6 +7,7 @@ from app.services.task_orchestration import (
     PrerequisiteError,
     TaskOrchestrationService,
     TransitionConflictError,
+    update_agent_success_rate,
 )
 
 
@@ -419,3 +420,97 @@ def test_verdict_pass_with_three_ac_and_two_results_is_rejected(service, db_sess
             actor="@reviewer",
             idempotency_key="verdict-3ac-2results",
         )
+
+
+def test_update_agent_success_rate_ema_calculation(service, db_session):
+    agent = Agent(
+        id="ema_agent",
+        name="EMA Agent",
+        role="executor",
+        success_rate=0.0,
+    )
+    db_session.add(agent)
+    db_session.commit()
+
+    # Pass (outcome 1.0): 0.1 * 1.0 + 0.9 * 0.0 = 0.1
+    rate = update_agent_success_rate(db_session, "ema_agent", 1.0)
+    assert rate == pytest.approx(0.1)
+    assert agent.success_rate == pytest.approx(0.1)
+
+    # Pass again (outcome 1.0): 0.1 * 1.0 + 0.9 * 0.1 = 0.19
+    rate = update_agent_success_rate("ema_agent", 1.0, db=db_session)
+    assert rate == pytest.approx(0.19)
+    assert agent.success_rate == pytest.approx(0.19)
+
+    # Fail (outcome 0.0): 0.1 * 0.0 + 0.9 * 0.19 = 0.171
+    rate = update_agent_success_rate(db_session, "ema_agent", 0.0)
+    assert rate == pytest.approx(0.171)
+    assert agent.success_rate == pytest.approx(0.171)
+
+
+def test_verdict_pass_auto_updates_executor_and_reviewer_success_rate(service, db_session):
+    executor = db_session.query(Agent).filter(Agent.id == "@executor").first()
+    reviewer = db_session.query(Agent).filter(Agent.id == "@reviewer").first()
+    executor.success_rate = 0.5
+    reviewer.success_rate = 0.5
+    db_session.commit()
+
+    task = _add_task(
+        db_session,
+        "VER-AUTO-PASS",
+        status="in-review",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="abc123",
+    )
+    _add_terminal_review_run(db_session, task)
+
+    result = service.request_verdict(
+        task_id=task.id,
+        verdict="pass",
+        ac_results=[{"passed": True}],
+        actor="@reviewer",
+        idempotency_key="verdict-auto-pass",
+    )
+
+    assert result.task.status == "done"
+    # new_rate = 0.1 * 1.0 + 0.9 * 0.5 = 0.55
+    assert executor.success_rate == pytest.approx(0.55)
+    assert reviewer.success_rate == pytest.approx(0.55)
+
+
+def test_verdict_changes_auto_updates_executor_and_reviewer_success_rate(service, db_session):
+    executor = db_session.query(Agent).filter(Agent.id == "@executor").first()
+    reviewer = db_session.query(Agent).filter(Agent.id == "@reviewer").first()
+    executor.success_rate = 0.5
+    reviewer.success_rate = 0.5
+    db_session.commit()
+
+    task = _add_task(
+        db_session,
+        "VER-AUTO-FAIL",
+        status="in-review",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="abc123",
+    )
+    _add_terminal_review_run(db_session, task)
+
+    result = service.request_verdict(
+        task_id=task.id,
+        verdict="changes",
+        ac_results=[{"passed": False}],
+        actor="@reviewer",
+        idempotency_key="verdict-auto-fail",
+    )
+
+    assert result.task.status == "changes-requested"
+    # new_rate = 0.1 * 0.0 + 0.9 * 0.5 = 0.45
+    assert executor.success_rate == pytest.approx(0.45)
+    assert reviewer.success_rate == pytest.approx(0.45)
+
+
+def test_update_agent_success_rate_handles_missing_agent(service, db_session):
+    res = update_agent_success_rate(db_session, "non_existent_agent", 1.0)
+    assert res is None
+

@@ -24,6 +24,7 @@ from app.services.task_state_machine import (
     TaskStateMachine,
     TransitionResult,
     _split_result_range,
+    update_agent_success_rate,
 )
 from app.services.task_validators import (
     AutonomyPolicy,
@@ -66,6 +67,7 @@ __all__ = [
     "land_result",
     "LandingResult",
     "AgentMatcher",
+    "update_agent_success_rate",
 ]
 
 
@@ -202,6 +204,9 @@ class TaskOrchestrationService:
             findings=findings,
             expected_status=expected_status,
         )
+
+    def update_agent_success_rate(self, agent_id: str, outcome: float) -> float | None:
+        return update_agent_success_rate(self.db, agent_id, outcome)
 
     def decide_gate(
         self,
