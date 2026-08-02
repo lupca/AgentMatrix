@@ -71,13 +71,25 @@ Một round mỗi lần execute-dispatch; verdict ghi vào round. `auto_max_roun
 
 - `agent_type`: `cli` (claude/agy/codex, chạy bằng subscription CLI) hoặc `api`
   (OpenAI-compatible endpoint: `provider` + `model` + `api_key` mã hóa +
-  `base_url` — vd SiliconFlow). `role`: executor/reviewer/coordinator/spec_plan.
+  `base_url` — vd SiliconFlow).
+- **Roles** (normalized, CTV2-249): PostgreSQL ENUM `agent_role` với 4 giá trị:
+  `executor`, `reviewer`, `coordinator`, `spec_plan`. Một agent có thể nhiều
+  roles — lưu trong junction table `agent_roles`. Cột `role` (legacy) giữ role
+  chính để backward compat, `normalized_roles` property đọc từ junction table
+  trước, fallback về legacy nếu trống.
+- **Capabilities** (normalized, CTV2-249): PostgreSQL ENUM `agent_capability`
+  với ~50 giá trị (code, backend, review, architecture...). Junction table
+  `agent_capabilities`. Cột `capabilities` JSON (legacy) vẫn giữ, 
+  `normalized_capabilities` property đọc từ junction trước.
 - `effort`: low/medium/high — bắt buộc với một số model agy (gemini-3.6-flash);
   model name có suffix `-low/-medium/-high/...` thì KHÔNG truyền flag nữa.
 - `success_rate`: số đo production — KHÔNG được ghi đè bằng giá trị tĩnh từ md
   (migrate script upsert giữ nguyên).
 - `agent_accounts`: health/quota per (agent, cli) — CASCADE khi xóa agent
   (lý do nữa để không bao giờ clear bảng agents).
+
+**Lookup tables**: `role_types`, `capability_types` — seed từ ENUM values,
+FK constraint đảm bảo chỉ insert giá trị hợp lệ vào junction tables.
 
 ## Project
 
