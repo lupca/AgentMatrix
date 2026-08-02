@@ -170,7 +170,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "- tasks (id, title, status [todo, dispatched, awaiting-review, in-review, done, cancelled, failed], project, executor, reviewer, priority, mode)\n"
                 "- inbox_items (id, content, project_id, task_id, tags, status, created_at)\n"
                 "- projects (id, name, status, repo_root, mode)\n"
-                "- agents (id, name, role [coordinator, executor, reviewer, spec_plan], status, agent_type [cli, api], model)\n"
+                "- agents (id, name, role, status, agent_type [cli, api], model) — role is legacy single value\n"
+                "- agents_view (id, name, role, roles[], capabilities_array[], status, model) — USE THIS for full roles/capabilities\n"
+                "- agent_roles (agent_id, role) — junction table for multi-role agents\n"
+                "- agent_capabilities (agent_id, capability) — junction table\n"
                 "- sessions (id, title, status, context_level, project_id, task_id)\n"
                 "- agent_runs (id, task_id, agent_id, kind [execute, review], status [queued, running, success, failed, cancelled], attempt)\n"
                 "- knowledge_items (id, title, category, project, author, content)\n"
@@ -179,7 +182,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "- settings (key, value)\n\n"
                 "Examples:\n"
                 "SELECT project, count(*) FROM tasks WHERE status='dispatched' GROUP BY project\n"
-                "SELECT id, status FROM agents WHERE role='executor'"
+                "SELECT id, roles, capabilities_array FROM agents_view WHERE 'executor' = ANY(roles)"
             ),
             parameters={
                 "type": "object",

@@ -207,7 +207,10 @@ class AdminGateService:
                 output = {
                     "id": obj.id,
                     "name": obj.name,
+                    "role": obj.role,
+                    "roles": obj.normalized_roles,
                     "status": obj.status,
+                    "capabilities": obj.normalized_capabilities,
                     "has_api_key": obj.has_api_key,
                 }
             elif entity == "settings":
