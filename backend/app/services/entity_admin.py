@@ -141,7 +141,8 @@ def _normalized_roles(data: dict[str, Any], fallback: list[str] | None = None) -
     roles = data.get("roles")
     if roles is None:
         roles = [data.get("role")] if data.get("role") is not None else (fallback or [])
-    result = list(dict.fromkeys(str(value).strip() for value in roles if str(value).strip()))
+    # Normalize to lowercase to match enum values (handles uppercase enum names from API)
+    result = list(dict.fromkeys(str(value).strip().lower() for value in roles if str(value).strip()))
     invalid = set(result) - {item.value for item in AgentRole}
     if invalid:
         raise EntityValidationError(f"Unknown agent role(s): {', '.join(sorted(invalid))}")
@@ -150,7 +151,8 @@ def _normalized_roles(data: dict[str, Any], fallback: list[str] | None = None) -
 
 def _normalized_capabilities(data: dict[str, Any], fallback: list[str] | None = None) -> list[str]:
     values = data.get("capabilities", fallback or [])
-    result = list(dict.fromkeys(str(value).strip() for value in (values or []) if str(value).strip()))
+    # Normalize to lowercase to match enum values (handles uppercase enum names from API)
+    result = list(dict.fromkeys(str(value).strip().lower() for value in (values or []) if str(value).strip()))
     invalid = set(result) - {item.value for item in AgentCapability}
     if invalid:
         raise EntityValidationError(f"Unknown agent capability(s): {', '.join(sorted(invalid))}")
