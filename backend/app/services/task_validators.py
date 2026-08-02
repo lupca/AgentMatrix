@@ -284,6 +284,9 @@ class TaskValidator:
             )
             self.db.add(record)
             self.db.flush()
+            TaskStateMachine(self.db)._reject_all_pending_gates(
+                task, f"Task reached terminal state: {task.status}"
+            )
             self.db.add(
                 AuditLog(
                     task_id=task.id,

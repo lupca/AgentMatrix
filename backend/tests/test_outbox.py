@@ -268,7 +268,7 @@ def test_reap_uses_record_review_failure_for_review_runs(seeded):
 
     seeded.refresh(task)
     assert task.status == "failed"
-    assert task.awaiting_approval is True
+    assert task.awaiting_approval is False
 
 
 def test_reap_ignores_running_runs_with_no_recorded_pid(seeded):
