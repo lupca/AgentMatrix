@@ -269,8 +269,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="attach_result",
             description=(
-                "Attach a commit to a task, bypassing agent dispatch flow. "
-                "Option allows marking done directly or moving to awaiting-review."
+                "Attach an existing commit to a task when coordinator already made the changes. "
+                "Use this when code is already committed and you want to record it in a task "
+                "WITHOUT dispatching an agent to redo the work. "
+                "Options: 'done' marks task complete immediately; 'request_review' moves to "
+                "awaiting-review so a reviewer agent can verify the changes."
             ),
             parameters={
                 "type": "object",
