@@ -5,6 +5,7 @@ import json
 import os
 import logging
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Tuple, Optional
 from app.db.models import (
     Agent,
@@ -420,8 +421,7 @@ class CommandRouter:
             verdict = str(args.get('verdict', '')).strip().lower()
             if not task_id or not verdict:
                 return {'error': 'task_id and verdict are required'}
-            findings = args.get('findings', [])
-            command_args = f'{task_id} {verdict} {json.dumps(findings, ensure_ascii=False)}'
+            command_args = f'{task_id} {verdict}'
         elif canonical_name == 'request_review':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
@@ -1650,35 +1650,37 @@ class CommandRouter:
 
     async def _handle_verdict(self, args: str, session_id: str) -> dict:
         parts = args.strip().split(maxsplit=2)
-        if len(parts) < 3:
-            return {
-                'error': (
-                    'Usage: /verdict <task_id> <pass|changes> '
-                    '<ac_results_json>'
-                )
-            }
-        
+        if len(parts) < 2:
+            return {'error': 'Usage: /verdict <task_id> <pass|changes>'}
+
         task_id, verdict = parts[0], parts[1].lower()
         if verdict not in ['pass', 'changes']:
             return {'error': 'Verdict must be pass or changes'}
-        
+
         task = self.db.query(Task).filter(Task.id == task_id).first()
         if not task:
             return {'error': f'Task {task_id} not found'}
-        
+
+        # Load ac_results from review file
+        project = self.db.query(Project).filter(Project.id == task.project).first()
+        if not project or not project.repo_root:
+            return {'error': f'Project {task.project} has no repo_root'}
+        review_path = Path(project.repo_root) / '.ct' / f'review-{task_id}.json'
+        if not review_path.exists():
+            return {'error': f'Review file not found: {review_path}'}
         try:
-            ac_results = json.loads(parts[2])
-        except json.JSONDecodeError:
-            return {'error': 'ac_results_json must be valid JSON'}
+            with open(review_path) as f:
+                review_data = json.load(f)
+            ac_results = review_data.get('ac_results', [])
+            findings = review_data.get('findings', [])
+        except (json.JSONDecodeError, IOError) as exc:
+            return {'error': f'Failed to load review file: {exc}'}
         try:
             result = TaskOrchestrationService(self.db).request_verdict(
                 task_id=task_id,
                 verdict=verdict,
                 ac_results=ac_results,
-                # The verdict's authorized reviewer identity is established by
-                # TaskOrchestrationService itself (from the completed review
-                # AgentRun), never by trusting a caller-supplied actor here —
-                # see CTV2-087.
+                findings=findings,
                 actor=f"chat:{session_id or 'anonymous'}",
                 idempotency_key=self._command_key(session_id, "verdict", args),
             )
