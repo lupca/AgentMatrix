@@ -37,3 +37,25 @@ def test_prepare_review_artifact_no_template_without_ac(tmp_path):
 
     template_path = review_result_path(repo_root, task_id).replace(".json", ".template.json")
     assert not os.path.exists(template_path)
+
+
+def test_prepare_review_artifact_handles_string_ac(tmp_path):
+    """Template should parse string AC format correctly."""
+    from app.workers.cli_executor import _prepare_review_artifact
+    from app.services.command_builder import review_result_path
+    import json
+
+    repo_root = str(tmp_path)
+    task_id = "TEST-003"
+    # String format like VOMA tasks have
+    string_ac = "AC1: First criterion\nAC2: Second criterion\nAC3: Third"
+
+    _prepare_review_artifact(repo_root, task_id, string_ac)
+
+    template_path = review_result_path(repo_root, task_id).replace(".json", ".template.json")
+    assert os.path.exists(template_path)
+
+    with open(template_path) as f:
+        template = json.load(f)
+
+    assert len(template["ac_results"]) == 3  # Not 48 (string length)

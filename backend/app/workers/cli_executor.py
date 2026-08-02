@@ -488,8 +488,18 @@ def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResu
         )
 
 
+def _normalize_acceptance_criteria(ac: list | str | None) -> list[str]:
+    """Convert acceptance_criteria to a list, handling string format."""
+    if ac is None:
+        return []
+    if isinstance(ac, list):
+        return ac
+    # String format: "AC1: ...\nAC2: ..." - split by newline
+    return [line.strip() for line in ac.split("\n") if line.strip()]
+
+
 def _prepare_review_artifact(
-    repo_root: str, task_id: str, acceptance_criteria: list | None = None
+    repo_root: str, task_id: str, acceptance_criteria: list | str | None = None
 ) -> None:
     path = review_result_path(repo_root, task_id)
     directory = os.path.dirname(path)
@@ -504,7 +514,8 @@ def _prepare_review_artifact(
         pass
 
     # Generate template with correct AC count for reviewer to fill
-    if acceptance_criteria:
+    ac_list = _normalize_acceptance_criteria(acceptance_criteria)
+    if ac_list:
         template = {
             "schema_version": "1.0",
             "task_id": task_id,
@@ -517,7 +528,7 @@ def _prepare_review_artifact(
                     "evidence": ["FILL_evidence"],
                     "finding_ids": [],
                 }
-                for i in range(len(acceptance_criteria))
+                for i in range(len(ac_list))
             ],
             "findings": [],
             "tests_run": [],

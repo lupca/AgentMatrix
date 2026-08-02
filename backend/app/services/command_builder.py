@@ -18,6 +18,16 @@ SUPPORTED_CLIS = {"agy", "codex", "claude"}
 _EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
 
 
+def _normalize_acceptance_criteria(ac: list | str | None) -> list[str]:
+    """Convert acceptance_criteria to a list, handling string format."""
+    if ac is None:
+        return []
+    if isinstance(ac, list):
+        return ac
+    # String format: "AC1: ...\nAC2: ..." - split by newline
+    return [line.strip() for line in ac.split("\n") if line.strip()]
+
+
 def _model_has_effort_suffix(model: str | None) -> bool:
     """Check if model name already includes effort level (e.g. gemini-3.6-flash-low)."""
     if not model:
@@ -163,13 +173,14 @@ def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -
         "that is not installed or exits with an error is NOT a review "
         "failure: note it in evidence and continue without it.",
     ]
-    if task.acceptance_criteria:
+    ac_list = _normalize_acceptance_criteria(task.acceptance_criteria)
+    if ac_list:
         sections.append(
             "Acceptance criteria:\n"
-            + "\n".join(f"- {criterion}" for criterion in task.acceptance_criteria)
+            + "\n".join(f"- {criterion}" for criterion in ac_list)
         )
     template_path = result_path.replace(".json", ".template.json")
-    ac_count = len(task.acceptance_criteria) if task.acceptance_criteria else 0
+    ac_count = len(ac_list)
     sections.append(
         "Code review result contract:\n"
         f"A template file has been generated at {template_path} with exactly "

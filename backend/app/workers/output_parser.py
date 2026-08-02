@@ -38,10 +38,20 @@ class ReviewResultLoadError(ValueError):
         return {"code": self.code, "path": self.path, "details": self.details}
 
 
+def _normalize_acceptance_criteria(ac: list | str | None) -> list[str]:
+    """Convert acceptance_criteria to a list, handling string format."""
+    if ac is None:
+        return []
+    if isinstance(ac, list):
+        return ac
+    # String format: "AC1: ...\nAC2: ..." - split by newline
+    return [line.strip() for line in ac.split("\n") if line.strip()]
+
+
 def load_review_result(
     repo_root: str,
     task_id: str,
-    acceptance_criteria: list | None = None,
+    acceptance_criteria: list | str | None = None,
 ) -> ReviewResult:
     """Read and strictly validate the review artifact written by the agent."""
     path = review_result_path(repo_root, task_id)
@@ -90,7 +100,7 @@ def load_review_result(
             "task_id_mismatch", path, "Review result task_id does not match the run",
             expected=task_id, actual=result.task_id,
         )
-    expected_count = len(acceptance_criteria or [])
+    expected_count = len(_normalize_acceptance_criteria(acceptance_criteria))
     if len(result.ac_results) != expected_count:
         raise ReviewResultLoadError(
             "acceptance_criteria_count_mismatch",
