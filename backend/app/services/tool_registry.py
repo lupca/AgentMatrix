@@ -673,20 +673,28 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="manage_notes",
-            description="Save, semantically search, link, list, or archive agent notes.",
+            description=(
+                "Manage agent knowledge notes with many-to-many links to projects and tasks.\n"
+                "- save: create note, pass project_id/task_id to link immediately\n"
+                "- search: semantic search (query auto-embedded) or filter by project_id/task_id\n"
+                "- link: link existing note to additional projects/tasks\n"
+                "- list: list notes, filter by project_id/task_id/note_type\n"
+                "- archive: soft-delete note\n"
+                "Notes can be linked to MULTIPLE projects and tasks simultaneously."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["save", "search", "link", "list", "archive"]},
-                    "id": {"type": "string", "description": "Note id."},
-                    "title": {"type": "string"},
-                    "content": {"type": "string"},
+                    "id": {"type": "string", "description": "Note id (required for link/archive)."},
+                    "title": {"type": "string", "description": "Note title (required for save)."},
+                    "content": {"type": "string", "description": "Note content (required for save)."},
                     "note_type": {"type": "string", "enum": ["fact", "decision", "observation", "procedure", "preference"]},
                     "tags": {"type": "array", "items": {"type": "string"}},
-                    "embedding": {"type": "array", "items": {"type": "number"}, "description": "1536-dimensional embedding for pgvector search."},
-                    "project_id": {"type": "string"},
-                    "task_id": {"type": "string"},
-                    "query": {"type": "string"},
+                    "embedding": {"type": "array", "items": {"type": "number"}, "description": "1536-dim vector for search (auto-generated if query provided)."},
+                    "project_id": {"type": "string", "description": "Link note to this project (save/link) or filter by project (list/search)."},
+                    "task_id": {"type": "string", "description": "Link note to this task (save/link) or filter by task (list/search)."},
+                    "query": {"type": "string", "description": "Semantic search query (auto-embedded)."},
                     "limit": {"type": "integer", "default": 10},
                 },
                 "required": ["action"],
