@@ -209,7 +209,7 @@ def run_agent_dead_letter(dead_message: dict, retry_info: dict) -> str:
     max_retries=3,
     min_backoff=30_000,
     max_backoff=300_000,
-    time_limit=900_000,
+    time_limit=7_200_000,  # 2h hard limit; actual timeout from settings (agent_run_timeout_seconds)
     notify_shutdown=True,
     on_retry_exhausted="run_agent_dead_letter",
 )

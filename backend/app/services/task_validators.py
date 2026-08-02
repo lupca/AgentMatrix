@@ -163,7 +163,7 @@ class TaskValidator:
 
     @property
     def run_timeout_seconds(self) -> int:
-        return max(1, self._setting("run_timeout_seconds", settings.RUN_TIMEOUT_SECONDS, int))
+        return max(1, self._setting("agent_run_timeout_seconds", settings.RUN_TIMEOUT_SECONDS, int))
 
     @property
     def max_active_seconds_per_run(self) -> int:
