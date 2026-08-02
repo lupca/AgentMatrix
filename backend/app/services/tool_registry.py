@@ -267,6 +267,39 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="task_lifecycle",
         ),
         ToolSpec(
+            name="attach_result",
+            description=(
+                "Attach a commit to a task, bypassing agent dispatch flow. "
+                "Option allows marking done directly or moving to awaiting-review."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task id"},
+                    "commit": {
+                        "type": "string",
+                        "description": "Git commit hash or reference to attach",
+                    },
+                    "option": {
+                        "type": "string",
+                        "enum": ["done", "request_review"],
+                        "default": "done",
+                        "description": (
+                            "Whether to mark task as done directly or move to "
+                            "awaiting-review for review dispatch"
+                        ),
+                    },
+                },
+                "required": ["task_id", "commit"],
+            },
+            handler="attach_result",
+            tier="deferred",
+            permission="write",
+            entity="tasks",
+            slash_alias="/attach-result",
+            group="task_lifecycle",
+        ),
+        ToolSpec(
             name="approve_gate",
             description=(
                 "Approve a gate awaiting human confirmation before it "

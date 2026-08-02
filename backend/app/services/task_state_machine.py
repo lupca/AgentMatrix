@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1612,3 +1613,118 @@ class TaskStateMachine:
             "landed_ref": landing.landed_ref,
             "skipped_reason": landing.skipped_reason,
         }
+
+    def attach_result(
+        self,
+        *,
+        task_id: str,
+        commit: str,
+        option: str = "done",
+        actor: str = "system",
+        idempotency_key: str | None = None,
+    ) -> TransitionResult:
+        task = self.validator.task(task_id)
+
+        if task.status in {"cancelled"}:
+            raise TransitionConflictError(f"Cannot attach result to task in '{task.status}' status")
+
+        opt = (option or "done").strip().lower().replace("-", "_")
+        if opt not in {"done", "request_review"}:
+            raise OrchestrationError(f"Invalid option '{option}': must be 'done' or 'request_review'")
+
+        commit_ref = (commit or "").strip()
+        if not commit_ref:
+            raise OrchestrationError("commit is required")
+
+        project = self.db.get(Project, task.project) if task.project else None
+        repo_root = getattr(project, "repo_root", None)
+        if repo_root and os.path.exists(repo_root):
+            try:
+                probe = subprocess.run(
+                    ["git", "-C", repo_root, "rev-parse", "--git-dir"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if probe.returncode == 0:
+                    rev = subprocess.run(
+                        ["git", "-C", repo_root, "rev-parse", "--verify", f"{commit_ref}^{{commit}}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if rev.returncode != 0:
+                        raise OrchestrationError(f"Commit or ref '{commit_ref}' does not exist in repository {repo_root}")
+                    commit_ref = rev.stdout.strip()
+            except subprocess.TimeoutExpired:
+                raise OrchestrationError(f"Git timeout validating commit '{commit_ref}'")
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+        idempotency_key = idempotency_key or f"attach_result:{task_id}:{commit_ref}:{opt}"
+        payload = {
+            "task_id": task_id,
+            "commit": commit_ref,
+            "option": opt,
+        }
+        input_hash = TaskValidator.input_hash(payload)
+        existing = self.validator.idempotent_record(task_id, idempotency_key, input_hash)
+        if existing is not None:
+            return self.result_for_record(task, existing)
+
+        now = datetime.now(timezone.utc)
+        if opt == "done":
+            task.result_ref = commit_ref
+            task.final_result_ref = commit_ref
+            if not task.executor:
+                task.executor = actor if actor else "@coordinator"
+            if not task.reviewer:
+                exec_p = TaskValidator.principal(task.executor)
+                task.reviewer = "@system:verifier" if exec_p != "@system:verifier" else "@system:reviewer"
+            task.verdict = "pass"
+            task.final_verdict = "pass"
+            task.current_gate = "done"
+            task.completed_at = now
+            task.error = None
+            task.awaiting_approval = False
+            task.approval_prompt = None
+            self.cas_status(task, "done")
+            target_status = "done"
+        else:
+            task.result_ref = commit_ref
+            task.current_gate = "review_order"
+            task.error = None
+            task.awaiting_approval = False
+            task.approval_prompt = None
+            self.cas_status(task, "awaiting-review")
+            target_status = "awaiting-review"
+
+        task.updated_at = now
+
+        record = self.ledger_record(
+            task=task,
+            gate_type="attach_result",
+            status="approved",
+            actor=actor,
+            idempotency_key=idempotency_key,
+            input_hash=input_hash,
+            payload=payload,
+            output_ref=commit_ref,
+            output_payload={"status": target_status, "result_ref": commit_ref, "option": opt},
+        )
+        self.audit(task, record, reason=f"Attached commit {commit_ref} with option {opt}")
+
+        emit_task_event(
+            task_id=task.id,
+            event_type="attach_result",
+            kind="info",
+            payload={"commit": commit_ref, "option": opt, "status": target_status},
+            db=self.db,
+        )
+
+        if opt == "done":
+            self.wake_dependents(task.id)
+
+        self.db.commit()
+        self.db.refresh(task)
+        return TransitionResult(task=task, gate_record=record, applied=True)

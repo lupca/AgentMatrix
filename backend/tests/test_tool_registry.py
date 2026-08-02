@@ -26,7 +26,7 @@ def db_session():
 
 
 def test_registry_has_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 28
+    assert len(TOOL_REGISTRY) == 29
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
@@ -36,6 +36,7 @@ def test_registry_has_tools_with_unique_names():
         'query_db',
         'dispatch_task',
         'record_verdict',
+        'attach_result',
         'approve_gate',
         'land_task',
         'cancel_task',
@@ -112,6 +113,7 @@ def test_get_group_tool_definitions_returns_deferred_tools_by_group():
     assert {t['name'] for t in task_lifecycle} == {
         'dispatch_task',
         'record_verdict',
+        'attach_result',
         'approve_gate',
         'cancel_task',
         'archive_task',

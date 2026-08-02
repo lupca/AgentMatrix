@@ -310,6 +310,23 @@ class TaskOrchestrationService:
             run_id=run_id, actor=actor, idempotency_key=idempotency_key
         )
 
+    def attach_result(
+        self,
+        *,
+        task_id: str,
+        commit: str,
+        option: str = "done",
+        actor: str = "system",
+        idempotency_key: str | None = None,
+    ) -> TransitionResult:
+        return self.state_machine.attach_result(
+            task_id=task_id,
+            commit=commit,
+            option=option,
+            actor=actor,
+            idempotency_key=idempotency_key,
+        )
+
     def update_task_fields(
         self,
         *,

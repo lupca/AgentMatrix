@@ -556,6 +556,57 @@ class TaskHandlersMixin:
         except OrchestrationError as exc:
             return {'error': str(exc)}
 
+    async def _handle_attach_result(self, args: str, session_id: str) -> dict:
+        try:
+            payload = json.loads(args) if args and args.strip().startswith('{') else None
+        except json.JSONDecodeError:
+            payload = None
+
+        if payload and isinstance(payload, dict):
+            task_id = str(payload.get('task_id', '')).strip()
+            commit = str(payload.get('commit') or payload.get('result_ref') or '').strip()
+            option = str(payload.get('option', 'done')).strip()
+        else:
+            parts = args.strip().split(maxsplit=2)
+            if not parts:
+                return {'error': 'Usage: /attach-result <task_id> <commit> [option]'}
+            task_id = parts[0]
+            commit = parts[1] if len(parts) > 1 else ''
+            option = parts[2] if len(parts) > 2 else 'done'
+
+        if not task_id or not commit:
+            return {'error': 'task_id and commit are required'}
+
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return {'error': f'Task {task_id} not found'}
+
+        service = TaskOrchestrationService(self.db)
+        try:
+            result = service.attach_result(
+                task_id=task_id,
+                commit=commit,
+                option=option,
+                actor=f"chat:{session_id or 'anonymous'}",
+                idempotency_key=self._command_key(
+                    session_id,
+                    "attach_result",
+                    args,
+                ),
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        self.db.refresh(task)
+        return {
+            'action': 'result_attached',
+            'task_id': task_id,
+            'commit': task.result_ref,
+            'option': option,
+            'status': task.status,
+            'task': self._task_snapshot(task),
+        }
+
     async def _handle_cancel_task(self, args: str, session_id: str) -> dict:
         from app.workers.output_streamer import publish_status, request_cancel
 

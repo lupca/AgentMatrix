@@ -186,6 +186,16 @@ class CommandRouter(
             if not task_id or not verdict:
                 return {'error': 'task_id and verdict are required'}
             command_args = f'{task_id} {verdict}'
+        elif canonical_name == 'attach_result':
+            task_id = str(args.get('task_id', '')).strip()
+            commit = str(args.get('commit') or args.get('result_ref') or '').strip()
+            if not task_id or not commit:
+                return {'error': 'task_id and commit are required'}
+            command_args = json.dumps({
+                'task_id': task_id,
+                'commit': commit,
+                'option': str(args.get('option', 'done')).strip(),
+            }, ensure_ascii=False)
         elif canonical_name == 'request_review':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
