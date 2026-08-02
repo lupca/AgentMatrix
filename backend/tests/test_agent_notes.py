@@ -6,7 +6,11 @@ from app.services.tool_registry import TOOL_REGISTRY
 
 
 @pytest.mark.asyncio
-async def test_manage_notes_save_link_list_search_archive(db_session):
+async def test_manage_notes_save_link_list_search_archive(db_session, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.command_router.embed_text",
+        lambda text, db: [0.1, 0.2, 0.3],
+    )
     db_session.add(Project(id="proj-notes", name="Notes project"))
     db_session.add(Task(id="TASK-NOTE", project="proj-notes", title="Note task"))
     db_session.commit()

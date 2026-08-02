@@ -382,6 +382,9 @@ SETTINGS_WHITELIST: dict[str, str] = {
     "auto_max_rounds": "Maximum changes-requested replan rounds before escalation.",
     "sql_timeout_seconds": "Statement execution timeout for query_db SQL queries.",
     "sql_row_cap": "Maximum row count returned by query_db SQL queries.",
+    "embedding_api_url": "Base URL for the text embedding API.",
+    "embedding_api_key": "API key for the text embedding API.",
+    "embedding_model": "Model used by the text embedding API.",
 }
 
 

@@ -49,6 +49,7 @@ from app.services.graph_client import (
     semantic_search,
 )
 from app.services.llm_service import ConfigurationError
+from app.services.embedding import EmbeddingError, embed_text
 
 # query_db (ADR-001 §D2): entity + filter-field whitelist, and a compact
 # serializer per entity so responses stay small and never leak secrets
@@ -2019,13 +2020,17 @@ class CommandRouter:
             content = str(payload.get('content', '')).strip()
             if not title or not content:
                 return {'error': 'title and content are required'}
+            try:
+                embedding = embed_text(content, self.db)
+            except EmbeddingError as exc:
+                return {'error': f'Embedding failed: {exc}'}
             note = AgentNote(
                 id=note_id or None,
                 title=title,
                 content=content,
                 note_type=str(payload.get('note_type') or 'fact'),
                 tags=payload.get('tags') or [],
-                embedding=payload.get('embedding'),
+                embedding=embedding,
                 author=f"chat:{session_id or 'anonymous'}",
             )
             self.db.add(note)
@@ -2090,10 +2095,17 @@ class CommandRouter:
             if action == 'search' and not query and not payload.get('embedding'):
                 return {'error': 'query or embedding is required for search'}
 
+            search_embedding = payload.get('embedding')
+            if query:
+                try:
+                    search_embedding = embed_text(query, self.db)
+                except EmbeddingError as exc:
+                    return {'error': f'Embedding failed: {exc}'}
+
             distance = None
-            if payload.get('embedding') and self.db.bind.dialect.name == 'postgresql':
+            if search_embedding and self.db.bind.dialect.name == 'postgresql':
                 from sqlalchemy import text
-                vector_value = "[" + ",".join(str(float(item)) for item in payload['embedding']) + "]"
+                vector_value = "[" + ",".join(str(float(item)) for item in search_embedding) + "]"
                 scope_sql = ""
                 params = {'embedding': vector_value, 'limit': limit}
                 if payload.get('project_id'):
