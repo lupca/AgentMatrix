@@ -168,22 +168,23 @@ def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -
             "Acceptance criteria:\n"
             + "\n".join(f"- {criterion}" for criterion in task.acceptance_criteria)
         )
+    template_path = result_path.replace(".json", ".template.json")
+    ac_count = len(task.acceptance_criteria) if task.acceptance_criteria else 0
     sections.append(
         "Code review result contract:\n"
-        f"Write the final review result as JSON to {result_path}. "
-        "Do not use stdout as the result. The JSON must contain exactly these "
-        "fields: schema_version (\"1.0\"), task_id, base, head, ac_results, "
-        "findings, tests_run, tests_passed. tests_run and tests_passed are "
-        "arrays of strings — the exact test commands you ran and the subset "
-        "that passed (empty arrays if none). Each ac_results item must contain "
-        "criterion_id, status (only \"pass\" or \"fail\"), verdict (only "
-        "\"pass\" or \"fail\") as legacy alias, evidence (an "
-        "array of strings), and finding_ids (an array of strings). Legacy "
-        "ac_index/ac_text metadata is optional; verdict is the legacy name "
-        "for status. Each finding must contain id, "
-        "severity, category, file, line, and description. Ensure ac_results "
-        "has one item per acceptance criterion. Reviewer execution is "
-        "read-only: do not create commits or alter refs."
+        f"A template file has been generated at {template_path} with exactly "
+        f"{ac_count} ac_results slots matching the {ac_count} acceptance criteria. "
+        f"Read the template, fill in the values, and write the final result to {result_path}. "
+        "Replace FILL_* placeholders with actual values. For each ac_results item: "
+        "set status to \"pass\" or \"fail\", fill evidence array with strings explaining "
+        "your verdict, and list any finding_ids that apply. Add findings array with any "
+        "issues found (each needs id, severity, category, file, line, description). "
+        "Fill tests_run and tests_passed arrays with test commands you ran. "
+        "Update base and head with the actual refs. "
+        "Do NOT add or remove ac_results items — the count must stay exactly {ac_count}. "
+        "Reviewer execution is read-only: do not create commits or alter refs.".format(
+            ac_count=ac_count
+        )
     )
     return "\n\n".join(sections)
 

@@ -488,7 +488,9 @@ def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResu
         )
 
 
-def _prepare_review_artifact(repo_root: str, task_id: str) -> None:
+def _prepare_review_artifact(
+    repo_root: str, task_id: str, acceptance_criteria: list | None = None
+) -> None:
     path = review_result_path(repo_root, task_id)
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
@@ -500,6 +502,30 @@ def _prepare_review_artifact(repo_root: str, task_id: str) -> None:
         os.unlink(path)
     except FileNotFoundError:
         pass
+
+    # Generate template with correct AC count for reviewer to fill
+    if acceptance_criteria:
+        template = {
+            "schema_version": "1.0",
+            "task_id": task_id,
+            "base": "FILL_BASE_REF",
+            "head": "FILL_HEAD_REF",
+            "ac_results": [
+                {
+                    "criterion_id": f"ac-{i+1}",
+                    "status": "FILL_pass_or_fail",
+                    "evidence": ["FILL_evidence"],
+                    "finding_ids": [],
+                }
+                for i in range(len(acceptance_criteria))
+            ],
+            "findings": [],
+            "tests_run": [],
+            "tests_passed": [],
+        }
+        template_path = path.replace(".json", ".template.json")
+        with open(template_path, "w", encoding="utf-8") as f:
+            json.dump(template, f, indent=2)
 
 
 def _review_read_only_git_env() -> tuple[dict[str, str], str]:
@@ -648,7 +674,7 @@ def execute_agent_run(
             is_review_run or _is_review_task(task)
         )
         if is_review_task:
-            _prepare_review_artifact(repo_root, task_id)
+            _prepare_review_artifact(repo_root, task_id, task.acceptance_criteria)
         attempt = _current_attempt(run)
         run.status = "running"
         run.attempt = attempt
