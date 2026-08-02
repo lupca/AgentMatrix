@@ -1625,3 +1625,48 @@ async def test_generate_spec_plan_missing_task_returns_error(db_session):
         "generate_spec_plan", "NOPE", "session-1"
     )
     assert "error" in result
+
+
+@pytest.mark.asyncio
+async def test_record_verdict_loads_from_review_file(db_session, tmp_path):
+    """Test record_verdict loading ac_results from review file."""
+    import json
+    from app.db.models import Project, Task
+    from app.services.command_router import CommandRouter
+
+    # Setup project with repo_root
+    project = Project(id="test-verdict-proj", name="Test", repo_root=str(tmp_path))
+    db_session.add(project)
+
+    # Setup task
+    task = Task(
+        id="TEST-V001",
+        project="test-verdict-proj",
+        title="Test task",
+        status="in-review",
+        mode="bypass",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    # Create review file
+    ct_dir = tmp_path / ".ct"
+    ct_dir.mkdir()
+    review_file = ct_dir / "review-TEST-V001.json"
+    review_file.write_text(json.dumps({
+        "schema_version": "1.0",
+        "task_id": "TEST-V001",
+        "base": "abc123",
+        "head": "def456",
+        "ac_results": [{"criterion_id": "ac-1", "status": "pass", "evidence": [], "finding_ids": []}],
+        "findings": [],
+        "tests_run": [],
+        "tests_passed": [],
+    }))
+
+    router = CommandRouter(db_session)
+    result = await router._handle_verdict("TEST-V001 pass", "test-session")
+
+    # Should fail at orchestration level (no review run) but NOT at file loading
+    assert "Review file not found" not in result.get("error", "")
+    assert "Failed to load review file" not in result.get("error", "")
