@@ -67,6 +67,8 @@ class ReviewResult(BaseModel):
     findings: list["ReviewFinding"]
     tests_run: list[StrictStr]
     tests_passed: list[StrictStr]
+    # Optional toolchain metadata from automated checks (ruff, ocr, etc.)
+    toolchain_results: dict[str, Any] | None = None
 
 
 class ReviewFinding(BaseModel):
