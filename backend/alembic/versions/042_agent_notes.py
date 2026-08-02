@@ -27,7 +27,7 @@ def upgrade() -> None:
                 content TEXT NOT NULL,
                 note_type note_type NOT NULL DEFAULT 'fact',
                 tags JSONB NOT NULL DEFAULT '[]'::jsonb,
-                embedding vector(1536),
+                embedding vector(2560),
                 author VARCHAR(50),
                 archived_at TIMESTAMPTZ,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -62,7 +62,8 @@ def upgrade() -> None:
     op.create_index("ix_agent_notes_note_type", "agent_notes", ["note_type"])
     op.create_index("ix_agent_notes_archived_at", "agent_notes", ["archived_at"])
     if bind.dialect.name == "postgresql":
-        op.execute("CREATE INDEX ix_agent_notes_embedding ON agent_notes USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)")
+        # Note: ivfflat/hnsw indexes don't support > 2000 dimensions
+        # Qwen3-Embedding-4B outputs 2560 dims, so no vector index for now
         op.execute("""
             DO $$ BEGIN
                 IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'ct_readonly_user') THEN
