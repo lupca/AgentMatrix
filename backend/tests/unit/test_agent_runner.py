@@ -1070,7 +1070,7 @@ def test_advance_task_todo_missing_ac_escalates_fail_closed(driver_db):
     db = factory()
     task = db.get(Task, "ADV-001")
     assert task.status == "failed"
-    assert task.awaiting_approval is True
+    assert task.awaiting_approval is False
     db.close()
     run_agent_mock.send.assert_not_called()
 
@@ -1128,7 +1128,7 @@ def test_advance_task_respects_autonomy_kill_switch(driver_db):
     db = factory()
     task = db.get(Task, "ADV-004")
     assert task.status == "failed"
-    assert task.awaiting_approval is True
+    assert task.awaiting_approval is False
     db.close()
     run_agent_mock.send.assert_not_called()
 
@@ -1264,7 +1264,7 @@ def test_advance_task_changes_requested_escalates_at_round_cap(driver_db):
     db = factory()
     task = db.get(Task, "ADV-008")
     assert task.status == "failed"
-    assert task.awaiting_approval is True
+    assert task.awaiting_approval is False
     db.close()
     run_agent_mock.send.assert_not_called()
 
@@ -1301,7 +1301,7 @@ def test_advance_task_changes_requested_escalates_at_custom_policy_round_cap(dri
     db = factory()
     task = db.get(Task, "ADV-POLICY-ROUND")
     assert task.status == "failed"
-    assert task.awaiting_approval is True
+    assert task.awaiting_approval is False
     db.close()
     run_agent_mock.send.assert_not_called()
 
@@ -1355,7 +1355,7 @@ def test_advance_task_stalled_actionable_status_escalates_instead_of_looping(dri
     db = factory()
     task = db.get(Task, "ADV-013")
     assert task.status == "failed"
-    assert task.awaiting_approval is True
+    assert task.awaiting_approval is False
     db.close()
     run_agent_mock.send.assert_not_called()
 
@@ -1464,7 +1464,7 @@ def test_advance_task_escalates_when_dependency_failed(driver_db):
     db = factory()
     task = db.get(Task, "ADV-DOWN3")
     assert task.status == "failed"
-    assert task.awaiting_approval is True
+    assert task.awaiting_approval is False
     db.close()
     run_agent_mock.send.assert_not_called()
 

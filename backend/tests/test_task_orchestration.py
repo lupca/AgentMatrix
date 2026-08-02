@@ -112,7 +112,9 @@ def test_workflow_state_is_derived_from_task_projection(
     assert task.workflow_state == expected
 
 
-def test_escalate_task_persists_blocked_human_approval_state(orchestration, db_session):
+def test_escalate_task_clears_approval_projection_without_pending_gate(
+    orchestration, db_session
+):
     task = _task(db_session, "ESCALATE-001", mode="bypass")
     task.status = "dispatched"
     db_session.commit()
@@ -122,15 +124,201 @@ def test_escalate_task_persists_blocked_human_approval_state(orchestration, db_s
     )
 
     assert task.status == "failed"
-    assert task.workflow_state == "waiting_human"
-    assert task.awaiting_approval is True
+    assert task.workflow_state == "blocked"
+    assert task.awaiting_approval is False
     assert task.error == "Review output was invalid"
-    assert task.approval_prompt == "Review output was invalid"
+    assert task.approval_prompt is None
     assert record.gate_type == "escalation"
     assert record.status == "rejected"
     assert record.actor == "system:worker"
     assert record.error_message == "Review output was invalid"
     assert db_session.get(type(record), record.id) is not None
+
+
+def test_new_supervised_gate_rejects_stale_same_type_gate(orchestration, db_session):
+    task = _task(db_session, "GATE-STALE-001")
+
+    first = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="stale-dispatch-1",
+    )
+    second = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="stale-dispatch-2",
+    )
+
+    stale_decision = (
+        db_session.query(GateRecord)
+        .filter(GateRecord.parent_id == first.gate_record.id)
+        .one()
+    )
+    assert stale_decision.status == "rejected"
+    assert stale_decision.actor == "system:stale-cleanup"
+    assert stale_decision.error_message == "Superseded by newer gate request"
+    assert second.gate_record.status == "pending"
+    assert task.awaiting_approval is True
+
+
+def test_terminal_failure_rejects_all_pending_gates_and_clears_flag(
+    orchestration, db_session
+):
+    task = _task(db_session, "GATE-STALE-002")
+    task.status = "dispatched"
+    task.executor = "@executor"
+    task.awaiting_approval = True
+    for index, gate_type in enumerate(("review_order", "verdict"), start=1):
+        db_session.add(
+            GateRecord(
+                task_id=task.id,
+                gate_type=gate_type,
+                status="pending",
+                actor="@operator",
+                mode="supervised",
+                idempotency_key=f"pending-terminal-{index}",
+                input_hash=str(index),
+                input_payload={"gate_type": gate_type},
+            )
+        )
+    db_session.commit()
+
+    orchestration.record_execution_failure(
+        task_id=task.id,
+        error="executor failed",
+        actor="@executor",
+        idempotency_key="execution-failure-terminal-cleanup",
+    )
+
+    decisions = (
+        db_session.query(GateRecord)
+        .filter(
+            GateRecord.task_id == task.id,
+            GateRecord.parent_id.isnot(None),
+        )
+        .all()
+    )
+    assert task.status == "failed"
+    assert task.awaiting_approval is False
+    assert task.approval_prompt is None
+    assert len(decisions) == 2
+    assert {record.status for record in decisions} == {"rejected"}
+    assert {record.actor for record in decisions} == {"system:terminal-cleanup"}
+
+
+def test_terminal_done_rejects_pending_gate(orchestration, db_session):
+    task = _task(db_session, "GATE-STALE-DONE", mode="bypass")
+    task.awaiting_approval = True
+    db_session.add(
+        GateRecord(
+            task_id=task.id,
+            gate_type="review_order",
+            status="pending",
+            actor="@operator",
+            mode="supervised",
+            idempotency_key="done-terminal-pending",
+            input_hash="done-terminal",
+            input_payload={},
+        )
+    )
+    db_session.commit()
+
+    orchestration.attach_result(
+        task_id=task.id,
+        commit="done-commit",
+        option="done",
+        actor="@executor",
+        idempotency_key="done-terminal-attach",
+    )
+
+    decision = (
+        db_session.query(GateRecord)
+        .filter(
+            GateRecord.task_id == task.id,
+            GateRecord.parent_id.isnot(None),
+        )
+        .one()
+    )
+    assert task.status == "done"
+    assert decision.status == "rejected"
+    assert decision.actor == "system:terminal-cleanup"
+    assert task.awaiting_approval is False
+
+
+def test_awaiting_approval_sync_ignores_resolved_pending_root(
+    orchestration, db_session
+):
+    task = _task(db_session, "GATE-STALE-003")
+    task.awaiting_approval = True
+    pending = GateRecord(
+        task_id=task.id,
+        gate_type="dispatch",
+        status="pending",
+        actor="@operator",
+        mode="supervised",
+        idempotency_key="resolved-pending-root",
+        input_hash="resolved",
+        input_payload={},
+    )
+    db_session.add(pending)
+    db_session.flush()
+    db_session.add(
+        GateRecord(
+            task_id=task.id,
+            gate_type="dispatch",
+            status="rejected",
+            actor="system:stale-cleanup",
+            mode="supervised",
+            idempotency_key="resolved-pending-root:terminal",
+            input_hash="resolved",
+            parent_id=pending.id,
+            input_payload={},
+        )
+    )
+    db_session.commit()
+
+    assert orchestration.state_machine.sync_awaiting_approval(task) is False
+    assert task.awaiting_approval is False
+
+
+def test_failed_task_can_be_redispatched_after_gate_cleanup(orchestration, db_session):
+    task = _task(db_session, "GATE-STALE-004")
+    task.status = "dispatched"
+    task.executor = "@executor"
+    task.awaiting_approval = True
+    db_session.add(
+        GateRecord(
+            task_id=task.id,
+            gate_type="review_order",
+            status="pending",
+            actor="@operator",
+            mode="supervised",
+            idempotency_key="redispatch-stale-review",
+            input_hash="redispatch",
+            input_payload={},
+        )
+    )
+    db_session.commit()
+
+    orchestration.record_execution_failure(
+        task_id=task.id,
+        error="executor failed",
+        actor="@executor",
+        idempotency_key="redispatch-failure",
+    )
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="redispatch-after-failure",
+    )
+
+    assert result.status == "pending"
+    assert task.status == "failed"
+    assert task.awaiting_approval is True
 
 
 def test_supervised_dispatch_commits_pending_and_resumes_separately(
@@ -310,7 +498,7 @@ def test_cost_cap_exceeded_stops_task_and_escalates(orchestration, db_session):
     assert db_session.query(AgentRun).count() == 0
     db_session.refresh(task)
     assert task.status == "failed"
-    assert task.awaiting_approval is True
+    assert task.awaiting_approval is False
     audit = (
         db_session.query(AuditLog)
         .filter(AuditLog.action == "brake:cost_limit")

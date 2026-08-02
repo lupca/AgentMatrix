@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from sqlalchemy import func, update
-from sqlalchemy.orm import Session
+from sqlalchemy import exists, func, update
+from sqlalchemy.orm import Session, aliased
 
 from app.db.models import (
     Agent,
@@ -174,6 +174,85 @@ class TaskStateMachine:
         )
         self.db.add(record)
         return record
+
+    def sync_awaiting_approval(self, task: Task) -> bool:
+        """Recalculate the approval projection from unresolved gate records.
+
+        Gate records are append-only: a pending record is resolved by an
+        approved/rejected child rather than by updating the pending row.  A
+        pending root with any decision child is therefore not an active gate.
+        """
+        self.db.flush()
+        decision = aliased(GateRecord)
+        has_pending = (
+            self.db.query(GateRecord.id)
+            .filter(
+                GateRecord.task_id == task.id,
+                GateRecord.status == "pending",
+                ~exists().where(decision.parent_id == GateRecord.id),
+            )
+            .first()
+            is not None
+        )
+        task.awaiting_approval = has_pending
+        if not has_pending:
+            task.approval_prompt = None
+        return has_pending
+
+    def _reject_pending_gates(
+        self,
+        task: Task,
+        *,
+        reason: str,
+        actor: str,
+        gate_type: str | None = None,
+        idempotency_suffix: str,
+    ) -> int:
+        """Append rejection decisions for unresolved pending gate roots."""
+        self.db.flush()
+        decision = aliased(GateRecord)
+        query = self.db.query(GateRecord).filter(
+            GateRecord.task_id == task.id,
+            GateRecord.status == "pending",
+            ~exists().where(decision.parent_id == GateRecord.id),
+        )
+        if gate_type is not None:
+            query = query.filter(GateRecord.gate_type == gate_type)
+
+        rejected = 0
+        for stale in query.all():
+            record = self.ledger_record(
+                task=task,
+                gate_type=stale.gate_type,
+                status="rejected",
+                actor=actor,
+                idempotency_key=f"{stale.idempotency_key}:{idempotency_suffix}",
+                input_hash=stale.input_hash,
+                payload=stale.input_payload or {},
+                parent_id=stale.id,
+                error_message=reason,
+            )
+            self.audit(task, record, reason=reason)
+            rejected += 1
+        return rejected
+
+    def _reject_all_pending_gates(self, task: Task, reason: str) -> None:
+        """Reject all unresolved gates when a task reaches a terminal state."""
+        self._reject_pending_gates(
+            task,
+            reason=reason,
+            actor="system:terminal-cleanup",
+            idempotency_suffix="terminal",
+        )
+        self.sync_awaiting_approval(task)
+
+    def _sync_after_transition(self, task: Task) -> None:
+        if task.status in {"done", "failed", "cancelled"}:
+            self._reject_all_pending_gates(
+                task, f"Task reached terminal state: {task.status}"
+            )
+        else:
+            self.sync_awaiting_approval(task)
 
     def audit(
         self,
@@ -651,7 +730,27 @@ class TaskStateMachine:
         existing = self.validator.idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
             self.validator.reject_if_stale_dispatch_record(existing)
+            previous_awaiting = task.awaiting_approval
+            previous_prompt = task.approval_prompt
+            self.sync_awaiting_approval(task)
+            if (
+                task.awaiting_approval != previous_awaiting
+                or task.approval_prompt != previous_prompt
+            ):
+                self.db.commit()
+                self.db.refresh(task)
             return self.result_for_record(task, existing)
+        self.validator.assert_status(task, expected_status)
+        effective_mode = self.validator.mode_for_task(task)
+        if effective_mode == "supervised":
+            self._reject_pending_gates(
+                task,
+                gate_type=gate_type,
+                reason="Superseded by newer gate request",
+                actor="system:stale-cleanup",
+                idempotency_suffix="auto-rejected",
+            )
+            self.sync_awaiting_approval(task)
         if gate_type == "dispatch":
             decision = self.validator.check_brakes(
                 task,
@@ -661,7 +760,6 @@ class TaskStateMachine:
             )
             if not decision.allowed and not decision.queue:
                 raise BrakeViolationError(decision.reason or "Safety brake engaged")
-        self.validator.assert_status(task, expected_status)
         if gate_type == "dispatch":
             active_run = (
                 self.db.query(AgentRun)
@@ -676,7 +774,6 @@ class TaskStateMachine:
                     f"Task {task.id} already has active run: {active_run.id}"
                 )
 
-        effective_mode = self.validator.mode_for_task(task)
         if effective_mode == "plan-only" and gate_type in {"dispatch", "verdict"}:
             record = self.ledger_record(
                 task=task,
@@ -688,6 +785,7 @@ class TaskStateMachine:
                 payload=request_payload,
                 error_message="plan-only mode blocks this transition",
             )
+            self.sync_awaiting_approval(task)
             self.audit(task, record, reason=record.error_message)
             self.db.commit()
             raise ModeViolationError(record.error_message)
@@ -707,6 +805,7 @@ class TaskStateMachine:
                 f"Approve {gate_type} gate for task {task.id} "
                 f"(request {idempotency_key})?"
             )
+            self.sync_awaiting_approval(task)
             self.audit(task, record)
             self.db.commit()
             self.db.refresh(task)
@@ -728,6 +827,7 @@ class TaskStateMachine:
             output_ref=output_ref,
             output_payload=self.gate_output(task, gate_type),
         )
+        self._sync_after_transition(task)
         self.audit(task, record)
         self.db.commit()
         self.db.refresh(task)
@@ -1000,6 +1100,15 @@ class TaskStateMachine:
         input_hash = TaskValidator.input_hash(decision_payload)
         existing = self.validator.idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
+            previous_awaiting = task.awaiting_approval
+            previous_prompt = task.approval_prompt
+            self.sync_awaiting_approval(task)
+            if (
+                task.awaiting_approval != previous_awaiting
+                or task.approval_prompt != previous_prompt
+            ):
+                self.db.commit()
+                self.db.refresh(task)
             return self.result_for_record(task, existing)
 
         prior_decision = (
@@ -1045,12 +1154,7 @@ class TaskStateMachine:
             error_message=reason,
             parent_id=pending.id,
         )
-        if getattr(self, "_deferred_landing_event", None) is None:
-            task.awaiting_approval = False
-            task.approval_prompt = None
-        elif self._deferred_landing_event[0] == "landed":
-            task.awaiting_approval = False
-            task.approval_prompt = None
+        self._sync_after_transition(task)
         self.audit(task, record, reason=reason)
         landing_event = getattr(self, "_deferred_landing_event", None)
         self._deferred_landing_event = None
@@ -1125,6 +1229,7 @@ class TaskStateMachine:
             output_ref=result_ref or run_id,
             output_payload={"status": "awaiting-review", "run_id": run_id},
         )
+        self._sync_after_transition(task)
         self.audit(task, record)
         self.db.commit()
         self.db.refresh(task)
@@ -1166,6 +1271,7 @@ class TaskStateMachine:
             output_ref=run_id,
             error_message=error,
         )
+        self._sync_after_transition(task)
         self.audit(task, record, reason=error)
         self.db.commit()
         self.db.refresh(task)
@@ -1211,6 +1317,7 @@ class TaskStateMachine:
             output_ref=run_id,
             error_message=error,
         )
+        self._sync_after_transition(task)
         self.audit(task, record, reason=error)
         self.db.commit()
         self.db.refresh(task)
@@ -1238,6 +1345,7 @@ class TaskStateMachine:
             payload=payload,
             error_message=reason,
         )
+        self._sync_after_transition(task)
         self.audit(task, record, reason=reason)
         self.db.commit()
         self.db.refresh(task)
@@ -1282,6 +1390,7 @@ class TaskStateMachine:
             output_ref=run_id,
             error_message=error,
         )
+        self._sync_after_transition(task)
         self.audit(task, record, reason=error)
         self.db.commit()
         self.db.refresh(task)
@@ -1326,6 +1435,7 @@ class TaskStateMachine:
             output_ref=run_id,
             output_payload={"run_status": "cancelled", "task_status": task.status},
         )
+        self._sync_after_transition(task)
         self.audit(task, record)
         emit_task_event(
             task_id=task.id,
@@ -1586,6 +1696,7 @@ class TaskStateMachine:
         task.awaiting_approval = False
         task.approval_prompt = None
         task.error = None
+        self._sync_after_transition(task)
         emit_task_event(
             task_id=task.id,
             event_type="done",
@@ -1610,6 +1721,7 @@ class TaskStateMachine:
                 "fix the repo, then call land_task again."
             )
             task.error = f"landing_failed: {landing.error}"
+            self.sync_awaiting_approval(task)
             self.db.commit()
             return {"action": "landing_failed", "task_id": task.id, "error": landing.error}
 
@@ -1622,6 +1734,7 @@ class TaskStateMachine:
         task.awaiting_approval = False
         task.approval_prompt = None
         task.error = None
+        self._sync_after_transition(task)
         if landing.landed_ref:
             task.landed_ref = landing.landed_ref
             emit_task_event(
@@ -1741,6 +1854,7 @@ class TaskStateMachine:
             output_ref=commit_ref,
             output_payload={"status": target_status, "result_ref": commit_ref, "option": opt},
         )
+        self._sync_after_transition(task)
         self.audit(task, record, reason=f"Attached commit {commit_ref} with option {opt}")
 
         emit_task_event(
