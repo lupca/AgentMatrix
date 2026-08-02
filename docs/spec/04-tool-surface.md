@@ -40,7 +40,7 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 
 | Tool | Ghi chú |
 |---|---|
-| `manage_project` / `manage_agent` | create/update/archive/disable qua admin gate. Update nhận `{id, patch}`. API agent đòi api_key khi approve create. |
+| `manage_project` / `manage_agent` | create/update/archive/disable qua admin gate. Update nhận `{id, patch}`. API agent đòi api_key khi approve create. Agent roles: `executor`/`reviewer`/`coordinator`/`spec_plan` — truyền `role` (singular, legacy) hoặc `roles` (array, preferred). Capabilities: ~50 giá trị ENUM (code, backend, review, architecture...) — xem `capability_types` table. |
 | `update_settings` | `{key, value}` trong SETTINGS_WHITELIST → admin gate. |
 | `query_db` | Raw SQL read-only (1 câu SELECT/WITH), chạy bằng `ct_readonly_user`, cap 500 rows + statement timeout. Bảng mới phải được GRANT (đã có default privileges). |
 | `get_stats` | Token/cost/run stats từ LLMUsage. |

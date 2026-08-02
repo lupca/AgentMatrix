@@ -110,7 +110,8 @@ class AgentRoleLink(Base):
     __tablename__ = "agent_roles"
 
     agent_id = Column(String(50), ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
-    role = Column(SAEnum(AgentRole, name="agent_role"), ForeignKey("role_types.role"), primary_key=True)
+    # Use String instead of SAEnum - PostgreSQL native ENUM handles validation
+    role = Column(String(20), ForeignKey("role_types.role"), primary_key=True)
     agent = relationship("Agent", back_populates="agent_roles")
 
 
@@ -118,24 +119,23 @@ class AgentCapabilityLink(Base):
     __tablename__ = "agent_capabilities"
 
     agent_id = Column(String(50), ForeignKey("agents.id", ondelete="CASCADE"), primary_key=True)
-    capability = Column(
-        SAEnum(AgentCapability, name="agent_capability"),
-        ForeignKey("capability_types.capability"),
-        primary_key=True,
-    )
+    # Use String instead of SAEnum - PostgreSQL native ENUM handles validation
+    capability = Column(String(50), ForeignKey("capability_types.capability"), primary_key=True)
     agent = relationship("Agent", back_populates="agent_capabilities")
 
 
 class AgentRoleType(Base):
     __tablename__ = "role_types"
 
-    role = Column(SAEnum(AgentRole, name="agent_role"), primary_key=True)
+    # Use String - the actual ENUM constraint is in PostgreSQL
+    role = Column(String(20), primary_key=True)
 
 
 class AgentCapabilityType(Base):
     __tablename__ = "capability_types"
 
-    capability = Column(SAEnum(AgentCapability, name="agent_capability"), primary_key=True)
+    # Use String - the actual ENUM constraint is in PostgreSQL
+    capability = Column(String(50), primary_key=True)
 
 
 class Task(ArchivableMixin, Base):
