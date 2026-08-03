@@ -14,6 +14,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # The trigger is PostgreSQL-specific; SQLite is the migration test
+    # backend and enforces the equivalent invariants through table checks.
+    if op.get_bind().dialect.name != "postgresql":
+        return
     op.execute("""
         CREATE OR REPLACE FUNCTION public.ct_enforce_done_verdict()
          RETURNS trigger
@@ -43,6 +47,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     op.execute("""
         CREATE OR REPLACE FUNCTION public.ct_enforce_done_verdict()
          RETURNS trigger

@@ -44,6 +44,7 @@ DEFERRED_GROUPS: tuple[str, ...] = (
     "session",
     "research",
     "query",
+    "spec",
 )
 
 
@@ -897,6 +898,65 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             required_role="executor",
         ),
         ToolSpec(
+            name="spec_write",
+            description=(
+                "Write living-spec items and relations in one transaction. "
+                "Supports batched create, update, supersede, and relation operations. "
+                "Always preserve derived_from_sha and confidence when recording a claim."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "ops": {
+                        "type": "array",
+                        "description": "Batch of create, update, supersede, or relation operations.",
+                        "items": {"type": "object"},
+                    },
+                    "project_id": {
+                        "type": "string",
+                        "description": "Optional project applied to create operations that omit project_id.",
+                    },
+                },
+                "required": ["ops"],
+            },
+            handler="spec_write",
+            tier="deferred",
+            permission="write",
+            entity="spec",
+            slash_alias=None,
+            group="spec",
+            required_role="executor",
+        ),
+        ToolSpec(
+            name="spec_get",
+            description=(
+                "Read a complete active living-spec cluster by ids or filter, "
+                "including all related spec relations in one call."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Spec item ids to fetch as one cluster.",
+                    },
+                    "filter": {
+                        "type": "object",
+                        "description": "Filter by project_id, kind, status, confidence, or provenance fields.",
+                    },
+                },
+                "required": [],
+            },
+            handler="spec_get",
+            tier="deferred",
+            permission="read",
+            entity="spec",
+            slash_alias=None,
+            group="spec",
+            required_role="executor",
+        ),
+        ToolSpec(
             name="load_tools",
             description=(
                 "Load additional tool schemas for the rest of this turn. Call "
@@ -906,7 +966,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "archive_task, generate_spec_plan), admin (project/agent/"
                 "knowledge/settings management), session (compact_context), "
                 "research (get_minimal_context, get_impact_radius), query "
-                "(get_task_events, suggest_agents)."
+                "(get_task_events, suggest_agents), spec (spec_write, spec_get)."
             ),
             parameters={
                 "type": "object",

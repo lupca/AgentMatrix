@@ -22,14 +22,24 @@ def upgrade() -> None:
         sa.Column("next_event_seq", sa.Integer(), nullable=False, server_default="0"),
     )
 
-    # Backfill from existing agent_events
-    op.execute("""
-        UPDATE agent_runs ar
-        SET next_event_seq = COALESCE(
-            (SELECT MAX(seq) + 1 FROM agent_events ae WHERE ae.run_id = ar.id),
-            0
-        )
-    """)
+    # Backfill from existing agent_events.  SQLite does not accept the
+    # PostgreSQL UPDATE ... table-alias form used by production.
+    if op.get_bind().dialect.name == "sqlite":
+        op.execute("""
+            UPDATE agent_runs
+            SET next_event_seq = COALESCE(
+                (SELECT MAX(seq) + 1 FROM agent_events ae WHERE ae.run_id = agent_runs.id),
+                0
+            )
+        """)
+    else:
+        op.execute("""
+            UPDATE agent_runs ar
+            SET next_event_seq = COALESCE(
+                (SELECT MAX(seq) + 1 FROM agent_events ae WHERE ae.run_id = ar.id),
+                0
+            )
+        """)
 
 
 def downgrade() -> None:
