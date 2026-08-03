@@ -222,14 +222,67 @@ ghi vào spec_relation → lần sau khỏi phán lại
 Bước "ghi lại" là mấu chốt: kết luận trùng/xung đột được **lưu**, không phán lại
 từ đầu mỗi lần.
 
-> **Phụ thuộc chặn:** code graph hiện có `embeddings: 0` (đo trên
-> `voma-invoice`: 4.068 node, 30.864 cạnh, nhưng chưa embed node nào). Không có
-> embedding thì `spec_search` chỉ tra được theo tên định danh, không tra được
-> theo ngữ nghĩa. **Phải embed trước.**
+> **Phụ thuộc:** embedding đã chạy (đo 2026-08-04: `agenticmatix` 1582 node,
+> `voma-invoice` 1409 node). Nhưng embedding **mục ruỗng theo thời gian** — mỗi
+> symbol mới là một node chưa embed — nên phải nằm trong chu trình build định
+> kỳ, không phải chạy một lần.
 >
-> Đồng thời đồ thị đang **cũ**: build tại `3dbb750`, HEAD là `eaa6767`
-> (`head_matches_build: false`), và cả 16 project đều `graph_status='idle'` —
-> Control Tower không tự build lại. Phải nối vào workflow.
+> **Đồ thị cũ đi rất nhanh trong repo đang hoạt động:** `agenticmatix` build tại
+> `8e67c07`, 25 phút sau HEAD đã là `e744d4a` (`head_matches_build: false`). Xem
+> mục *Giữ đồ thị tươi*.
+
+## Giữ đồ thị tươi
+
+Đồ thị code là nền của cả `spec_search` lẫn cơ chế mất hiệu lực. Nó cũ thì cả hai
+sai theo.
+
+**Không dùng hook sau `land_task` làm cơ chế duy nhất.** Code thay đổi mà không
+qua `land_task`: commit trực tiếp, push từ ngoài, người khác làm, đổi branch.
+Bằng chứng: phiên 2026-08-04 tạo 5 commit, **không commit nào qua `land_task`**.
+
+**Không rebuild đồng bộ khi gọi tool** — agent sẽ đứng hình.
+
+Ba tầng:
+
+```
+1. Kiểm tra cũ/mới mỗi lần gọi tool        ← rẻ, KHÔNG chặn
+   so head_sha vs built_at_sha (tool đã trả sẵn head_matches_build)
+   → vẫn trả kết quả, kèm cảnh báo "đang cũ tại <sha>"
+
+2. Rebuild INCREMENTAL theo sự kiện commit (không chỉ land_task)
+   graph là incremental (có detect_changes_tool) → tính bằng giây
+   → đẩy theo sự kiện, đừng để tool call kéo
+   → embedding phải nằm trong đường này, không thì node mới không tra
+     được theo ngữ nghĩa
+
+3. Dùng projects.graph_status (cột đã có, cả 16 project đang 'idle')
+   idle → stale → building → fresh
+```
+
+Nguyên tắc: **tươi là việc của sự kiện (push), lazy check chỉ là lưới an toàn và
+tín hiệu trung thực** — không bao giờ để nó chặn.
+
+### Đưa graph tool vào prompt executor
+
+Hợp lệ về mặt cơ chế, đã xác nhận: group `research` chứa đúng hai tool,
+`required_role="executor"` (`tool_registry.py:829,847`), `load_tools` là eager
+trong group `meta`, và `_research_repo_root` (`context_handlers.py:45`) lấy
+`repo_root` từ **`Project.repo_root` trong DB** chứ không dò từ cwd — nên
+executor chạy trong worktree vẫn trỏ đúng repo chính.
+
+Bốn cảnh báo:
+
+- **Đường này chưa từng chạy thật.** `get_impact_radius`: **0 lần gọi**.
+  `semantic_search`: 26 lần nhưng `task_id` NULL toàn bộ — chưa lần nào từ
+  context task. Chạy thử một task thật trước khi nhét vào mọi prompt.
+- Handler `get_impact_radius` nhận `args.strip()` thô
+  (`context_handlers.py:92`) — prompt phải ghi rõ định dạng đầu vào, không thì
+  agent đoán rồi gọi hỏng.
+- Kết quả phản ánh **repo chính, không phải worktree** agent đang sửa. Đúng cho
+  "hiểu code trước khi làm", sai nếu dùng để kiểm tra thay đổi của chính mình —
+  phải nói rõ trong prompt.
+- Chèn text vào **mọi** prompt tốn token mọi lượt, trong khi 65% task one-shot
+  có thể không cần. Viết cực ngắn hoặc chèn có điều kiện.
 
 ## Bản thiết kế thực thi: chốt trước khi dispatch
 
@@ -296,9 +349,19 @@ việc của cơ chế mất hiệu lực. Hỏi LLM tức là quay lại tái s
 
 ## Tool surface
 
-Tách endpoint để cô lập context: `/mcp/spec` (8 tool dưới đây) và `/mcp/dev` (28
-tool hiện có). **Cùng một process**, chung DB, chung model — mục tiêu là cô lập
-context chứ không phải scale; hai process chỉ nhân đôi việc vận hành.
+**Một MCP duy nhất, KHÔNG tách endpoint.** Cô lập context bằng cơ chế đã có:
+thêm group `spec` vào `DEFERRED_GROUPS` (`tool_registry.py:41`) và nạp qua
+`load_tools`. Tool không nạp thì không tốn context — đúng mục tiêu ban đầu, chi
+phí hạ tầng bằng 0.
+
+> Bản `08-pm-layer.md` từng đề xuất tách `/mcp/pm` và `/mcp/dev`. **Sai.** Lý do
+> bác bỏ: **executor cũng là người tiêu thụ spec chính** — nó phải tra spec và
+> code graph *trước khi* code. Tách endpoint thì executor không với tới spec nếu
+> không nối hai kết nối, hai token. Giả định sai ban đầu là "PM và DEV là hai
+> nhóm người dùng tách biệt".
+>
+> Do đó `spec_*` phải để `required_role="executor"`, giống
+> `get_minimal_context`/`get_impact_radius` hiện nay.
 
 ```
 spec_search(project, query, kinds?)     → tìm trùng/xung đột TRƯỚC khi tạo task
@@ -363,7 +426,10 @@ Xếp sao cho thứ rẻ và chặn cửa đi trước:
 ```
 0. Nền đo lường
    0.1  Sửa attribution llm_usage (điền task_id + agent_run_id)
-   0.2  Embed code graph + nối graph_status vào workflow CT
+   0.2  Giữ đồ thị tươi: lazy staleness check + rebuild incremental theo
+        sự kiện commit + nối projects.graph_status  (embed đã xong lần đầu)
+   0.3  Chạy thử graph tool từ MỘT task thật (đường executor chưa từng chạy)
+        rồi mới thêm hướng dẫn vào prompt
 
 1. Lõi spec sống                     2. Chất lượng đầu vào
    1.1  Bảng spec_* + migration         2.1  impl_design + chấm completeness
