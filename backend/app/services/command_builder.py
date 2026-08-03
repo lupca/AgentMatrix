@@ -14,7 +14,7 @@ from app.db.models import Agent, Project, Task
 from app.core.config import settings
 from app.services.cli_dispatcher import build_mcp_config
 
-SUPPORTED_CLIS = {"agy", "codex", "claude"}
+SUPPORTED_CLIS = {"agy", "codex", "claude", "qwen"}
 _EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
 
 
@@ -81,6 +81,12 @@ def build_dispatch_command(
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
         argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
+    elif cli == "qwen":
+        # qwen uses -m for model, -p for prompt (similar to claude)
+        argv = ["qwen"]
+        if agent.model:
+            argv.extend(["-m", agent.model])
+        argv.extend(["-p", prompt])
     else:
         # agy: the prompt must directly follow --print — another flag in
         # between makes agy drop the prompt and answer about the flag
@@ -147,6 +153,12 @@ def build_review_command(
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
         argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
+    elif cli == "qwen":
+        # qwen uses -m for model, -p for prompt (similar to claude)
+        argv = ["qwen"]
+        if agent.model:
+            argv.extend(["-m", agent.model])
+        argv.extend(["-p", prompt])
     else:
         # agy: the prompt must directly follow --print (see build_dispatch_command).
         argv = ["agy"]
