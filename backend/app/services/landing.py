@@ -6,19 +6,68 @@ whatever branch ``repo_root`` has checked out, records the merge commit as
 ``landed_ref``, and deletes the now-merged ``ct-run/*`` branches.
 
 Pure git subprocess work: no LLM call, no tokens. A merge that cannot be
-done safely (conflict, dirty tree, detached HEAD) is reported as a failure
-so the caller can escalate to a human instead of silently claiming success.
+done safely (conflict, dirty tree, detached HEAD, multiple alembic heads)
+is reported as a failure so the caller can escalate to a human instead of
+silently claiming success.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
 _GIT_TIMEOUT_SECONDS = 60
+
+
+def _check_alembic_heads(repo_root: str) -> tuple[bool, list[str], str | None]:
+    """Check if alembic has exactly one head revision.
+
+    Returns:
+        (ok, heads, error): ok=True if single head, heads is the list of head
+        revision IDs, error is a descriptive message if >1 head.
+    """
+    try:
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+    except ImportError:
+        return (True, [], None)
+
+    alembic_ini = os.path.join(repo_root, "backend", "alembic.ini")
+    alembic_dir = os.path.join(repo_root, "backend", "alembic")
+
+    if not os.path.isfile(alembic_ini) or not os.path.isdir(alembic_dir):
+        return (True, [], None)
+
+    try:
+        cfg = Config(alembic_ini)
+        cfg.set_main_option("script_location", alembic_dir)
+        script = ScriptDirectory.from_config(cfg)
+        heads = list(script.get_heads())
+
+        if len(heads) <= 1:
+            return (True, heads, None)
+
+        rev_details = []
+        for rev_id in heads:
+            rev = script.get_revision(rev_id)
+            filename = os.path.basename(rev.path) if rev and rev.path else rev_id
+            rev_details.append(f"  - {filename} ({rev_id[:12]})")
+
+        error = (
+            f"Multiple alembic heads detected ({len(heads)}). "
+            "This happens when parallel tasks add migrations with the same down_revision. "
+            "Create a merge revision before landing:\n"
+            f"  alembic merge heads -m 'merge ...'\n"
+            f"Conflicting revisions:\n" + "\n".join(rev_details)
+        )
+        return (False, heads, error)
+    except Exception as e:
+        logger.warning("alembic head check failed: %s", e)
+        return (True, [], None)
 
 
 @dataclass
@@ -95,11 +144,22 @@ def land_result(repo_root: str, head: str, message: str) -> LandingResult:
             ),
         )
 
-    merge = _git(repo_root, "merge", "--no-ff", head, "-m", message)
+    merge = _git(repo_root, "merge", "--no-ff", "--no-commit", head)
     if merge.returncode != 0:
         _git(repo_root, "merge", "--abort")
         detail = (merge.stderr.strip() or merge.stdout.strip())[:500]
         return LandingResult(ok=False, error=f"merge failed: {detail}")
+
+    heads_ok, heads, heads_error = _check_alembic_heads(repo_root)
+    if not heads_ok:
+        _git(repo_root, "merge", "--abort")
+        return LandingResult(ok=False, error=heads_error)
+
+    commit = _git(repo_root, "commit", "-m", message)
+    if commit.returncode != 0:
+        _git(repo_root, "merge", "--abort")
+        detail = (commit.stderr.strip() or commit.stdout.strip())[:500]
+        return LandingResult(ok=False, error=f"commit failed: {detail}")
 
     landed = _git(repo_root, "rev-parse", "HEAD").stdout.strip()
     _cleanup_merged_run_branches(repo_root)

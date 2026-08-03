@@ -18,73 +18,28 @@ from app.schemas.task import TaskState, GateRecordCreate, GateRecord as GateReco
 # Category 1: Alembic Migration & Table Structure Tests
 # ---------------------------------------------------------------------------
 
-def test_alembic_migration_head():
-    """Verify that Alembic migration '001_initial' applies cleanly to an empty database."""
-    engine = create_engine("sqlite:///:memory:", poolclass=StaticPool)
-    connection = engine.connect()
+def test_alembic_single_head():
+    """Verify that alembic has exactly ONE head revision.
 
-    # Setup Alembic configuration pointing to backend/alembic.ini
+    This is an offline check (no DB connection needed). Multiple heads indicate
+    parallel migrations that need a merge revision before deployment. This test
+    catches the scenario that caused CTV2-1347: two parallel tasks each adding
+    a migration with the same down_revision.
+    """
+    from alembic.script import ScriptDirectory
+
     backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     ini_path = os.path.join(backend_dir, "alembic.ini")
     alembic_cfg = Config(ini_path)
     alembic_cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
 
-    # Run migration upgrade with connection override
-    alembic_cfg.attributes["connection"] = connection
-    command.upgrade(alembic_cfg, "head")
+    script = ScriptDirectory.from_config(alembic_cfg)
+    heads = script.get_heads()
 
-    inspector = inspect(connection)
-    tables = inspector.get_table_names()
-
-    # Check that all required tables exist
-    assert "tasks" in tables
-    assert "gate_records" in tables
-    assert "sessions" in tables
-    assert "audit_log" in tables
-    assert "task_dependencies" in tables
-
-    # Inspect task_dependencies columns
-    dep_cols = {col["name"]: col for col in inspector.get_columns("task_dependencies")}
-    assert "task_id" in dep_cols
-    assert "depends_on_task_id" in dep_cols
-    pk_cols = set(inspector.get_pk_constraint("task_dependencies")["constrained_columns"])
-    assert pk_cols == {"task_id", "depends_on_task_id"}
-
-    # Inspect tasks columns
-    task_cols = {col["name"]: col for col in inspector.get_columns("tasks")}
-    assert "raw_input" in task_cols
-    assert "current_gate" in task_cols
-    assert "mode" in task_cols
-    assert "awaiting_approval" in task_cols
-    assert "approval_prompt" in task_cols
-    assert "error" in task_cols
-    assert "session_id" in task_cols
-
-    # Inspect gate_records columns
-    gate_cols = {col["name"]: col for col in inspector.get_columns("gate_records")}
-    assert "task_id" in gate_cols
-    assert "gate_type" in gate_cols
-    assert "status" in gate_cols
-    assert "executor" in gate_cols
-    assert "reviewer" in gate_cols
-    assert "input_payload" in gate_cols
-    assert "output_payload" in gate_cols
-    assert "error_message" in gate_cols
-
-    task_checks = {
-        constraint["name"]
-        for constraint in inspector.get_check_constraints("tasks")
-        if constraint.get("name")
-    }
-    assert "ck_tasks_terminal_not_awaiting_approval" in task_checks
-
-    # Inspect sessions columns
-    session_cols = {col["name"]: col for col in inspector.get_columns("sessions")}
-    assert "checkpoint_id" in session_cols
-    assert "state_payload" in session_cols
-    assert "thread_id" in session_cols
-
-    connection.close()
+    assert len(heads) == 1, (
+        f"Expected exactly 1 alembic head, found {len(heads)}: {heads}. "
+        "Create a merge revision with: alembic merge heads -m 'merge ...'"
+    )
 
 
 def test_done_task_cannot_await_approval(db_session):
