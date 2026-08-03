@@ -284,7 +284,10 @@ class CommandRouter(
             file = str(args.get('file', '')).strip()
             if not file:
                 return {'error': 'file is required'}
-            command_args = file
+            command_args = json.dumps({
+                'file': file,
+                'max_depth': args.get('max_depth', 2),
+            }, ensure_ascii=False)
         elif canonical_name == 'save_project_context':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:

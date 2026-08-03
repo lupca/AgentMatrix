@@ -1,7 +1,7 @@
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union
-from app.services.mcp import MCPClient
+from app.services.mcp import MCPClient, MCPClientError, MCPToolError
 from app.core.compression import compress_for_prompt
 from app.services.tool_metrics import record_tool_metric
 
@@ -13,6 +13,38 @@ DEFAULT_TIMEOUT = 30.0
 
 class GraphClientError(RuntimeError):
     """Raised when a graph query could not be completed."""
+
+    def __init__(self, message: str, *, kind: str = "unavailable"):
+        super().__init__(message)
+        self.kind = kind
+
+
+def _is_graph_not_built_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    markers = (
+        "graph not built",
+        "graph is not built",
+        "graph has not been built",
+        "no graph found",
+        "graph database not found",
+        "graph does not exist",
+        "build the graph",
+    )
+    return any(marker in message for marker in markers)
+
+
+def _graph_client_error(exc: Exception) -> GraphClientError:
+    if isinstance(exc, GraphClientError):
+        return exc
+    if isinstance(exc, MCPToolError):
+        if _is_graph_not_built_error(exc):
+            return GraphClientError(
+                f"Code graph has not been built: {exc}", kind="graph_not_built"
+            )
+        return GraphClientError(f"Graph MCP tool error: {exc}", kind="tool_error")
+    if isinstance(exc, MCPClientError):
+        return GraphClientError(f"Graph MCP transport error: {exc}", kind="transport")
+    return GraphClientError(f"Graph MCP transport error: {exc}", kind="transport")
 
 
 class TTLCache:
@@ -146,15 +178,26 @@ async def get_impact_radius(
     use_cache: bool = True,
     compress_output: bool = False,
     raise_on_error: bool = False,
-) -> Union[List[str], str]:
+    detail_level: str = "minimal",
+    max_depth: int = 2,
+) -> Union[List[str], Dict[str, Any], str]:
     """Get files affected by changes to given file.
 
     Args:
         compress_output: If True, return compressed string for prompt usage.
+        detail_level: Graph response verbosity. Defaults to ``minimal`` so hub
+            files do not produce unnecessarily large MCP payloads.
+        max_depth: Maximum graph traversal depth.
     """
     started = time.monotonic()
     _tool_name = "get_impact_radius"
-    cache_key = _make_cache_key("get_impact_radius", repo_root, file=file)
+    cache_key = _make_cache_key(
+        "get_impact_radius",
+        repo_root,
+        file=file,
+        detail_level=detail_level,
+        max_depth=max_depth,
+    )
     if use_cache and not raise_on_error:
         cached = graph_cache.get(cache_key)
         if cached is not None:
@@ -165,11 +208,17 @@ async def get_impact_radius(
         async with MCPClient(repo_root=repo_root) as client:
             raw = await client.call_tool(
                 "get_impact_radius_tool",
-                arguments={"repo_root": repo_root, "changed_files": [file]},
+                arguments={
+                    "repo_root": repo_root,
+                    "changed_files": [file],
+                    "detail_level": detail_level,
+                    "max_depth": max_depth,
+                },
                 timeout=timeout,
+                raise_on_error=raise_on_error,
             )
 
-        result: List[str] = []
+        result: Union[List[str], Dict[str, Any]] = []
         if isinstance(raw, dict):
             if "impacted_files" in raw and isinstance(raw["impacted_files"], list):
                 result = [str(f) for f in raw["impacted_files"]]
@@ -185,22 +234,31 @@ async def get_impact_radius(
                     for n in raw["nodes"]
                     if isinstance(n, dict)
                 ]
+            elif raw.get("status") == "ok" and any(
+                key in raw
+                for key in ("summary", "risk", "impacted_file_count", "key_entities")
+            ):
+                # detail_level="minimal" intentionally omits the potentially huge
+                # impacted_files/impacted_nodes arrays. Preserve its useful summary
+                # instead of misreporting a successful query as no impact.
+                result = raw
         elif isinstance(raw, list):
             result = [str(item) for item in raw]
 
         if use_cache and raw is not None:
             graph_cache.set(cache_key, result)
         if raise_on_error and raw is None:
-            raise GraphClientError("MCP returned no response; graph may not be built")
+            raise GraphClientError(
+                "Graph MCP returned an empty response", kind="empty_response"
+            )
         _observe(_tool_name, started, True, result)
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("get_impact_radius failed with fallback to []: %s", e)
         _observe("get_impact_radius", started, False, error=str(e))
         if raise_on_error:
-            if isinstance(e, GraphClientError):
-                raise
-            raise GraphClientError(str(e)) from e
+            error = _graph_client_error(e)
+            raise error from e
         return compress_for_prompt([]) if compress_output else []
 
 
@@ -233,6 +291,7 @@ async def semantic_search(
                 "semantic_search_nodes_tool",
                 arguments={"repo_root": repo_root, "query": query, "limit": limit},
                 timeout=timeout,
+                raise_on_error=raise_on_error,
             )
 
         result: List[Dict[str, Any]] = []
@@ -249,16 +308,17 @@ async def semantic_search(
         if use_cache and raw is not None:
             graph_cache.set(cache_key, result)
         if raise_on_error and raw is None:
-            raise GraphClientError("MCP returned no response; graph may not be built")
+            raise GraphClientError(
+                "Graph MCP returned an empty response", kind="empty_response"
+            )
         _observe(_tool_name, started, True, result)
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("semantic_search failed with fallback to []: %s", e)
         _observe("semantic_search", started, False, error=str(e))
         if raise_on_error:
-            if isinstance(e, GraphClientError):
-                raise
-            raise GraphClientError(str(e)) from e
+            error = _graph_client_error(e)
+            raise error from e
         return compress_for_prompt([]) if compress_output else []
 
 

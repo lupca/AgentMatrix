@@ -830,11 +830,21 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="get_impact_radius",
-            description="Read-only list of files affected by changing a project file.",
+            description=(
+                "Read-only compact blast-radius summary for a changed project file, "
+                "including risk and affected-file count."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
                     "file": {"type": "string", "description": "Project-relative file path."},
+                    "max_depth": {
+                        "type": "integer",
+                        "default": 2,
+                        "minimum": 1,
+                        "maximum": 10,
+                        "description": "Maximum dependency traversal depth.",
+                    },
                 },
                 "required": ["file"],
             },

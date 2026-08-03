@@ -1274,7 +1274,41 @@ async def test_get_impact_radius_resolves_repo_root_from_task_project(db_session
 
     assert result == {"status": "success", "repo_root": repo_root, "files": ["a.py", "b.py"]}
     mock_impact.assert_awaited_once_with(
-        repo_root, "src/index.ts", raise_on_error=True, compress_output=True
+        repo_root,
+        "src/index.ts",
+        max_depth=2,
+        raise_on_error=True,
+        compress_output=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_impact_radius_forwards_requested_max_depth(db_session, tmp_path):
+    from app.db.models import Project, Session as SessionModel
+
+    repo_root = str(tmp_path)
+    db_session.add(Project(id="proj-depth", name="Depth Project", repo_root=repo_root))
+    db_session.add(SessionModel(
+        id="session-depth", project_id="proj-depth", context_level="project"
+    ))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    with patch(
+        "app.services.command_router.graph_get_impact_radius",
+        new=AsyncMock(return_value=["consumer.py"]),
+    ) as mock_impact:
+        result = await router.execute_tool(
+            "get_impact_radius", {"file": "hub.py", "max_depth": 5}, "session-depth"
+        )
+
+    assert result["status"] == "success"
+    mock_impact.assert_awaited_once_with(
+        repo_root,
+        "hub.py",
+        max_depth=5,
+        raise_on_error=True,
+        compress_output=True,
     )
 
 
@@ -1317,7 +1351,7 @@ async def test_lazy_graph_staleness_check_returns_result_and_warning_without_blo
 
 
 @pytest.mark.asyncio
-async def test_get_impact_radius_graph_unavailable_returns_structured_error(db_session, tmp_path):
+async def test_get_impact_radius_transport_error_returns_structured_error(db_session, tmp_path):
     from app.db.models import Project, Session as SessionModel
 
     repo_root = str(tmp_path)
@@ -1328,16 +1362,45 @@ async def test_get_impact_radius_graph_unavailable_returns_structured_error(db_s
     router = CommandRouter(db_session)
     with patch(
         "app.services.command_router.graph_get_impact_radius",
-        new=AsyncMock(side_effect=GraphClientError("graph may not be built")),
+        new=AsyncMock(
+            side_effect=GraphClientError(
+                "Graph MCP transport error: response exceeded stdio buffer limit",
+                kind="transport",
+            )
+        ),
     ):
         result = await router.execute_tool(
             "get_impact_radius", {"file": "src/index.ts"}, "session-1"
         )
 
     assert result["status"] == "error"
-    assert result["reason"] == "graph_unavailable"
-    assert "graph may not be built" in result["detail"]
+    assert result["reason"] == "graph_transport_error"
+    assert "stdio buffer limit" in result["detail"]
     assert result != []
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_reason", "message"),
+    [
+        ("graph_not_built", "graph_not_built", "Code graph has not been built"),
+        (
+            "transport",
+            "graph_transport_error",
+            "Graph MCP transport error: response exceeded stdio buffer limit",
+        ),
+    ],
+)
+def test_research_error_distinguishes_graph_state_from_transport(
+    kind, expected_reason, message
+):
+    from app.services.command_router_handlers.context_handlers import (
+        ContextHandlersMixin,
+    )
+
+    result = ContextHandlersMixin._research_error(GraphClientError(message, kind=kind))
+
+    assert result["reason"] == expected_reason
+    assert result["detail"] == message
 
 
 @pytest.mark.asyncio

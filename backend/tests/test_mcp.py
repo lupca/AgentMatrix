@@ -5,7 +5,13 @@ import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.mcp import MCPClient, MCPClientError
+from app.services.mcp import (
+    DEFAULT_STDIO_BUFFER_LIMIT,
+    MCPClient,
+    MCPClientError,
+    MCPToolError,
+    MCPTransportError,
+)
 from app.services.graph_client import (
     GraphClientError,
     TTLCache,
@@ -92,6 +98,43 @@ async def test_mcp_client_timeout_fallback():
         assert res is None
 
 
+@pytest.mark.asyncio
+async def test_mcp_client_reads_response_larger_than_default_asyncio_limit(tmp_path):
+    """A single JSON-RPC line larger than 64 KiB must survive stdio transport."""
+    fake_server = tmp_path / "fake-code-review-graph"
+    fake_server.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["method"] == "initialize":
+        result = {"protocolVersion": "2024-11-05"}
+    elif request["method"] == "tools/call":
+        files = [f"deep/module_{i:05d}/affected_file_with_long_name.py" for i in range(5000)]
+        result = {
+            "content": [{"type": "text", "text": json.dumps({"impacted_files": files})}]
+        }
+    else:
+        continue
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"""
+    )
+    fake_server.chmod(0o755)
+
+    assert DEFAULT_STDIO_BUFFER_LIMIT > 64 * 1024
+    async with MCPClient(binary_path=str(fake_server)) as client:
+        result = await client.call_tool(
+            "get_impact_radius_tool",
+            {"changed_files": ["hub.py"], "detail_level": "minimal"},
+            raise_on_error=True,
+        )
+
+    assert len(result["impacted_files"]) == 5000
+    assert result["impacted_files"][-1].endswith("affected_file_with_long_name.py")
+
+
 # Unit Tests for High-level Graph Client Wrappers
 @pytest.mark.asyncio
 async def test_graph_client_get_impact_radius_fallback():
@@ -147,10 +190,11 @@ async def test_graph_client_caching():
 @pytest.mark.asyncio
 async def test_graph_client_get_impact_radius_raises_when_no_response():
     with patch("app.services.graph_client.MCPClient.call_tool", return_value=None):
-        with pytest.raises(GraphClientError, match="graph may not be built"):
+        with pytest.raises(GraphClientError, match="empty response") as exc_info:
             await get_impact_radius(
                 "/fake/repo", "src/index.ts", use_cache=False, raise_on_error=True
             )
+    assert exc_info.value.kind == "empty_response"
 
 
 @pytest.mark.asyncio
@@ -159,16 +203,101 @@ async def test_graph_client_get_impact_radius_raises_on_connection_error():
         "app.services.graph_client.MCPClient.call_tool",
         side_effect=Exception("Connection error"),
     ):
-        with pytest.raises(GraphClientError, match="Connection error"):
+        with pytest.raises(GraphClientError, match="transport.*Connection error") as exc_info:
             await get_impact_radius(
                 "/fake/repo", "src/index.ts", use_cache=False, raise_on_error=True
             )
+    assert exc_info.value.kind == "transport"
+
+
+@pytest.mark.asyncio
+async def test_graph_client_distinguishes_not_built_from_transport_error():
+    with patch(
+        "app.services.graph_client.MCPClient.call_tool",
+        side_effect=MCPToolError("No graph found; build the graph first"),
+    ):
+        with pytest.raises(GraphClientError, match="has not been built") as exc_info:
+            await get_impact_radius(
+                "/fake/repo", "src/index.ts", use_cache=False, raise_on_error=True
+            )
+    assert exc_info.value.kind == "graph_not_built"
+
+    with patch(
+        "app.services.graph_client.MCPClient.call_tool",
+        side_effect=MCPTransportError(
+            "MCP response exceeded the stdio buffer limit (65536 bytes)"
+        ),
+    ):
+        with pytest.raises(GraphClientError, match="stdio buffer limit") as exc_info:
+            await get_impact_radius(
+                "/fake/repo", "src/index.ts", use_cache=False, raise_on_error=True
+            )
+    assert exc_info.value.kind == "transport"
+
+
+@pytest.mark.asyncio
+async def test_graph_client_impact_uses_minimal_detail_and_forwards_depth():
+    response = {
+        "status": "ok",
+        "summary": "240 nodes impacted in 73 files",
+        "risk": "high",
+        "impacted_file_count": 73,
+        "key_entities": ["ToolRegistry", "CommandRouter"],
+    }
+    with patch(
+        "app.services.graph_client.MCPClient.call_tool", return_value=response
+    ) as mock_call:
+        result = await get_impact_radius(
+            "/fake/repo",
+            "hub.py",
+            max_depth=4,
+            use_cache=False,
+            raise_on_error=True,
+        )
+
+    assert result == response
+    mock_call.assert_awaited_once_with(
+        "get_impact_radius_tool",
+        arguments={
+            "repo_root": "/fake/repo",
+            "changed_files": ["hub.py"],
+            "detail_level": "minimal",
+            "max_depth": 4,
+        },
+        timeout=30.0,
+        raise_on_error=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_graph_client_compresses_minimal_impact_summary_for_coordinator():
+    response = {
+        "status": "ok",
+        "summary": "240 nodes impacted in 73 files",
+        "risk": "high",
+        "impacted_file_count": 73,
+        "key_entities": ["ToolRegistry"],
+    }
+    with patch(
+        "app.services.graph_client.MCPClient.call_tool", return_value=response
+    ):
+        result = await get_impact_radius(
+            "/fake/repo",
+            "hub.py",
+            use_cache=False,
+            compress_output=True,
+            raise_on_error=True,
+        )
+
+    assert isinstance(result, str)
+    assert '"risk": "high"' in result
+    assert '"impacted_file_count": 73' in result
 
 
 @pytest.mark.asyncio
 async def test_graph_client_semantic_search_raises_when_no_response():
     with patch("app.services.graph_client.MCPClient.call_tool", return_value=None):
-        with pytest.raises(GraphClientError, match="graph may not be built"):
+        with pytest.raises(GraphClientError, match="empty response"):
             await semantic_search(
                 "/fake/repo", "search_term", use_cache=False, raise_on_error=True
             )
@@ -208,7 +337,9 @@ async def test_real_code_review_graph_integration():
         pytest.skip("Test repo not found")
 
     res = await get_impact_radius(repo_root=repo_root, file="scripts/ct-dispatch.py", use_cache=False)
-    assert isinstance(res, list)
+    assert isinstance(res, dict)
+    assert res["status"] == "ok"
+    assert res["impacted_file_count"] > 0
 
     flows = await get_affected_flows(repo_root=repo_root, files=["scripts/ct-dispatch.py"], use_cache=False)
     assert isinstance(flows, list)
