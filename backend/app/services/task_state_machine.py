@@ -1772,6 +1772,65 @@ class TaskStateMachine:
             "skipped_reason": landing.skipped_reason,
         }
 
+    def _resolve_attach_range(self, repo_root: str, commit_ref: str) -> str:
+        """Normalise an attach_result ref into the ``base..head`` form.
+
+        ``request_review`` refuses anything that is not a committed
+        ``base..head`` range, so storing a bare hash here produced a task stuck
+        in ``awaiting-review`` forever (CTV2-1337). Accept both shapes:
+
+        - ``"<base>..<head>"`` — validate both ends, keep the range
+        - ``"<commit>"``       — derive ``base`` from the commit's first parent
+        """
+
+        def resolve(ref: str) -> str:
+            rev = subprocess.run(
+                ["git", "-C", repo_root, "rev-parse", "--verify", f"{ref}^{{commit}}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if rev.returncode != 0:
+                raise OrchestrationError(
+                    f"Commit or ref '{ref}' does not exist in repository {repo_root}"
+                )
+            return rev.stdout.strip()
+
+        if ".." in commit_ref:
+            base_ref, _, head_ref = commit_ref.partition("..")
+            if not base_ref.strip() or not head_ref.strip():
+                raise OrchestrationError(
+                    f"Invalid range '{commit_ref}': expected '<base>..<head>'"
+                )
+            return f"{resolve(base_ref.strip())[:12]}..{resolve(head_ref.strip())[:12]}"
+
+        head = resolve(commit_ref)
+        parent = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "--verify", f"{head}^1^{{commit}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if parent.returncode == 0:
+            return f"{parent.stdout.strip()[:12]}..{head[:12]}"
+
+        # Root commit: no parent to diff against. Git's empty tree is the
+        # canonical base for "everything this commit introduced", and keeps the
+        # range diffable. Computed rather than hard-coded so it stays correct
+        # for SHA-256 repositories.
+        empty_tree = subprocess.run(
+            ["git", "-C", repo_root, "hash-object", "-t", "tree", "/dev/null"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if empty_tree.returncode != 0:
+            raise OrchestrationError(
+                f"Commit '{commit_ref}' is a root commit and the empty-tree base "
+                f"could not be resolved in {repo_root}; pass '<base>..<head>'"
+            )
+        return f"{empty_tree.stdout.strip()[:12]}..{head[:12]}"
+
     def attach_result(
         self,
         *,
@@ -1805,15 +1864,7 @@ class TaskStateMachine:
                     timeout=10,
                 )
                 if probe.returncode == 0:
-                    rev = subprocess.run(
-                        ["git", "-C", repo_root, "rev-parse", "--verify", f"{commit_ref}^{{commit}}"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    if rev.returncode != 0:
-                        raise OrchestrationError(f"Commit or ref '{commit_ref}' does not exist in repository {repo_root}")
-                    commit_ref = rev.stdout.strip()
+                    commit_ref = self._resolve_attach_range(repo_root, commit_ref)
             except subprocess.TimeoutExpired:
                 raise OrchestrationError(f"Git timeout validating commit '{commit_ref}'")
             except (OSError, subprocess.SubprocessError):

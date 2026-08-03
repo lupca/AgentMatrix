@@ -65,8 +65,10 @@ def test_attach_result_option_done(db_session, service):
     res = orch_service.attach_result(task_id="TASK-100", commit=commit, option="done")
     assert res.applied is True
     assert res.task.status == "done"
-    assert res.task.result_ref == commit
-    assert res.task.final_result_ref == commit
+    # CTV2-1337: result_ref is normalised to '<base>..<head>', not a bare hash.
+    assert res.task.result_ref.endswith(commit[:12])
+    assert ".." in res.task.result_ref
+    assert res.task.final_result_ref == res.task.result_ref
     assert res.task.verdict == "pass"
     assert res.task.final_verdict == "pass"
 
@@ -75,7 +77,7 @@ def test_attach_result_option_done(db_session, service):
     assert len(records) == 1
     assert records[0].gate_type == "attach_result"
     assert records[0].status == "approved"
-    assert records[0].output_ref == commit
+    assert records[0].output_ref.endswith(commit[:12])
 
     # Audit log check
     audit = db_session.query(AuditLog).filter(AuditLog.task_id == "TASK-100").first()
@@ -94,7 +96,8 @@ def test_attach_result_option_request_review(db_session, service):
     assert res.applied is True
     assert res.task.status == "awaiting-review"
     assert res.task.current_gate == "review_order"
-    assert res.task.result_ref == commit
+    assert res.task.result_ref.endswith(commit[:12])
+    assert ".." in res.task.result_ref
     assert res.task.final_result_ref is None
 
     # Ledger check
@@ -140,7 +143,7 @@ def test_attach_result_command_router_execute_tool(db_session, service):
     )
     assert out["action"] == "result_attached"
     assert out["status"] == "done"
-    assert out["commit"] == commit
+    assert out["commit"].endswith(commit[:12])
 
 
 def test_attach_result_slash_command(db_session, service):
@@ -157,7 +160,7 @@ def test_attach_result_slash_command(db_session, service):
     out = asyncio.run(router.execute(cmd, args, "session-1"))
     assert out["action"] == "result_attached"
     assert out["status"] == "awaiting-review"
-    assert out["commit"] == commit
+    assert out["commit"].endswith(commit[:12])
 
 
 def test_attach_result_validation_errors(db_session, service):
@@ -202,3 +205,84 @@ def test_attach_result_idempotency(db_session, service):
     assert res1.gate_record.id == res2.gate_record.id
     records = db_session.query(GateRecord).filter(GateRecord.task_id == "TASK-108").all()
     assert len(records) == 1
+
+
+def _second_commit(repo_root: str) -> str:
+    """Add a real second commit so the repo has a non-root HEAD."""
+    (os.path.join(repo_root, "feature.txt"))
+    with open(os.path.join(repo_root, "feature.txt"), "w") as fh:
+        fh.write("feature\n")
+    subprocess.run(["git", "add", "."], cwd=repo_root, check=True)
+    subprocess.run(["git", "commit", "-m", "feature"], cwd=repo_root, check=True, capture_output=True)
+    res = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo_root, check=True, capture_output=True, text=True
+    )
+    return res.stdout.strip()
+
+
+def test_attach_result_stores_base_head_range(db_session, service):
+    """CTV2-1337: a bare hash must be normalised to '<base>..<head>'.
+
+    Storing a bare hash left request_review permanently blocked, because it
+    refuses anything that is not a committed base..head range.
+    """
+    orch_service, repo_root, _root = service
+    head = _second_commit(repo_root)
+
+    task = Task(id="TASK-1337", project="proj", title="Range task", status="todo")
+    db_session.add(task)
+    db_session.commit()
+
+    orch_service.attach_result(task_id="TASK-1337", commit=head, option="done")
+
+    db_session.refresh(task)
+    assert ".." in task.result_ref, f"expected a range, got {task.result_ref!r}"
+    base_part, _, head_part = task.result_ref.partition("..")
+    assert head.startswith(head_part)
+    assert base_part and base_part != head_part
+
+
+def test_attach_result_accepts_explicit_range(db_session, service):
+    orch_service, repo_root, root = service
+    head = _second_commit(repo_root)
+
+    task = Task(id="TASK-1337B", project="proj", title="Explicit range", status="todo")
+    db_session.add(task)
+    db_session.commit()
+
+    orch_service.attach_result(
+        task_id="TASK-1337B", commit=f"{root}..{head}", option="done"
+    )
+
+    db_session.refresh(task)
+    base_part, _, head_part = task.result_ref.partition("..")
+    assert root.startswith(base_part)
+    assert head.startswith(head_part)
+
+
+def test_attach_result_root_commit_uses_empty_tree_base(db_session, service):
+    """A root commit has no parent; the range must still be well formed."""
+    orch_service, repo_root, root = service
+
+    task = Task(id="TASK-1337C", project="proj", title="Root commit", status="todo")
+    db_session.add(task)
+    db_session.commit()
+
+    orch_service.attach_result(task_id="TASK-1337C", commit=root, option="done")
+
+    db_session.refresh(task)
+    assert ".." in task.result_ref
+    base_part, _, head_part = task.result_ref.partition("..")
+    assert root.startswith(head_part)
+    assert base_part and base_part != head_part
+
+
+def test_attach_result_rejects_malformed_range(db_session, service):
+    orch_service, repo_root, root = service
+
+    task = Task(id="TASK-1337D", project="proj", title="Bad range", status="todo")
+    db_session.add(task)
+    db_session.commit()
+
+    with pytest.raises(OrchestrationError):
+        orch_service.attach_result(task_id="TASK-1337D", commit=f"{root}..", option="done")
