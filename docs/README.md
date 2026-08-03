@@ -10,6 +10,8 @@
    - `05-agents-providers.md` — agent CLI/API, effort, quirks từng CLI, reasoning models
    - `06-context-rules.md` — project context & scoped rules (onboarding project mới)
    - `07-runtime-ops.md` — runbook vận hành, migrate, bảng sự cố quen
+   - `08-pm-layer.md` — **THIẾT KẾ, chưa triển khai**: tầng PM (WBS, stage,
+     ước lượng, lịch danh mục) nằm trên tầng task
 2. **`adr/`** — quyết định kiến trúc (ADR-001: unified tool registry).
 3. **`plans/`** — plan đang thi hành. `GD4-CLEANUP-PLAN.md` = backlog sống
    (kèm task files ở `~/projects/control-tower/projects/agenticmatix/tasks/`).
