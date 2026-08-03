@@ -76,11 +76,28 @@ Số vòng execute/task            Thời lượng mỗi run
 
 Thời lượng một run gần như **hằng số** (~6 phút); phương sai nằm ở **số vòng**
 (1→7). Nên ước lượng bằng phút là ước lượng sai biến số. Biến chính là
-`estimate_rounds`, và thứ dự báo nó tốt nhất là `spec_clarity` — không phải độ
-khó kỹ thuật.
+`estimate_rounds`.
 
 Vì đã có 57 task lịch sử, `estimate_rounds` **gợi ý được từ node tương tự đã
 xong**, không cần LLM đoán.
+
+> **CẢNH BÁO — chưa có bằng chứng `spec_clarity` giảm số vòng.** Bản nháp đầu
+> của file này khẳng định `spec_clarity` là biến dự báo tốt nhất. Đo lại thì dữ
+> liệu **không ủng hộ**, thậm chí ngược:
+>
+> | spec_clarity | task | vòng TB | vòng max |
+> |---|---|---|---|
+> | `high` | 11 | 2.27 | 7 |
+> | chưa set | 46 | 1.72 | 6 |
+>
+> Nhiều khả năng do **thiên lệch chọn mẫu**: `generate_spec_plan` chỉ được chạy
+> cho task vốn đã khó. Nhưng dù giải thích thế nào, **không được dùng số này để
+> biện minh cho việc xây tầng PM**. Cần thí nghiệm có đối chứng trước
+> (xem `plans/`).
+>
+> Bối cảnh quan trọng hơn: **381/391 task chưa từng set `spec_clarity`** — cơ
+> chế chốt chất lượng sẵn có gần như không được dùng. Xây tầng mới đè lên một
+> cơ chế chưa dùng thì không chạm được nguyên nhân.
 
 ## Ràng buộc danh mục (portfolio) — điểm quan trọng nhất
 
@@ -94,7 +111,7 @@ thiết kế lịch:
    `autonomy`, `auto_max_risk`, `auto_max_rounds`. Không có concurrency, không
    có budget. Thực tế cả 17 project đều để `autonomy_policy = NULL`.
 3. **Không có ngân sách theo project.** `max_cost_usd_per_task` là global và
-   theo *task*.
+   theo *task* — và trên thực tế **chưa từng kích hoạt** (xem mục Chi phí).
 
 4. **Không có hàng đợi dispatch.** Khi hết slot, `check_brakes` trả
    `queue=True, retry_after_seconds=30` — đó là **retry**, không phải queue.
@@ -126,6 +143,29 @@ ngân sách.
 > `tasks.priority`. Không có nó, mọi lịch PM tính ra đều sai hệ thống vì thứ tự
 > giành slot là ngẫu nhiên. Đây cũng là thứ đang gây ra 23 lần `dispatch_queue`
 > bị từ chối.
+
+## Chi phí: hiện KHÔNG đo được
+
+`estimate_cost_usd` trong data model bên dưới là **nguyện vọng, chưa dùng được**.
+Hiện trạng đo được:
+
+- `llm_usage` có 158 bản ghi, **`agent_run_id` NULL toàn bộ**, **`task_id` NULL
+  toàn bộ**; chỉ `session_id` được điền.
+- Chỉ agent **API** ghi được cost (DeepSeek-V4-Flash 145, LongCat 12, Kimi 1;
+  tổng $1.32). **Không bản ghi nào từ agent CLI** — claude/agy/codex/qwen chạy
+  bằng subscription nên không báo cost theo token.
+- `_task_cost()` (`task_validators.py:336`) join đúng hai cột NULL đó nên **luôn
+  trả 0** ⇒ brake `max_cost_usd_per_task` **chưa từng kích hoạt lần nào**, dù
+  CLAUDE.md mô tả là có.
+
+Hệ quả cho tầng PM:
+
+- **Không được hứa "giảm cost"** khi chưa đo được cost. Muốn nói tới tiền thì
+  phải sửa attribution trước (điền `task_id`/`agent_run_id` vào `llm_usage`).
+- Với agent CLI chạy subscription, đại lượng thật sự tiêu hao là **quota và thời
+  gian**, không phải đô-la. Đại lượng thay thế đo được là **số vòng × thời lượng
+  run** — cũng chính là `estimate_rounds`. Đây là lý do chính đáng để tối ưu
+  theo vòng thay vì theo tiền.
 
 ## Data model
 
