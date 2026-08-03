@@ -39,6 +39,43 @@ class ReviewResultLoadError(ValueError):
         return {"code": self.code, "path": self.path, "details": self.details}
 
 
+def _normalize_review_metadata(payload: Any) -> Any:
+    """Map observed reviewer metadata aliases onto the versioned contract.
+
+    Claude Opus review runs CTV2-1342 and CTV2-1345 emitted otherwise valid
+    artifacts with ``toolchain_output``/``notes`` and ``toolchain_notes``
+    respectively.  Preserve those values under the existing
+    ``toolchain_results`` field.  This is deliberately an allow-list, not a
+    general extra-field escape hatch: unknown keys and conflicting aliases
+    still reach Pydantic's ``extra='forbid'`` validation unchanged.
+    """
+    if not isinstance(payload, dict) or "toolchain_results" in payload:
+        return payload
+
+    normalized = dict(payload)
+    toolchain_results: dict[str, Any] = {}
+    used_alias = False
+
+    toolchain_output = normalized.get("toolchain_output")
+    if isinstance(toolchain_output, dict):
+        toolchain_results.update(toolchain_output)
+        normalized.pop("toolchain_output")
+        used_alias = True
+
+    for alias in ("toolchain_notes", "notes"):
+        note = normalized.get(alias)
+        # Do not silently overwrite two contradictory note aliases.  Leaving
+        # the second key in place makes strict schema validation reject it.
+        if isinstance(note, str) and "notes" not in toolchain_results:
+            toolchain_results["notes"] = note
+            normalized.pop(alias)
+            used_alias = True
+
+    if used_alias:
+        normalized["toolchain_results"] = toolchain_results
+    return normalized
+
+
 def _normalize_acceptance_criteria(ac: list | str | None) -> list[str]:
     """Convert acceptance_criteria to a list, handling string format."""
     if ac is None:
@@ -80,7 +117,7 @@ def load_review_result(
         ) from exc
 
     try:
-        result = ReviewResult.model_validate(payload)
+        result = ReviewResult.model_validate(_normalize_review_metadata(payload))
     except ValidationError as exc:
         error_types = {error.get("type") for error in exc.errors()}
         code = "missing_required_field" if "missing" in error_types else (
@@ -93,7 +130,10 @@ def load_review_result(
         )
         raise ReviewResultLoadError(
             code, path, "Review result does not match its schema",
-            errors=exc.errors(),
+            # ValidationError.json() turns non-JSON ``ctx`` values (for
+            # example ValueError instances from model validators) into a
+            # representation safe for GateRecord/ToolMetric JSON columns.
+            errors=json.loads(exc.json(include_url=False)),
         ) from exc
 
     if result.task_id != task_id:

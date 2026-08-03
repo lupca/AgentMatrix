@@ -41,6 +41,10 @@ Sửa hành vi CLI phải sửa CẢ HAI (bài học CTV2-236: effort chỉ có 
   Không hỗ trợ `--mcp-config`.
 - **claude**: `-p` im lặng đến khi xong → dính watchdog no-progress (xem 03).
   `--dangerously-skip-permissions` cho executor; reviewer read-only.
+  Hai review Opus đo ngày 2026-08-04 thêm metadata top-level ngoài template:
+  CTV2-1345 dùng `toolchain_notes`; CTV2-1342 dùng `toolchain_output` + `notes`.
+  Parser chỉ map đúng các alias này vào `toolchain_results`; validation strict
+  với field khác vẫn giữ nguyên.
 - **codex**: `codex exec -m <model>`; bypass sandbox bằng
   `--dangerously-bypass-approvals-and-sandbox` (chỉ đường dispatch).
 

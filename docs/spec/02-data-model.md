@@ -13,7 +13,8 @@ liên kết ngược bằng `task_id`.
 
 ```
 todo → dispatched → awaiting-review → in-review → done
-                                          └→ changes-requested → (todo → vòng mới)
+                         ↑       └→ review run/result failed
+                         │                    └→ changes-requested → (todo → vòng mới)
 bất kỳ đâu → failed / cancelled
 ```
 
@@ -51,6 +52,9 @@ queued → running → success / failed / cancelled
 - `pid`, `started_at`: reaper dùng để phát hiện worker chết
   (`reap_dead_running_runs`, min age 120s chống PID reuse).
 - Output lưu `agent_output_chunks` (đọc bằng tool `get_run_output`).
+- Review run lỗi process hoặc artifact không đọc được chỉ làm AgentRun
+  `failed`; Task CAS từ `in-review` về `awaiting-review`, giữ nguyên executor và
+  `result_ref` để tạo review attempt kế tiếp.
 
 ## TaskRound
 
@@ -61,8 +65,11 @@ Một round mỗi lần execute-dispatch; verdict ghi vào round. `auto_max_roun
 
 - Append-only (trigger chặn UPDATE). Quyết định = row con `parent_id` → parent.
 - Gate mở = `status='pending'` AND childless AND task chưa archive.
-- `gate_type`: dispatch | execution | review_order | verdict. Admin:
+- `gate_type`: dispatch | execution | review_order | review_result | verdict. Admin:
   `<entity>/<action>` (agents/update, settings/update, ...).
+- Row `review_result/rejected.input_payload.error_details` lưu mã lỗi, path và
+  danh sách `ValidationError.errors()` dạng JSON (loc/type/msg/input), nên
+  `query_db` truy được trường sai mà không phải dựa vào câu tóm tắt.
 - Đã biết: driver tự tạo gate review_order khi executor xong; `request_review`
   tạo thêm cái TRÙNG (CTV2-230 — nên approve gate driver có sẵn thay vì gọi
   request_review khi task đã awaiting-review).

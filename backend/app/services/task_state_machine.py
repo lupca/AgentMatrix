@@ -639,6 +639,7 @@ class TaskStateMachine:
             task.reviewer = reviewer
             self.cas_status(task, "in-review")
             task.current_gate = "verdict"
+            task.error = None
             task.awaiting_approval = False
             task.approval_prompt = None
             record_run_requested(self.db, run, str(payload["repo_root"]))
@@ -1295,6 +1296,7 @@ class TaskStateMachine:
         idempotency_key: str,
         expected_status: str = "in-review",
         run_id: str | None = None,
+        error_details: dict[str, Any] | None = None,
     ) -> TransitionResult:
         task = self.validator.task(task_id)
         payload = {
@@ -1302,16 +1304,21 @@ class TaskStateMachine:
             "error": error,
             "run_id": run_id,
         }
+        # Keep the legacy idempotency hash stable for non-parser failures.
+        if error_details is not None:
+            payload["error_details"] = error_details
         input_hash = TaskValidator.input_hash(payload)
         existing = self.validator.idempotent_record(task_id, idempotency_key, input_hash)
         if existing is not None:
             return self.result_for_record(task, existing)
         self.validator.assert_status(task, expected_status)
         now = datetime.now(timezone.utc)
-        self.cas_status(task, "failed")
+        # A malformed reviewer artifact says nothing about the executor's
+        # committed result.  Return to the review boundary so another
+        # independent reviewer can be assigned without attach_result.
+        self.cas_status(task, "awaiting-review")
         task.error = error
-        task.awaiting_approval = True
-        task.approval_prompt = f"Review result invalid or missing: {error}"
+        task.current_gate = "review_order"
         task.updated_at = now
         record = self.ledger_record(
             task=task,
@@ -1329,7 +1336,6 @@ class TaskStateMachine:
         self.db.commit()
         self.db.refresh(task)
         self.db.refresh(record)
-        self.wake_dependents(task_id)
         return TransitionResult(task, record, True)
 
     def escalate_task(

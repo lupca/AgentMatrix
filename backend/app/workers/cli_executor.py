@@ -538,6 +538,36 @@ def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResu
         )
 
 
+def _record_review_result_load_failure(
+    db: Session,
+    run: AgentRun,
+    task_id: str,
+    exc: ReviewResultLoadError,
+    orch_svc_cls: type[TaskOrchestrationService],
+) -> str:
+    """Fail only the review run and persist the parser's structured detail."""
+    error_details = exc.as_dict()
+    record_tool_metric(
+        tool="review_result",
+        source="agent_runner",
+        ok=False,
+        task_id=task_id,
+        error=f"{exc.code}: {exc}",
+        payload=error_details,
+    )
+    run.status = ProcessStatus.FAILED.value
+    run.error_message = str(exc)
+    orch_svc_cls(db).record_review_failure(
+        task_id=task_id,
+        error=str(exc),
+        actor=f"agent:{run.agent_id}",
+        idempotency_key=f"run:{run.id}:review-result-invalid",
+        run_id=run.id,
+        error_details=error_details,
+    )
+    return ProcessStatus.FAILED.value
+
+
 def _normalize_acceptance_criteria(ac: list | str | None) -> list[str]:
     """Convert acceptance_criteria to a list, handling string format."""
     if ac is None:
@@ -1013,22 +1043,8 @@ def execute_agent_run(
                         task.acceptance_criteria or [],
                     )
                 except ReviewResultLoadError as exc:
-                    record_tool_metric(
-                        tool="review_result",
-                        source="agent_runner",
-                        ok=False,
-                        task_id=task_id,
-                        error=f"{exc.code}: {exc}",
-                    )
-                    run.status = ProcessStatus.FAILED.value
-                    effective_status = ProcessStatus.FAILED.value
-                    run.error_message = str(exc)
-                    orch_svc_cls(db).record_review_failure(
-                        task_id=task_id,
-                        error=str(exc),
-                        actor=f"agent:{run.agent_id}",
-                        idempotency_key=f"run:{run.id}:review-result-invalid",
-                        run_id=run.id,
+                    effective_status = _record_review_result_load_failure(
+                        db, run, task_id, exc, orch_svc_cls
                     )
                 else:
                     run.result_ref = os.path.relpath(

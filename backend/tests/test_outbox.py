@@ -267,8 +267,9 @@ def test_reap_uses_record_review_failure_for_review_runs(seeded):
     assert run.status == "failed"
 
     seeded.refresh(task)
-    assert task.status == "failed"
+    assert task.status == "awaiting-review"
     assert task.awaiting_approval is False
+    assert task.result_ref == "abcdef012345..fedcba543210"
 
 
 def test_reap_ignores_running_runs_with_no_recorded_pid(seeded):
@@ -322,4 +323,3 @@ def test_publish_graph_rebuild_event_transitions_status_idle_stale_building_fres
     assert counts == {"published": 1, "deferred": 0, "dead_lettered": 0}
     seeded.refresh(project)
     assert project.graph_status == "fresh"
-

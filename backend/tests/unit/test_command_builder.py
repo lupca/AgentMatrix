@@ -146,6 +146,8 @@ def test_build_review_command_embeds_explicit_from_to_range(tmp_path):
     assert cli == "claude"
     assert prompt.startswith("/code-review --from base-sha --to head-sha")
     assert ".ct/review-REV-002.json" in prompt
+    assert "optional toolchain_results (an object)" in prompt
+    assert "do NOT add toolchain_output, toolchain_notes, notes" in prompt
 
 
 @pytest.mark.parametrize("cli", ["claude", "qwen", "agy"])

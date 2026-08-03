@@ -1,4 +1,54 @@
 import os
+from unittest.mock import MagicMock
+
+from app.workers import cli_executor
+from app.workers.output_parser import ReviewResultLoadError
+
+
+def test_record_review_result_load_failure_persists_structured_errors(monkeypatch):
+    metric = MagicMock()
+    monkeypatch.setattr(cli_executor, "record_tool_metric", metric)
+    orchestration = MagicMock()
+    run = MagicMock(id="review-run", agent_id="@claude-opus")
+    error_details = {
+        "errors": [
+            {
+                "type": "extra_forbidden",
+                "loc": ["toolchain_notes"],
+                "msg": "Extra inputs are not permitted",
+                "input": "notes",
+            }
+        ]
+    }
+    exc = ReviewResultLoadError(
+        "schema_validation",
+        "/repo/.ct/review-TASK.json",
+        "Review result does not match its schema",
+        **error_details,
+    )
+
+    status = cli_executor._record_review_result_load_failure(
+        MagicMock(), run, "TASK", exc, orchestration
+    )
+
+    assert status == "failed"
+    assert run.status == "failed"
+    metric.assert_called_once_with(
+        tool="review_result",
+        source="agent_runner",
+        ok=False,
+        task_id="TASK",
+        error="schema_validation: Review result does not match its schema",
+        payload=exc.as_dict(),
+    )
+    orchestration.return_value.record_review_failure.assert_called_once_with(
+        task_id="TASK",
+        error="Review result does not match its schema",
+        actor="agent:@claude-opus",
+        idempotency_key="run:review-run:review-result-invalid",
+        run_id="review-run",
+        error_details=exc.as_dict(),
+    )
 
 
 def test_prepare_review_artifact_generates_template(tmp_path):

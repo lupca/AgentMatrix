@@ -270,6 +270,7 @@ class TaskOrchestrationService:
         idempotency_key: str,
         expected_status: str = "in-review",
         run_id: str | None = None,
+        error_details: dict[str, Any] | None = None,
     ) -> TransitionResult:
         return self.state_machine.record_review_failure(
             task_id=task_id,
@@ -278,6 +279,7 @@ class TaskOrchestrationService:
             idempotency_key=idempotency_key,
             expected_status=expected_status,
             run_id=run_id,
+            error_details=error_details,
         )
 
     def escalate_task(

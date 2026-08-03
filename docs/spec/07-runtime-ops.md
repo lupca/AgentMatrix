@@ -29,6 +29,10 @@
 - `run_agent` (workers/agent_runner.py): nhận run_id, spawn CLI trong worktree
   riêng, đọc output, validate RESULT_REF, submit review verdict (nhớ
   `db.flush()` trước — autoflush=False).
+- Review artifact lỗi được ghi hai nơi truy vấn được: `tool_metrics.payload`
+  (telemetry) và `gate_records.input_payload.error_details` (ledger cùng
+  transition). `agent_runs.error_message` chỉ giữ câu tóm tắt. Task trở lại
+  `awaiting-review`, còn executor commit range không đổi.
 - Outbox: `record_run_requested` cùng transaction với AgentRun; publisher gửi
   message chưa có `dramatiq_message_id`. Send sync ở call-site PHẢI ghi
   message_id ngay (không thì double delivery — CTV2-212).
