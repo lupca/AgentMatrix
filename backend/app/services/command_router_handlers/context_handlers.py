@@ -60,11 +60,24 @@ class ContextHandlersMixin:
 
     @staticmethod
     def _research_error(exc: Exception) -> dict:
+        kind = getattr(exc, 'kind', 'unavailable')
+        if kind == 'graph_not_built':
+            reason = 'graph_not_built'
+            suggestion = 'Build the code graph, then retry the research tool.'
+        elif kind in {'transport', 'empty_response'}:
+            reason = 'graph_transport_error'
+            suggestion = 'Retry the request and check the graph MCP transport if it persists.'
+        elif kind == 'tool_error':
+            reason = 'graph_tool_error'
+            suggestion = 'Check the graph MCP tool error and retry after correcting it.'
+        else:
+            reason = 'graph_unavailable'
+            suggestion = 'Build or refresh the code graph, then retry the research tool.'
         return {
             'status': 'error',
-            'reason': 'graph_unavailable',
+            'reason': reason,
             'detail': str(exc),
-            'suggestion': 'Build or refresh the code graph, then retry the research tool.',
+            'suggestion': suggestion,
         }
 
     async def _apply_graph_staleness_check(self, repo_root: str, session_id: str, res_dict: dict) -> None:
@@ -121,9 +134,17 @@ class ContextHandlersMixin:
         if error:
             return error
         try:
+            try:
+                payload = json.loads(args)
+            except (json.JSONDecodeError, TypeError):
+                payload = {'file': args.strip(), 'max_depth': 2}
             impact_fn = _get_graph_get_impact_radius()
             result = await impact_fn(
-                repo_root, args.strip(), raise_on_error=True, compress_output=True,
+                repo_root,
+                str(payload['file']).strip(),
+                max_depth=int(payload.get('max_depth', 2)),
+                raise_on_error=True,
+                compress_output=True,
             )
         except Exception as exc:
             return self._research_error(exc)

@@ -1,4 +1,4 @@
-from app.services.mcp import MCPClient, MCPClientError
+from app.services.mcp import MCPClient, MCPClientError, MCPToolError, MCPTransportError
 from app.services.graph_client import (
     get_impact_radius,
     semantic_search,
@@ -11,6 +11,8 @@ from app.services.graph_client import (
 __all__ = [
     "MCPClient",
     "MCPClientError",
+    "MCPToolError",
+    "MCPTransportError",
     "get_impact_radius",
     "semantic_search",
     "query_tests_for",

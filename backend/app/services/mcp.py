@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30.0
+DEFAULT_STDIO_BUFFER_LIMIT = 8 * 1024 * 1024
 
 
 class MCPClientError(Exception):
@@ -15,10 +16,23 @@ class MCPClientError(Exception):
     pass
 
 
+class MCPTransportError(MCPClientError):
+    """Raised when the stdio transport cannot deliver a complete response."""
+
+
+class MCPToolError(MCPClientError):
+    """Raised when the MCP server reports that a tool execution failed."""
+
+
 class MCPClient:
     """Async MCP stdio client for connecting to code-review-graph server."""
 
-    def __init__(self, repo_root: Optional[str] = None, binary_path: Optional[str] = None):
+    def __init__(
+        self,
+        repo_root: Optional[str] = None,
+        binary_path: Optional[str] = None,
+        stdio_buffer_limit: Optional[int] = None,
+    ):
         self.repo_root = repo_root
         self.binary_path = (
             binary_path
@@ -27,6 +41,7 @@ class MCPClient:
             or "/home/lupca/.local/bin/code-review-graph"
         )
         self.process: Optional[asyncio.subprocess.Process] = None
+        self.stdio_buffer_limit = stdio_buffer_limit or _stdio_buffer_limit()
         self._request_id = 0
         self._lock = asyncio.Lock()
 
@@ -48,6 +63,7 @@ class MCPClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=self.stdio_buffer_limit,
             )
         except Exception as e:
             raise MCPClientError(f"Failed to spawn MCP server process ({cmd}): {e}") from e
@@ -111,21 +127,34 @@ class MCPClient:
                     raise MCPClientError("MCP server process closed stdio connection (EOF)")
                 response = json.loads(line.decode("utf-8").strip())
                 if "error" in response:
-                    logger.warning("MCP response error for method '%s': %s", method, response["error"])
-                    return None
+                    error = response["error"]
+                    logger.warning("MCP response error for method '%s': %s", method, error)
+                    if isinstance(error, dict):
+                        message = str(error.get("message") or error)
+                    else:
+                        message = str(error)
+                    raise MCPToolError(f"MCP method '{method}' failed: {message}")
                 return response.get("result")
             except asyncio.TimeoutError:
                 logger.error("MCP request '%s' timed out after %.1f seconds", method, timeout)
                 raise MCPClientError(f"Request '{method}' timed out after {timeout}s")
             except json.JSONDecodeError as e:
                 logger.error("MCP response JSON decode error: %s", e)
-                raise MCPClientError(f"Invalid JSON from MCP server: {e}")
+                raise MCPTransportError(f"Invalid JSON from MCP server: {e}")
+            except ValueError as e:
+                if "Separator is not found" in str(e) or "chunk exceed the limit" in str(e):
+                    raise MCPTransportError(
+                        "MCP response exceeded the stdio buffer limit "
+                        f"({self.stdio_buffer_limit} bytes): {e}"
+                    ) from e
+                raise
 
     async def call_tool(
         self,
         tool_name: str,
         arguments: Optional[Dict[str, Any]] = None,
         timeout: float = DEFAULT_TIMEOUT,
+        raise_on_error: bool = False,
     ) -> Optional[Any]:
         """Call an MCP tool on code-review-graph server with safe fallback."""
         try:
@@ -139,6 +168,13 @@ class MCPClient:
             )
             if not res:
                 return None
+
+            if res.get("isError"):
+                content = res.get("content", [])
+                detail = ""
+                if content and isinstance(content[0], dict):
+                    detail = str(content[0].get("text") or "")
+                raise MCPToolError(detail or f"MCP tool '{tool_name}' failed")
 
             content = res.get("content", [])
             if not content:
@@ -154,6 +190,12 @@ class MCPClient:
                 return first_text
         except Exception as e:
             logger.warning("MCP tool '%s' execution failed: %s", tool_name, e)
+            if raise_on_error:
+                if isinstance(e, MCPClientError):
+                    raise
+                raise MCPTransportError(
+                    f"MCP transport failed while calling '{tool_name}': {e}"
+                ) from e
             return None
 
     async def close(self) -> None:
@@ -181,3 +223,27 @@ class MCPClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
+
+
+def _stdio_buffer_limit() -> int:
+    """Return the stdio line limit, configurable from the root environment."""
+    configured = os.getenv("CRG_STDIO_BUFFER_LIMIT")
+    if configured is None:
+        return DEFAULT_STDIO_BUFFER_LIMIT
+    try:
+        limit = int(configured)
+    except ValueError:
+        logger.warning(
+            "Ignoring invalid CRG_STDIO_BUFFER_LIMIT=%r; using %d",
+            configured,
+            DEFAULT_STDIO_BUFFER_LIMIT,
+        )
+        return DEFAULT_STDIO_BUFFER_LIMIT
+    if limit < 64 * 1024:
+        logger.warning(
+            "Ignoring CRG_STDIO_BUFFER_LIMIT below 64 KiB: %d; using %d",
+            limit,
+            DEFAULT_STDIO_BUFFER_LIMIT,
+        )
+        return DEFAULT_STDIO_BUFFER_LIMIT
+    return limit
