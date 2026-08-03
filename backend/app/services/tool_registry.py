@@ -958,6 +958,32 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             required_role="executor",
         ),
         ToolSpec(
+            name="spec_stale",
+            description=(
+                "List active spec_item rows the commit-triggered invalidation "
+                "engine flagged stale, with why (which symbol, which commit). "
+                "Pure lookup -- never re-derives staleness itself, and never "
+                "asks an LLM whether a spec item is still correct."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "project": {
+                        "type": "string",
+                        "description": "Project id to list stale spec items for.",
+                    },
+                },
+                "required": ["project"],
+            },
+            handler="spec_stale",
+            tier="deferred",
+            permission="read",
+            entity="spec",
+            slash_alias=None,
+            group="spec",
+            required_role="executor",
+        ),
+        ToolSpec(
             name="load_tools",
             description=(
                 "Load additional tool schemas for the rest of this turn. Call "
@@ -967,7 +993,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "archive_task, generate_spec_plan), admin (project/agent/"
                 "knowledge/settings management), session (compact_context), "
                 "research (get_minimal_context, get_impact_radius), query "
-                "(get_task_events, suggest_agents), spec (spec_write, spec_get)."
+                "(get_task_events, suggest_agents), spec (spec_write, spec_get, "
+                "spec_stale)."
             ),
             parameters={
                 "type": "object",

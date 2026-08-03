@@ -1154,6 +1154,11 @@ class SpecItem(ArchivableMixin, Base):
     title = Column(String(300), nullable=False)
     body = Column(Text, nullable=False)
     status = Column(String(20), nullable=False, default="draft", server_default="draft", index=True)
+    # Set only by the pure-code invalidation engine (app.services.spec_anchor)
+    # when a commit touches an anchored symbol -- never by an LLM. Records
+    # which symbol, in which commit, so an agent never has to ask "is this
+    # still true" (CTV2-1342).
+    stale_reason = Column(Text, nullable=True)
     supersedes_id = Column(
         String(36), ForeignKey("spec_item.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -1181,6 +1186,47 @@ class SpecItem(ArchivableMixin, Base):
         foreign_keys="SpecRelation.to_id",
         back_populates="to_item",
         cascade="all, delete-orphan",
+    )
+    anchors = relationship(
+        "SpecAnchor", back_populates="spec_item", cascade="all, delete-orphan"
+    )
+
+
+class SpecAnchor(Base):
+    """A pure-code anchor from a spec item to a repo/path/symbol (CTV2-1342).
+
+    ``anchor_sha`` hashes the symbol's source at anchor time (see
+    ``app.services.spec_anchor.compute_anchor_sha``) -- an LLM never supplies
+    it directly. The commit-triggered invalidation engine recomputes the same
+    hash at the changed commit and flips the owning ``spec_item`` to
+    ``stale`` when it no longer matches; the anchor row itself is never
+    rewritten by that engine, only compared against.
+    """
+
+    __tablename__ = "spec_anchor"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    spec_item_id = Column(
+        String(36), ForeignKey("spec_item.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    repo = Column(String(255), nullable=False)
+    path = Column(String(500), nullable=False)
+    symbol = Column(String(300), nullable=False)
+    relation = Column(String(20), nullable=False)
+    anchor_sha = Column(String(64), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    spec_item = relationship("SpecItem", back_populates="anchors")
+
+    __table_args__ = (
+        CheckConstraint(
+            "relation IN ('implements', 'constrains', 'tests', 'documents')",
+            name="ck_spec_anchor_relation",
+        ),
+        UniqueConstraint(
+            "spec_item_id", "repo", "path", "symbol", "relation", name="uq_spec_anchor_target"
+        ),
+        Index("ix_spec_anchor_repo_path", "repo", "path"),
     )
 
 

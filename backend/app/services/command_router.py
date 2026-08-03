@@ -321,6 +321,11 @@ class CommandRouter(
                 'ids': ids,
                 'filter': filters,
             }, ensure_ascii=False)
+        elif canonical_name == 'spec_stale':
+            project = str(args.get('project', '')).strip()
+            if not project:
+                return {'error': 'project is required'}
+            command_args = project
         else:
             return {'error': f'Unknown tool: {tool_name}'}
 
