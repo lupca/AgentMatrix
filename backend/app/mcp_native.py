@@ -39,11 +39,11 @@ from app.services.tool_registry import ToolSpec, get_mcp_tool_specs
 # keep the whole text under 2KB (Claude Code truncates) and make the first
 # ~512 characters self-contained (Codex's effective window).
 SERVER_INSTRUCTIONS = (
-    "Control Tower task orchestration. Your role comes from your token: a "
+    "AGMX task orchestration. Your role comes from your token: a "
     "coordinator token makes you the orchestrator (create, dispatch, review, "
     "approve); an executor token is scoped to one task — work it and report, "
     "coordinator-only tools will reject you. These tools are the ONLY interface: "
-    "never read or modify Control Tower's source code, database, .env, or "
+    "never read or modify AGMX's source code, database, .env, or "
     "processes via shell — a missing capability is a feature request for the "
     "human, not permission to bypass; report errors instead of patching the "
     "platform. Tasks flow todo > dispatched > awaiting-review > in-review > "
@@ -358,7 +358,7 @@ def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
 
 
 def build_server(*, default_token: str = "") -> FastMCP:
-    mcp = FastMCP("control-tower", instructions=SERVER_INSTRUCTIONS)
+    mcp = FastMCP("agmx", instructions=SERVER_INSTRUCTIONS)
     for spec in get_mcp_tool_specs():
         mcp.add_tool(FunctionTool(
             name=spec.name,

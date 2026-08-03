@@ -20,8 +20,8 @@ from app.services.process_manager import ProcessManager, ProcessResult, ProcessS
 from app.core.config import settings
 
 
-SUPPORTED_CLIS = {"agy", "claude", "codex"}
-INSTRUCTION_FILES = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "agy": "PROJECT.md"}
+SUPPORTED_CLIS = {"agy", "claude", "codex", "qwen"}
+INSTRUCTION_FILES = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "agy": "PROJECT.md", "qwen": "CLAUDE.md"}
 COORDINATOR_RULES_PATH = "docs/coordinator-rules.md"
 
 
@@ -70,10 +70,14 @@ def route_model(model: str, provider: str | None = None) -> CLIRoute:
         or (not normalized_model and normalized_provider in {"openai", "codex"})
     ):
         route = CLIRoute("codex", "openai")
+    elif "qwen" in normalized_model or (
+        not normalized_model and normalized_provider == "alibaba"
+    ):
+        route = CLIRoute("qwen", "alibaba")
     else:
         raise ValueError(
             f"Cannot infer CLI for coordinator model '{model}'. "
-            "Use a claude, gemini, or codex model."
+            "Use a claude, gemini, codex, or qwen model."
         )
 
     if normalized_provider and normalized_provider not in {
@@ -187,6 +191,12 @@ def build_cli_command(
         if effort:
             argv += ["--effort", effort]
         argv += ["--print", prompt]
+    elif normalized_cli == "qwen":
+        # qwen uses -m for model, -p for prompt (similar to claude)
+        argv = ["qwen", "-m", model]
+        if mcp_config_path:
+            argv += ["--mcp-config", mcp_config_path]
+        argv += ["-p", prompt]
     else:
         # --mcp-config is not supported by codex exec.
         argv = ["codex", "exec", "-m", model]
@@ -203,7 +213,7 @@ def build_mcp_config(
     """Build the native streamable-HTTP MCP config for any supported CLI."""
 
     del api_url  # retained in the signature for callers migrating from GĐ2
-    return {"mcpServers": {"control-tower": {
+    return {"mcpServers": {"agmx": {
         "type": "http",
         "url": native_url or settings.MCP_NATIVE_URL,
         "headers": {"Authorization": f"Bearer {token}", "X-CT-Role": role},
@@ -214,7 +224,7 @@ def build_instruction_text(source: str) -> str:
     """Create the compact CLI instruction payload from one canonical source."""
 
     summary = (
-        "Control Tower coordinator: use MCP tools only; follow task state "
+        "AGMX coordinator: use MCP tools only; follow task state "
         "todo→dispatched→awaiting-review→in-review→done; obey four-eyes; "
         "read and follow `next` in every tool result.\n\n"
     )

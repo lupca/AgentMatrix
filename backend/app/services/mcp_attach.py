@@ -143,9 +143,9 @@ def attach_mcp(
         argv = shlex.split(command)
         mcp_flags = [
             "-c",
-            f"mcp_servers.control-tower.url={settings.MCP_NATIVE_URL}",
+            f"mcp_servers.agmx.url={settings.MCP_NATIVE_URL}",
             "-c",
-            "mcp_servers.control-tower.bearer_token_env_var=CT_MCP_TOKEN",
+            "mcp_servers.agmx.bearer_token_env_var=CT_MCP_TOKEN",
         ]
         if len(argv) >= 2 and argv[0] == "codex" and argv[1] == "exec":
             argv = argv[:2] + mcp_flags + argv[2:]
@@ -183,7 +183,7 @@ def attach_mcp(
                         mcp_payload = existing
                 except json.JSONDecodeError:
                     pass
-        mcp_payload.setdefault("mcpServers", {})["control-tower"] = {
+        mcp_payload.setdefault("mcpServers", {})["agmx"] = {
             "serverUrl": settings.MCP_NATIVE_URL,
             "headers": {
                 "Authorization": f"Bearer {token}",

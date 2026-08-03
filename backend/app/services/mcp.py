@@ -59,7 +59,7 @@ class MCPClient:
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "control-tower-v2", "version": "1.0"},
+                    "clientInfo": {"name": "agmx", "version": "1.0"},
                 },
                 timeout=10.0,
             )
