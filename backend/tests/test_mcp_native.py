@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 
+import httpx
 import pytest
 from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -111,6 +113,78 @@ async def test_tool_call_end_to_end_through_mcp_client(monkeypatch):
 
     assert body["ok"] is True, body
     assert body["data"]["task"]["id"] == "T-1"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_list_is_filtered_by_token_role(monkeypatch):
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+
+    coordinator = build_server(
+        default_token=issue_token("test-secret", role="coordinator")
+    )
+    executor = build_server(
+        default_token=issue_token("test-secret", role="executor", task_id="task-1")
+    )
+
+    async with Client(coordinator) as coordinator_client:
+        coordinator_tools = await coordinator_client.list_tools()
+    async with Client(executor) as executor_client:
+        executor_tools = await executor_client.list_tools()
+
+    assert len(coordinator_tools) == 28
+    assert len(executor_tools) == 7
+    assert {tool.name for tool in executor_tools} == {
+        "get_impact_radius",
+        "get_minimal_context",
+        "get_run_output",
+        "get_status",
+        "get_task_events",
+        "save_project_context",
+        "wait_for_task",
+    }
+    assert {tool.name for tool in executor_tools} <= {
+        tool.name for tool in coordinator_tools
+    }
+    assert "manage_agent" in {tool.name for tool in coordinator_tools}
+    assert "manage_agent" not in {tool.name for tool in executor_tools}
+
+    async with Client(executor) as executor_client:
+        forbidden = await executor_client.call_tool("manage_agent", {})
+    assert json.loads(forbidden.content[0].text)["error"]["code"] == "forbidden"
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_list_filters_each_http_connection_by_its_token(monkeypatch):
+    """One HTTP server must project a different tools/list for each token."""
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    app = mcp_native.build_http_app()
+
+    def httpx_client_factory(**kwargs):
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+            **kwargs,
+        )
+
+    async with app.router.lifespan_context(app):
+        tokens = [
+            issue_token("test-secret", role="coordinator"),
+            issue_token("test-secret", role="executor", task_id="task-1"),
+        ]
+        projections = []
+        for token in tokens:
+            transport = StreamableHttpTransport(
+                "http://testserver/mcp",
+                auth=token,
+                httpx_client_factory=httpx_client_factory,
+            )
+            async with Client(transport) as client:
+                projections.append(await client.list_tools())
+
+    assert len(projections[0]) == 28
+    assert len(projections[1]) == 7
+    assert "manage_agent" in {tool.name for tool in projections[0]}
+    assert "manage_agent" not in {tool.name for tool in projections[1]}
 
 
 @pytest.mark.asyncio

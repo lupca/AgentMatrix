@@ -265,10 +265,11 @@ tín hiệu trung thực** — không bao giờ để nó chặn.
 ### Đưa graph tool vào prompt executor
 
 Hợp lệ về mặt cơ chế, đã xác nhận: group `research` chứa đúng hai tool,
-`required_role="executor"` (`tool_registry.py:829,847`), `load_tools` là eager
-trong group `meta`, và `_research_repo_root` (`context_handlers.py:45`) lấy
-`repo_root` từ **`Project.repo_root` trong DB** chứ không dò từ cwd — nên
-executor chạy trong worktree vẫn trỏ đúng repo chính.
+`required_role="executor"` (`tool_registry.py:829,847`), và
+`_research_repo_root` (`context_handlers.py:45`) lấy `repo_root` từ
+**`Project.repo_root` trong DB** chứ không dò từ cwd — nên executor chạy trong
+worktree vẫn trỏ đúng repo chính. `DEFERRED_GROUPS`/`load_tools` chỉ phục vụ
+OpenAI tool loop; chúng không làm giảm danh sách schema của MCP.
 
 Bốn cảnh báo:
 
@@ -349,10 +350,19 @@ việc của cơ chế mất hiệu lực. Hỏi LLM tức là quay lại tái s
 
 ## Tool surface
 
-**Một MCP duy nhất, KHÔNG tách endpoint.** Cô lập context bằng cơ chế đã có:
-thêm group `spec` vào `DEFERRED_GROUPS` (`tool_registry.py:41`) và nạp qua
-`load_tools`. Tool không nạp thì không tốn context — đúng mục tiêu ban đầu, chi
-phí hạ tầng bằng 0.
+**Một MCP duy nhất, KHÔNG tách endpoint.** `DEFERRED_GROUPS` và `load_tools`
+không áp dụng cho MCP: chúng là cơ chế riêng của OpenAI tool loop, còn MCP
+luôn công bố projection của registry khi client gọi `tools/list`. Vì vậy không
+được dùng việc thêm group hoặc gọi `load_tools` để tuyên bố đã cô lập context
+MCP.
+
+MCP lọc projection theo role của token ngay lúc liệt kê: coordinator thấy toàn
+bộ 28 tool hiện có, executor chỉ thấy 7 tool có
+`required_role="executor"` (khoảng 79% schema context được loại bỏ). FastMCP
+gọi `list_tools()` theo từng request, nên server dùng một endpoint duy nhất và
+đọc role từ header của từng kết nối; không cần hai instance hoặc hai đường dẫn.
+Kiểm tra `required_role` trong handler vẫn giữ nguyên và là ranh giới an ninh,
+còn lọc lúc liệt kê chỉ là tối ưu context.
 
 > Bản `08-pm-layer.md` từng đề xuất tách `/mcp/pm` và `/mcp/dev`. **Sai.** Lý do
 > bác bỏ: **executor cũng là người tiêu thụ spec chính** — nó phải tra spec và
