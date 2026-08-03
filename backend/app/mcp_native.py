@@ -357,9 +357,50 @@ def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
     return handler
 
 
+class RoleFilteredFastMCP(FastMCP):
+    """FastMCP projection whose tool list follows the connecting token.
+
+    FastMCP invokes ``list_tools`` for every ``tools/list`` request, while the
+    request context still contains the incoming HTTP headers.  Filtering here
+    therefore gives each MCP connection its role-specific schema list without
+    creating separate servers or endpoints.  The handler-level role check in
+    :func:`make_tool_handler` remains the security boundary.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        tool_specs: list[ToolSpec],
+        default_token: str = "",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._mcp_tool_specs = {spec.name: spec for spec in tool_specs}
+        self._default_token = default_token
+
+    async def list_tools(self, *, run_middleware: bool = True):
+        claims = _claims_from_request(self._default_token)
+        tools = await super().list_tools(run_middleware=run_middleware)
+        if claims is None:
+            return []
+        if claims.role == "coordinator":
+            return tools
+        return [
+            tool
+            for tool in tools
+            if self._mcp_tool_specs[tool.name].required_role == "executor"
+        ]
+
+
 def build_server(*, default_token: str = "") -> FastMCP:
-    mcp = FastMCP("agmx", instructions=SERVER_INSTRUCTIONS)
-    for spec in get_mcp_tool_specs():
+    specs = get_mcp_tool_specs()
+    mcp = RoleFilteredFastMCP(
+        "agmx",
+        instructions=SERVER_INSTRUCTIONS,
+        tool_specs=specs,
+        default_token=default_token,
+    )
+    for spec in specs:
         mcp.add_tool(FunctionTool(
             name=spec.name,
             description=spec.description + " Follow the precondition and the `next` field in every result.",
