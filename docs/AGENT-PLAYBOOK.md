@@ -243,6 +243,18 @@ không ai nhìn được trạng thái sau merge.
    ```bash
    alembic merge -m "merge <taskA> va <taskB>" heads && alembic upgrade head
    ```
+4. **LAND ≠ CÓ HIỆU LỰC.** `land_task` merge vào main nhưng KHÔNG restart service.
+   Đã dính: 7 commit land xong nằm im vì backend khởi động trước đó 39 phút —
+   trong đó có cả việc đo token (CTV2-1350), nên nó "done" mà thực tế chưa thu
+   được số nào. Không có lỗi nào báo, task vẫn `done`, test vẫn xanh.
+   ```bash
+   # sau mỗi đợt land, so mốc thời gian:
+   ps -o lstart= -p $(cat .backend.pid)      # backend chạy từ bao giờ
+   git log --since="<mốc đó>" --oneline | wc -l   # bao nhiêu commit chưa hiệu lực
+   ```
+   Restart khi hàng đã rỗng — **đừng restart giữa lúc có run đang chạy**, worker
+   spawn CLI thật, giết giữa chừng làm run chết (`reaped: worker process is dead`).
+   CTV2-1351 sẽ biến việc này thành cảnh báo chủ động.
 4. Task **CTV2-1347** đã thêm guard (test một-head + chặn lúc land). Nếu guard
    báo, đừng vòng qua nó — tạo merge revision cho đàng hoàng.
 
