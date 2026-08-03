@@ -39,9 +39,15 @@ Trong một phiên duy nhất tôi đã khẳng định ba điều nghe rất h�
 | "`spec_clarity` là biến dự báo số vòng tốt nhất" | Nhóm `high` **nhiều vòng hơn** (2.27 vs 1.72). Và 381/391 task chưa từng set nó |
 | "`tasks.priority` chỉ cần kiểm chứng là xếp hàng đúng" | **Không có hàng đợi nào cả** — `check_brakes` trả `queue=True, retry_after=30s` tức là *retry*; priority chỉ dùng chọn agent |
 | "Thêm group vào `DEFERRED_GROUPS` để tiết kiệm context MCP" | `get_mcp_tool_specs()` phơi **toàn bộ** tool qua MCP; docstring nói thẳng cơ chế deferred **không áp dụng** cho MCP |
+| "Agent CLI chạy subscription nên không báo token/cost" | `--output-format json` cho ra **đầy đủ** token, và claude còn cho luôn `total_cost_usd`. Đo thật: `claude -p "say ok" --output-format json` → `cost_usd: 0.1366` |
 
-Nguyên nhân chung: **suy từ tài liệu/tên gọi thay vì đo**. Tên hàm nghe như đang
-làm việc X không có nghĩa nó làm việc X.
+Nguyên nhân chung: **suy từ tài liệu/tên gọi/mô hình kinh doanh thay vì đo**.
+Tên hàm nghe như đang làm việc X không có nghĩa nó làm việc X; "subscription"
+không có nghĩa là không có số liệu token.
+
+Cái thứ tư đau nhất: tôi phát hiện nó **sau khi** đã commit chính mục này với ba
+ví dụ đầu. Viết ra bài học không miễn nhiễm cho mình khỏi chính bài học đó —
+phải *chạy lệnh*, mỗi lần.
 
 Quy tắc: trước khi nói "hệ thống làm Y", chạy đúng một truy vấn hoặc một lệnh
 chứng minh nó. Rẻ hơn nhiều so với xây cả một tầng lên trên giả định sai.

@@ -79,13 +79,32 @@ task vốn đã khó), nhưng **không được dùng số này biện minh cho 
 mới**. Bối cảnh: **381/391 task chưa từng set `spec_clarity`** — cơ chế chốt chất
 lượng sẵn có gần như không ai bật.
 
-**Chi phí hiện KHÔNG đo được.** `llm_usage` có 158 bản ghi, `agent_run_id` và
-`task_id` **NULL toàn bộ**; chỉ agent API ghi được cost (DeepSeek 145, LongCat 12,
-Kimi 1; tổng $1.32), **không bản ghi nào từ agent CLI** vì chạy subscription.
-`_task_cost()` (`task_validators.py:336`) join đúng hai cột NULL đó nên **luôn trả
-0** ⇒ brake `max_cost_usd_per_task` **chưa từng kích hoạt**, dù CLAUDE.md mô tả là
-có. Không được hứa "giảm cost" trước khi sửa attribution. Đại lượng tiêu hao thật
-với agent CLI là **quota và thời gian**, đo bằng **số vòng**.
+**Chi phí chưa đo được — nhưng đo ĐƯỢC, chỉ là chưa nối dây.** `llm_usage` có 158
+bản ghi, `agent_run_id` và `task_id` **NULL toàn bộ**; `_task_cost()`
+(`task_validators.py:336`) join đúng hai cột NULL đó nên **luôn trả 0** ⇒ brake
+`max_cost_usd_per_task` **chưa từng kích hoạt**, dù CLAUDE.md mô tả là có.
+Attribution đã sửa ở CTV2-1338.
+
+> **ĐÍNH CHÍNH (2026-08-04).** Bản trước của file này khẳng định "agent CLI chạy
+> subscription nên không báo cost theo token". **SAI** — đó là suy diễn, không
+> phải đo. Thử thật thì `--output-format json` cho ra đầy đủ:
+>
+> | CLI | input/output tokens | cache | cost USD |
+> |---|---|---|---|
+> | claude | ✅ | ✅ creation + read | ✅ **có sẵn** |
+> | qwen | ✅ | ✅ read | ❌ (phải tự tính từ bảng giá) |
+> | agy | ✅ (+ thinking) | ✅ read | ❌ |
+> | codex | ❌ chỉ có tổng trong text | ❌ | ❌ |
+>
+> Đo lúc 2026-08-04: `claude -p "say ok" --output-format json` → `in:2 out:4
+> cache_read:15273 cost_usd:0.1366`. `agy --output-format json` → `in:18397
+> out:35 thinking:28`. Việc nối dây: **CTV2-1350**.
+>
+> Bài học lặp lại lần thứ tư trong cùng phiên: **đừng suy từ mô hình kinh doanh
+> (subscription ⇒ không có token) — hãy gõ lệnh thử.**
+
+Cho tới khi CTV2-1350 xong, đại lượng tiêu hao đo được vẫn là **số vòng ×
+thời lượng run**, và **không được hứa "giảm cost"** bằng đô-la.
 
 ## Data model
 
