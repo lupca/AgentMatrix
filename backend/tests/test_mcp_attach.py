@@ -32,7 +32,7 @@ def test_attach_mcp_claude(monkeypatch, tmp_path):
 
     with open(config_path, encoding="utf-8") as f:
         data = json.load(f)
-    server = data["mcpServers"]["control-tower"]
+    server = data["mcpServers"]["agmx"]
     assert server["type"] == "http"
     assert server["url"] == "http://localhost:8100/mcp"
     assert "Authorization" in server["headers"]
@@ -58,8 +58,8 @@ def test_attach_mcp_codex(monkeypatch, tmp_path):
     assert token not in final_cmd
 
     # Assert -c flags exist
-    assert "-c mcp_servers.control-tower.url=http://localhost:8100/mcp" in final_cmd
-    assert "-c mcp_servers.control-tower.bearer_token_env_var=CT_MCP_TOKEN" in final_cmd
+    assert "-c mcp_servers.agmx.url=http://localhost:8100/mcp" in final_cmd
+    assert "-c mcp_servers.agmx.bearer_token_env_var=CT_MCP_TOKEN" in final_cmd
 
 
 def test_attach_mcp_agy(monkeypatch, tmp_path):
@@ -79,7 +79,7 @@ def test_attach_mcp_agy(monkeypatch, tmp_path):
     with open(mcp_file, encoding="utf-8") as f:
         data = json.load(f)
 
-    server = data["mcpServers"]["control-tower"]
+    server = data["mcpServers"]["agmx"]
     # CRITICAL: agy schema MUST use serverUrl, NOT url
     assert "serverUrl" in server
     assert server["serverUrl"] == "http://localhost:8100/mcp"
@@ -218,7 +218,7 @@ def test_agy_merges_and_restores_preexisting_user_config(monkeypatch, tmp_path):
 
     merged = json.loads(config_file.read_text(encoding="utf-8"))
     assert "figma" in merged["mcpServers"], "user's server must survive the merge"
-    assert "control-tower" in merged["mcpServers"]
+    assert "agmx" in merged["mcpServers"]
 
     detach_mcp(cleanup)
     restored = json.loads(config_file.read_text(encoding="utf-8"))

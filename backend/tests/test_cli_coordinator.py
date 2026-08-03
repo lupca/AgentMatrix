@@ -231,7 +231,7 @@ def test_build_cli_command_codex_omits_mcp_config():
 def test_build_mcp_config_registers_the_native_http_server():
     config = build_mcp_config("http://localhost:8000", "scoped-token")
 
-    server = config["mcpServers"]["control-tower"]
+    server = config["mcpServers"]["agmx"]
     assert server["type"] == "http"
     assert server["url"] == "http://localhost:8100/mcp"
     assert server["headers"] == {

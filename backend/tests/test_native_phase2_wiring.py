@@ -15,7 +15,7 @@ def test_native_mcp_config_uses_streamable_http():
         "http://localhost:8000", "token", native_url="http://localhost:8100/mcp",
         role="executor",
     )
-    server = config["mcpServers"]["control-tower"]
+    server = config["mcpServers"]["agmx"]
     assert server["type"] == "http"
     assert server["url"].endswith("/mcp")
     assert server["headers"]["Authorization"] == "Bearer token"
