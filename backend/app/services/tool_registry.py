@@ -143,8 +143,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="get_stats",
             description=(
-                "Return recorded API token usage/cost and run statistics. "
-                "cost_status distinguishes measured zero from unmeasured subscription CLI cost. "
+                "Return recorded API/CLI token usage, available USD cost, and run statistics. "
+                "Qwen/Agy token usage is measured but has no authoritative USD amount. "
                 "Use task_id or agent_id to narrow the report."
             ),
             parameters={

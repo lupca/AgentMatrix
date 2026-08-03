@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
@@ -143,6 +144,97 @@ def _json_line(line: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
+def _json_objects(stdout: str) -> list[dict[str, Any]]:
+    """Return JSON objects found in JSONL or whole-document CLI output."""
+    objects: list[dict[str, Any]] = []
+    for line in (stdout or "").splitlines():
+        value = _json_line(line.strip())
+        if value is not None:
+            objects.append(value)
+    try:
+        value = json.loads(stdout)
+    except (TypeError, json.JSONDecodeError):
+        value = None
+    if isinstance(value, dict) and value not in objects:
+        objects.append(value)
+    return objects
+
+
+def _nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _nonnegative_float(value: Any) -> float | None:
+    try:
+        converted = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, converted) if math.isfinite(converted) else None
+
+
+def parse_cli_token_usage(cli: str, stdout: str) -> dict[str, Any] | None:
+    """Extract measured token usage from a CLI's JSON result output.
+
+    Claude, Qwen, and Agy use slightly different result schemas.  This
+    parser deliberately accepts both JSONL and a single pretty-printed JSON
+    document, and returns ``None`` for unsupported or malformed output so a
+    usage-format change cannot fail an agent run.
+    """
+    vendor = (cli or "").strip().lower()
+    if vendor not in {"claude", "qwen", "agy"}:
+        return None
+
+    for data in reversed(_json_objects(stdout)):
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            continue
+
+        if vendor == "claude":
+            cached_tokens = usage.get("cache_read_input_tokens", 0)
+        elif vendor == "agy":
+            cached_tokens = usage.get("cache_read_tokens", 0)
+        else:
+            cached_tokens = usage.get("cache_read_input_tokens", 0)
+            if not cached_tokens:
+                stats = data.get("stats")
+                models = stats.get("models") if isinstance(stats, dict) else None
+                if isinstance(models, dict):
+                    cached_tokens = next(
+                        (
+                            model_data.get("tokens", {}).get("cached", 0)
+                            for model_data in models.values()
+                            if isinstance(model_data, dict)
+                            and isinstance(model_data.get("tokens"), dict)
+                        ),
+                        0,
+                    )
+
+        result: dict[str, Any] = {
+            "input_tokens": _nonnegative_int(usage.get("input_tokens")),
+            "output_tokens": _nonnegative_int(usage.get("output_tokens")),
+            "cached_tokens": _nonnegative_int(cached_tokens),
+        }
+
+        if vendor == "claude" and data.get("total_cost_usd") is not None:
+            cost_usd = _nonnegative_float(data["total_cost_usd"])
+            if cost_usd is not None:
+                result["cost_usd"] = cost_usd
+        model_usage = data.get("modelUsage")
+        if isinstance(model_usage, dict):
+            for model_data in model_usage.values():
+                if not isinstance(model_data, dict) or model_data.get("costUSD") is None:
+                    continue
+                cost_usd = _nonnegative_float(model_data["costUSD"])
+                if cost_usd is not None:
+                    result["cost_usd"] = cost_usd
+                break
+        return result
+    return None
+
+
 def _vendor_event(event_type: str, payload: dict[str, Any], timestamp: datetime | None = None) -> dict:
     if event_type not in AGENT_EVENT_TYPES:
         return {}
@@ -214,15 +306,37 @@ parse_cli_output = parse_vendor_event
 
 
 _EXPLICIT_RESULT_REF = re.compile(
-    r"^\s*(?:result[_-]ref|result reference)\s*:\s*([^\s]+)\s*$",
-    re.IGNORECASE,
+    r"^[ \t]*(?:result[_-]ref|result reference)[ \t]*:[ \t]*([^\s]+)[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
 def _extract_explicit_result_ref(line: str) -> str | None:
-    """Read the optional commit ref convention emitted by an executor."""
-    match = _EXPLICIT_RESULT_REF.match(line)
-    return match.group(1) if match else None
+    """Read RESULT_REF from plain text or a CLI JSON result payload."""
+    match = _EXPLICIT_RESULT_REF.search(line or "")
+    if match:
+        return match.group(1)
+
+    def visit(value: Any) -> str | None:
+        if isinstance(value, str):
+            nested = _EXPLICIT_RESULT_REF.search(value)
+            return nested.group(1) if nested else None
+        if isinstance(value, dict):
+            for item in value.values():
+                found = visit(item)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = visit(item)
+                if found:
+                    return found
+        return None
+
+    try:
+        return visit(json.loads(line))
+    except (TypeError, json.JSONDecodeError):
+        return None
 
 
 def _record_agent_event(

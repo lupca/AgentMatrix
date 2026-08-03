@@ -2,7 +2,7 @@ import json
 import logging
 from collections.abc import Mapping
 
-from sqlalchemy import or_
+from sqlalchemy import exists, or_
 
 from app.db.models import (
     AgentRun,
@@ -68,23 +68,43 @@ class AdminHandlersMixin:
                 resources = resources.filter(AgentRun.agent_id == agent_id)
         resource_rows = resources.all()
         measured_calls = len(usage)
-        unmeasured_cli_runs = cli_runs.count()
+        has_usage = exists().where(LLMUsage.agent_run_id == AgentRun.id)
+        unmeasured_cli_runs = cli_runs.filter(~has_usage).count()
+        unpriced_cli_usage = [
+            row for row in usage if str(row.provider or "").lower() in {"qwen", "agy"}
+        ]
+        known_cost_usd = sum(
+            float(row.cost_usd or 0)
+            for row in usage
+            if row not in unpriced_cli_usage
+        )
         if measured_calls and unmeasured_cli_runs:
             cost_status = 'partial'
             cost_note = (
-                'Recorded API usage is measured; subscription CLI run cost is not measured.'
+                'Some usage is measured, but at least one CLI run has no parsed token usage.'
             )
         elif measured_calls:
             cost_status = 'measured'
-            cost_note = 'Recorded API usage is measured, including a measured value of zero.'
+            cost_note = 'Token usage was parsed from CLI JSON output.'
         elif unmeasured_cli_runs:
             cost_status = 'unmeasured'
             cost_note = (
-                'Subscription CLI runs do not expose authoritative token cost; zero is not a cost estimate.'
+                'No CLI token usage was parsed; zero is not a cost estimate.'
             )
         else:
             cost_status = 'no_data'
             cost_note = 'No recorded API usage or completed CLI run is available for this scope.'
+        if unpriced_cli_usage:
+            cost_note += (
+                ' Qwen/Agy expose measured tokens but no authoritative USD cost; '
+                'cost_usd excludes those runs.'
+            )
+        cost_value = known_cost_usd
+        if unpriced_cli_usage and cost_value == 0:
+            cost_value = None
+        run_cost_value = sum(float(row.estimated_cost_usd or 0) for row in resource_rows)
+        if unpriced_cli_usage and run_cost_value == 0 and known_cost_usd == 0:
+            run_cost_value = None
         return {
             'task_id': task_id,
             'agent_id': agent_id,
@@ -92,15 +112,17 @@ class AdminHandlersMixin:
             'input_tokens': sum(row.input_tokens or 0 for row in usage),
             'output_tokens': sum(row.output_tokens or 0 for row in usage),
             'cached_tokens': sum(row.cached_tokens or 0 for row in usage),
-            'cost_usd': round(sum(float(row.cost_usd or 0) for row in usage), 8),
+            'cost_usd': round(cost_value, 8) if cost_value is not None else None,
             'cost_status': cost_status,
-            'cost_scope': 'recorded_api_usage_only',
+            'cost_scope': (
+                'recorded_usage' if measured_calls else 'recorded_api_usage_only'
+            ),
             'unmeasured_cli_runs': unmeasured_cli_runs,
             'cost_note': cost_note,
             'runs': len(resource_rows),
-            'run_cost_usd': round(
-                sum(float(row.estimated_cost_usd or 0) for row in resource_rows), 8
-            ),
+            'run_cost_usd': round(run_cost_value, 8)
+            if run_cost_value is not None
+            else None,
         }
 
     async def _handle_suggest_agents(self, args: str, session_id: str) -> dict:

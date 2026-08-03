@@ -18,6 +18,7 @@ from app.db.models import (
     AgentRun,
     AuditLog,
     GateRecord,
+    LLMUsage,
     Project,
     Session,
     Setting,
@@ -150,6 +151,43 @@ def test_run_agent_persists_output_and_success(worker_db, git_repo_root):
         "result_ref": run.result_ref,
         "exit_code": 0,
     }
+    db.close()
+
+
+def test_json_cli_output_records_usage_and_keeps_result_ref_flow(
+    worker_db, git_repo_root
+):
+    command = (
+        "echo change > json-output.txt && git add json-output.txt "
+        "&& git commit -q -m json-output "
+        "&& ref=$(git rev-parse HEAD) "
+        "&& printf '%s\\n' "
+        "'{\"usage\":{\"input_tokens\":10,\"output_tokens\":4,"
+        "\"cache_read_tokens\":2},\"result\":\"RESULT_REF: '"
+        '"$ref"'
+        "'\"}'"
+    )
+    result = runner.run_agent.fn(
+        "run-001",
+        "RUN-001",
+        command,
+        git_repo_root,
+        5,
+    )
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    usage = db.query(LLMUsage).one()
+    assert result == 0
+    assert run.status == "success"
+    assert usage.agent_run_id == run.id
+    assert usage.task_id == "RUN-001"
+    assert usage.input_tokens == 10
+    assert usage.output_tokens == 4
+    assert usage.cached_tokens == 2
+    assert run.result_ref and ".." in run.result_ref
+    assert run.output_lines == 1
+    assert run.agent_events[-1].event_type == "run.completed"
     db.close()
 
 
