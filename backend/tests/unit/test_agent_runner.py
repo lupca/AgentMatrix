@@ -786,7 +786,7 @@ def wake_db(monkeypatch, tmp_path):
     programmatic_turn = AsyncMock()
     programmatic_turn.session_ids = []
 
-    async def persist_turn(session, message, *, source_event_id):
+    async def persist_turn(session, message, *, source_event_id, agent_run_id=None):
         programmatic_turn.session_ids.append(session.id)
         session.messages = list(session.messages or []) + [
             {
@@ -826,7 +826,9 @@ def _wake_session(factory, session_id, *, status="active", activity=None):
     db.close()
 
 
-def _wake_event(factory, task_id, *, session_id=None, kind="decision"):
+def _wake_event(
+    factory, task_id, *, session_id=None, kind="decision", run_id=None
+):
     db = factory()
     db.add(
         Task(
@@ -842,7 +844,11 @@ def _wake_event(factory, task_id, *, session_id=None, kind="decision"):
         task_id=task_id,
         event_type="run_failed" if kind == "decision" else "progress",
         kind=kind,
-        payload={"error": "execute failed", "result": {"exit_code": 1}},
+        payload={
+            "error": "execute failed",
+            "result": {"exit_code": 1},
+            **({"run_id": run_id} if run_id else {}),
+        },
         db=db,
     )
     event_id = event.id
@@ -855,7 +861,9 @@ def test_wake_coordinator_routes_two_session_failure_to_origin_once(wake_db):
     now = datetime.now(timezone.utc)
     _wake_session(factory, "origin", activity=now - timedelta(minutes=5))
     _wake_session(factory, "newer", activity=now)
-    event_id = _wake_event(factory, "WAKE-ORIGIN", session_id="origin")
+    event_id = _wake_event(
+        factory, "WAKE-ORIGIN", session_id="origin", run_id="origin-run"
+    )
 
     assert runner.wake_coordinator.fn(event_id) == "completed"
 
@@ -878,6 +886,7 @@ def test_wake_coordinator_routes_two_session_failure_to_origin_once(wake_db):
         "update_task",
         "verdict",
     }
+    assert programmatic_turn.await_args.kwargs["agent_run_id"] == "origin-run"
 
 
 def test_wake_coordinator_falls_back_to_newest_active_global_session(wake_db):

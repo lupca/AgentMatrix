@@ -38,6 +38,22 @@
   task thoát treo qua service chính thống.
 - Watchdog no-progress: xem `03-gates-and-autonomy.md` (bẫy CLI im lặng).
 
+## Phạm vi đo chi phí LLM
+
+- `llm_usage` chỉ ghi token/cost khi provider API trả usage có thẩm quyền. Với
+  session task-scoped, mỗi bản ghi mang `task_id`; turn xử lý một run cụ thể còn
+  mang `agent_run_id`. Brake `max_cost_usd_per_task` vì vậy chỉ phản ánh phần
+  chi phí API đã ghi nhận.
+- Agent CLI executor (`claude`, `agy`, `codex`, `qwen`) hiện chạy bằng
+  subscription và command stdout hiện tại không cung cấp usage/cost có thẩm
+  quyền. Không parse ước lượng từ độ dài text và không sinh `LLMUsage` giả cho
+  các run này. `RunResourceUsage.estimated_cost_usd = 0` trong trường hợp đó có
+  nghĩa là **không đo được**, không có nghĩa run miễn phí.
+- `get_stats.cost_scope` là `recorded_api_usage_only` và `cost_status` phân biệt:
+  `measured` (có usage API, kể cả cost thật bằng 0), `partial` (có usage API và
+  có CLI run chưa đo), `unmeasured` (chỉ có CLI run), `no_data` (không có dữ
+  liệu). `unmeasured_cli_runs` cho biết số run nằm ngoài coverage của cost.
+
 ## Coordinator workspace
 
 - Init: `./scripts/init-coordinator-workdir.sh <dir> [ttl]` — sinh AGENTS.md/

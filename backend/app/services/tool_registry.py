@@ -142,7 +142,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="get_stats",
             description=(
-                "Return server-computed token usage, cost, and run statistics. "
+                "Return recorded API token usage/cost and run statistics. "
+                "cost_status distinguishes measured zero from unmeasured subscription CLI cost. "
                 "Use task_id or agent_id to narrow the report."
             ),
             parameters={

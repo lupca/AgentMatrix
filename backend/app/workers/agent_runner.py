@@ -140,6 +140,7 @@ def wake_coordinator(event_id: int) -> str:
                 session,
                 message,
                 source_event_id=event.id,
+                agent_run_id=(event.payload or {}).get("run_id"),
             )
         )
         return "completed"

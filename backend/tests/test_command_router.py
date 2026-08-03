@@ -97,6 +97,64 @@ async def test_command_router_get_status(db_session):
 
 
 @pytest.mark.asyncio
+async def test_get_stats_distinguishes_measured_zero_from_unmeasured_cli_cost(db_session):
+    from app.db.models import AgentRun, LLMUsage, Project, RunResourceUsage, Task
+
+    project = Project(id="stats-project", name="Stats Project")
+    measured_task = Task(
+        id="STATS-API",
+        project=project.id,
+        title="Measured API cost",
+    )
+    cli_task = Task(
+        id="STATS-CLI",
+        project=project.id,
+        title="Unmeasured CLI cost",
+    )
+    cli_run = AgentRun(
+        id="stats-cli-run",
+        task_id=cli_task.id,
+        agent_id="@cli-agent",
+        cli="codex",
+        command="codex exec task",
+        status="success",
+    )
+    db_session.add_all([
+        project,
+        measured_task,
+        cli_task,
+        cli_run,
+        LLMUsage(
+            task_id=measured_task.id,
+            model="zero-cost-api-model",
+            provider="api",
+            operation="chat",
+            input_tokens=10,
+            output_tokens=5,
+            cost_usd="0",
+        ),
+        RunResourceUsage(agent_run_id=cli_run.id, estimated_cost_usd="0"),
+    ])
+    db_session.commit()
+    router = CommandRouter(db_session)
+
+    measured = await router.execute_tool(
+        "get_stats", {"task_id": measured_task.id}, "stats-session"
+    )
+    unmeasured = await router.execute_tool(
+        "get_stats", {"task_id": cli_task.id}, "stats-session"
+    )
+
+    assert measured["cost_usd"] == 0
+    assert measured["cost_status"] == "measured"
+    assert measured["unmeasured_cli_runs"] == 0
+    assert unmeasured["cost_usd"] == 0
+    assert unmeasured["cost_status"] == "unmeasured"
+    assert unmeasured["unmeasured_cli_runs"] == 1
+    assert unmeasured["cost_scope"] == "recorded_api_usage_only"
+
+
+@pytest.mark.asyncio
 async def test_create_task_uses_explicit_project_and_prefix(db_session):
     """CTV2-092 AC: no more hardcoded project='default'; explicit --project
     is used, and the ID is derived from Project.task_prefix + a counter."""
