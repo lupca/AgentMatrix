@@ -1,7 +1,7 @@
 import json
 from collections.abc import Mapping
 
-from app.services.spec_service import SpecError, get_specs, write_specs
+from app.services.spec_service import SpecError, get_specs, get_stale_specs, write_specs
 
 
 class SpecHandlersMixin:
@@ -38,5 +38,14 @@ class SpecHandlersMixin:
             ) if key in payload}
         try:
             return get_specs(self.db, ids=ids, filters=filters)
+        except SpecError as exc:
+            return {"error": str(exc)}
+
+    async def _handle_spec_stale(self, args: str, session_id: str) -> dict:
+        project_id = (args or "").strip()
+        if not project_id:
+            return {"error": "project is required"}
+        try:
+            return get_stale_specs(self.db, project_id)
         except SpecError as exc:
             return {"error": str(exc)}

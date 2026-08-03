@@ -10,13 +10,15 @@ from typing import Any
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from app.db.models import SpecItem, SpecRelation
+from app.db.models import SpecAnchor, SpecItem, SpecRelation
+from app.services.spec_anchor import compute_anchor_sha
 
 
 SPEC_KINDS = {"requirement", "decision", "constraint", "interface", "design"}
 SPEC_STATUSES = {"draft", "active", "stale", "superseded"}
 SPEC_CONFIDENCES = {"asserted", "derived", "verified"}
 RELATION_KINDS = {"conflicts_with", "duplicates", "refines", "depends_on"}
+ANCHOR_RELATION_KINDS = {"implements", "constrains", "tests", "documents"}
 
 _ITEM_FIELDS = {
     "project_id", "kind", "title", "body", "status", "supersedes_id",
@@ -135,6 +137,14 @@ def _relation_snapshot(relation: SpecRelation) -> dict[str, str]:
     return {"from_id": relation.from_id, "to_id": relation.to_id, "kind": relation.kind}
 
 
+def _anchor_snapshot(anchor: SpecAnchor) -> dict[str, str]:
+    return {
+        "id": anchor.id, "spec_item_id": anchor.spec_item_id, "repo": anchor.repo,
+        "path": anchor.path, "symbol": anchor.symbol, "relation": anchor.relation,
+        "anchor_sha": anchor.anchor_sha,
+    }
+
+
 def write_specs(
     db: Session,
     operations: list[Mapping[str, Any]],
@@ -147,6 +157,7 @@ def write_specs(
     pending: dict[str, SpecItem] = {}
     written: list[SpecItem] = []
     written_relations: list[SpecRelation] = []
+    written_anchors: list[SpecAnchor] = []
     try:
         for operation in operations:
             if not isinstance(operation, Mapping):
@@ -226,8 +237,43 @@ def write_specs(
                 relation = SpecRelation(from_id=from_id, to_id=to_id, kind=relation_kind)
                 db.add(relation)
                 written_relations.append(relation)
+            elif name == "anchor":
+                item_id = _clean_string(
+                    operation.get("spec_item_id", operation.get("item_id", operation.get("id"))),
+                    "spec_item_id", required=True,
+                )
+                item = _resolve_item(db, item_id, pending)
+                repo = _clean_string(operation.get("repo"), "repo", required=True)
+                path = _clean_string(operation.get("path"), "path", required=True)
+                symbol = _clean_string(operation.get("symbol"), "symbol", required=True)
+                anchor_relation = _clean_string(operation.get("relation"), "relation", required=True)
+                if anchor_relation not in ANCHOR_RELATION_KINDS:
+                    raise SpecError(f"anchor relation must be one of {sorted(ANCHOR_RELATION_KINDS)}")
+                anchor_sha = _clean_string(operation.get("anchor_sha"), "anchor_sha")
+                if not anchor_sha:
+                    anchor_sha = compute_anchor_sha(repo, path, symbol)
+                    if not anchor_sha:
+                        raise SpecError(
+                            f"could not resolve symbol '{symbol}' in {path} under {repo}; "
+                            "pass anchor_sha explicitly if that path isn't checked out here"
+                        )
+                exists = db.query(SpecAnchor).filter_by(
+                    spec_item_id=item.id, repo=repo, path=path, symbol=symbol, relation=anchor_relation
+                ).first()
+                if exists is not None or any(
+                    a.spec_item_id == item.id and a.repo == repo and a.path == path
+                    and a.symbol == symbol and a.relation == anchor_relation
+                    for a in written_anchors
+                ):
+                    continue
+                anchor = SpecAnchor(
+                    spec_item_id=item.id, repo=repo, path=path, symbol=symbol,
+                    relation=anchor_relation, anchor_sha=anchor_sha,
+                )
+                db.add(anchor)
+                written_anchors.append(anchor)
             else:
-                raise SpecError("op must be one of create, update, supersede, relation")
+                raise SpecError("op must be one of create, update, supersede, relation, anchor")
 
         # SessionLocal has autoflush=False; this is intentionally explicit.
         db.flush()
@@ -241,6 +287,7 @@ def write_specs(
         "action": "spec_written", "count": len(operations),
         "items": [_item_snapshot(item) for item in unique_items],
         "relations": [_relation_snapshot(relation) for relation in written_relations],
+        "anchors": [_anchor_snapshot(anchor) for anchor in written_anchors],
     }
 
 
@@ -326,4 +373,37 @@ def get_specs(
         "action": "spec_fetched", "count": len(items),
         "items": [_item_snapshot(item, by_item[item.id]) for item in items],
         "relations": relation_data,
+    }
+
+
+def get_stale_specs(db: Session, project_id: str) -> dict[str, Any]:
+    """List active spec_item rows the commit-invalidation engine flagged stale.
+
+    Read-only projection of state the invalidation engine already wrote
+    (see `app.services.spec_anchor.apply_commit_staleness`) -- this never
+    recomputes staleness itself, so it stays cheap and LLM-free.
+    """
+    project_id = _clean_string(project_id, "project", required=True)
+    items = (
+        db.query(SpecItem)
+        .filter(
+            SpecItem.project_id == project_id,
+            SpecItem.status == "stale",
+            SpecItem.archived_at.is_(None),
+        )
+        .order_by(SpecItem.updated_at.desc())
+        .all()
+    )
+    return {
+        "action": "spec_stale_fetched",
+        "project_id": project_id,
+        "count": len(items),
+        "items": [
+            {
+                "id": item.id, "kind": item.kind, "title": item.title,
+                "status": item.status, "reason": item.stale_reason,
+                "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+            }
+            for item in items
+        ],
     }

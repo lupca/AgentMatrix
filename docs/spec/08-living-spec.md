@@ -1,8 +1,14 @@
 # 08 — Hệ spec sống
 
-> **TRẠNG THÁI: THIẾT KẾ, CHƯA TRIỂN KHAI.** File này mô tả tầng dự định xây,
-> không phải hiện trạng code. Khi bắt đầu code, cập nhật lại mục nào đã có thật.
-> Mọi bảng/tool có tiền tố `spec_`, `impl_`, `pm_` đều chưa tồn tại.
+> **TRẠNG THÁI: MỘT PHẦN ĐÃ TRIỂN KHAI.** Đã có thật trong code (CTV2-1341,
+> CTV2-1342): bảng `spec_item`/`spec_relation`/`spec_anchor`, cột
+> `spec_item.stale_reason`, tool `spec_write`/`spec_get`/`spec_stale`, và cơ
+> chế mất hiệu lực thuần code ở mục *Cơ chế mất hiệu lực* dưới đây
+> (`backend/app/services/spec_anchor.py`, hook vào `_publish_graph_rebuild`
+> trong `backend/app/services/outbox.py`). Phần còn lại của file (spec_search,
+> spec_link như tool riêng, impl_design, pm_wbs_node, pm_document) **vẫn chỉ
+> là thiết kế, chưa triển khai** — mọi bảng/tool có tiền tố đó khác các bảng
+> liệt kê ở trên đều chưa tồn tại.
 >
 > Bản trước của file này tên `08-pm-layer.md`, xoay quanh WBS/lịch/critical
 > path. Đã cắt phần lớn — xem mục *Đã cắt gì và vì sao* ở cuối.
@@ -91,6 +97,7 @@ spec_item (
   kind,              -- requirement | decision | constraint | interface | design
   title, body,
   status,            -- draft | active | stale | superseded
+  stale_reason,      -- ghi bởi cơ chế mất hiệu lực: symbol nào, commit nào (CTV2-1342)
   supersedes_id,
   source_doc_id,     -- pm_document sinh ra nó
 
@@ -198,6 +205,19 @@ agent chỉ suy lại NHỮNG CÁI bị gắn cờ, phần còn lại truy vấn
 
 Chạy trong worker, kích hoạt bởi cùng sự kiện commit mà `land_task` dùng. Không
 cần LLM — thuần code.
+
+**Đã triển khai (CTV2-1342):** `app.services.spec_anchor.apply_commit_staleness`,
+gọi từ `_publish_graph_rebuild` trong `app.services.outbox` — cùng
+`OutboxEvent(event_type="graph_rebuild_requested")` mà CTV2-1339 dùng để
+rebuild graph, không dựng event mới. `anchor_sha` băm bằng
+`hash_symbol_source` trên block trích ra bởi `extract_symbol_source` (khớp
+định nghĩa theo dòng `def/class/function/...`, cắt block theo indent hoặc
+brace-depth — heuristic, không cần parser riêng theo ngôn ngữ). Diff dùng
+`git diff --name-only <before> <after>`: với sha đơn (merge commit của
+`land_task`) thì `before = sha^1`; với `result_ref` dạng `<base>..<head>`
+(worktree trước khi land) thì dùng thẳng làm range. Neo tạo qua op `"anchor"`
+của tool `spec_write` sẵn có (không tách tool `spec_link` riêng — ngoài phạm
+vi CTV2-1342). Đọc: tool `spec_stale(project)`, `required_role="executor"`.
 
 Hệ quả quan trọng: **truy vấn spec trở nên rẻ và ổn định**. Hai agent hỏi cùng câu
 ở cùng thời điểm sẽ nhận cùng câu trả lời, khác hẳn tình trạng "mỗi lần đọc ra
@@ -364,14 +384,13 @@ phí hạ tầng bằng 0.
 > `get_minimal_context`/`get_impact_radius` hiện nay.
 
 ```
-spec_search(project, query, kinds?)     → tìm trùng/xung đột TRƯỚC khi tạo task
-spec_get(ids[] | anchor)                → đọc spec_item + neo + quan hệ
-spec_write(ops[])                       → tạo/sửa/supersede theo lô
-spec_link(ops[])                        → neo vào code, nối quan hệ spec-spec
-spec_stale(project)                     → cái gì đang lỗi thời và vì sao
-impl_design(action, task_id, ...)       → soạn/đọc/chấm bản thiết kế thực thi
-pm_plan(project, ops?)                  → WBS: đọc cả cây hoặc sửa theo lô
-pm_document(action, project, doc_type)  → charter/scope/template
+spec_search(project, query, kinds?)     → tìm trùng/xung đột TRƯỚC khi tạo task           [chưa làm]
+spec_get(ids[] | anchor)                → đọc spec_item + quan hệ                         [đã làm — chưa trả neo]
+spec_write(ops[])                       → tạo/sửa/supersede theo lô + op "anchor" để neo   [đã làm]
+spec_stale(project)                     → cái gì đang lỗi thời và vì sao                   [đã làm]
+impl_design(action, task_id, ...)       → soạn/đọc/chấm bản thiết kế thực thi              [chưa làm]
+pm_plan(project, ops?)                  → WBS: đọc cả cây hoặc sửa theo lô                 [chưa làm]
+pm_document(action, project, doc_type)  → charter/scope/template                           [chưa làm]
 ```
 
 Tối ưu token bằng **một lệnh đọc béo + mutation theo lô**: `spec_get` và
@@ -432,10 +451,11 @@ Xếp sao cho thứ rẻ và chặn cửa đi trước:
         rồi mới thêm hướng dẫn vào prompt
 
 1. Lõi spec sống                     2. Chất lượng đầu vào
-   1.1  Bảng spec_* + migration         2.1  impl_design + chấm completeness
-   1.2  spec_write / spec_get           2.2  Chốt dispatch theo completeness
+   1.1  Bảng spec_* + migration [xong]  2.1  impl_design + chấm completeness
+   1.2  spec_write / spec_get [xong]    2.2  Chốt dispatch theo completeness
    1.3  Neo + cơ chế mất hiệu lực       2.3  Thí nghiệm đối chứng: đo vòng
-   1.4  spec_search (cần 0.2)                trước/sau khi có impl_design
+        [xong — CTV2-1342]                  trước/sau khi có impl_design
+   1.4  spec_search (cần 0.2)
 
 3. Khung nhìn việc
    3.1  pm_wbs_node + quy tắc 100%

@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 
 from app.db.models import AgentRun, OutboxEvent, Project, Task
+from app.services.spec_anchor import apply_commit_staleness
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,7 @@ def _publish_graph_rebuild(db: Session, event: OutboxEvent, now: datetime) -> No
     payload = event.payload or {}
     project_id = payload.get("project_id")
     repo_root = payload.get("repo_root")
+    commit_sha = payload.get("commit_sha")
 
     project = db.get(Project, project_id) if project_id else None
     if project is not None:
@@ -198,6 +200,11 @@ def _publish_graph_rebuild(db: Session, event: OutboxEvent, now: datetime) -> No
     try:
         if repo_root:
             rebuild_graph_incremental_sync(repo_root)
+        if repo_root and commit_sha and project_id:
+            # Same commit event CTV2-1339 uses for graph rebuild also drives
+            # the living-spec invalidation engine (CTV2-1342) -- one event
+            # source, two side effects, per the spec's coordination note.
+            apply_commit_staleness(db, project_id, repo_root, commit_sha)
         if project is not None:
             project.graph_status = "fresh"
         event.published_at = now

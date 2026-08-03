@@ -26,7 +26,7 @@ def db_session():
 
 
 def test_registry_has_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 31
+    assert len(TOOL_REGISTRY) == 32
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
@@ -58,6 +58,7 @@ def test_registry_has_tools_with_unique_names():
         'save_project_context',
         'spec_write',
         'spec_get',
+        'spec_stale',
         'load_tools',
     ]
     for name, spec in TOOL_REGISTRY.items():
@@ -152,7 +153,7 @@ def test_get_group_tool_definitions_returns_deferred_tools_by_group():
     }
 
     spec = get_group_tool_definitions('spec')
-    assert {t['name'] for t in spec} == {'spec_write', 'spec_get'}
+    assert {t['name'] for t in spec} == {'spec_write', 'spec_get', 'spec_stale'}
 
     assert get_group_tool_definitions('nonexistent') is None
 
@@ -174,6 +175,7 @@ def test_load_tools_schema_lists_research_group():
 def test_spec_tools_are_executor_only():
     assert TOOL_REGISTRY['spec_write'].required_role == 'executor'
     assert TOOL_REGISTRY['spec_get'].required_role == 'executor'
+    assert TOOL_REGISTRY['spec_stale'].required_role == 'executor'
 
 
 def test_command_router_commands_derived_from_registry():
