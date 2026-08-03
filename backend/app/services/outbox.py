@@ -68,6 +68,69 @@ def record_run_requested(db: Session, run: AgentRun, repo_root: str) -> OutboxEv
     return event
 
 
+def record_graph_rebuild_requested(
+    db: Session, project_id: str, repo_root: str, commit_sha: str | None = None
+) -> OutboxEvent | None:
+    """Write the outbox row for a graph rebuild request in the caller's transaction.
+
+    Moves project.graph_status to 'stale' (if idle or fresh) and queues an outbox event.
+    """
+    project = db.get(Project, project_id)
+    if project is not None:
+        if project.graph_status != "building":
+            project.graph_status = "stale"
+
+    existing = (
+        db.query(OutboxEvent)
+        .filter(
+            OutboxEvent.event_type == "graph_rebuild_requested",
+            OutboxEvent.published_at.is_(None),
+            OutboxEvent.dead_letter.is_(False),
+        )
+        .all()
+    )
+    for evt in existing:
+        if (evt.payload or {}).get("project_id") == project_id:
+            return evt
+
+    event = OutboxEvent(
+        event_type="graph_rebuild_requested",
+        payload={
+            "project_id": project_id,
+            "repo_root": repo_root,
+            "commit_sha": commit_sha,
+        },
+    )
+    db.add(event)
+    return event
+
+
+def record_commit_event(
+    db: Session, project_id: str, repo_root: str, commit_sha: str | None = None
+) -> OutboxEvent | None:
+    """Trigger incremental graph rebuild outbox event on code commit."""
+    return record_graph_rebuild_requested(db, project_id, repo_root, commit_sha)
+
+
+def rebuild_graph_incremental_sync(repo_root: str, timeout: float = 60.0) -> dict[str, Any]:
+    import asyncio
+    import concurrent.futures
+    from app.services.graph_client import rebuild_graph_incremental
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(
+                lambda: asyncio.run(rebuild_graph_incremental(repo_root, timeout))
+            ).result()
+    else:
+        return asyncio.run(rebuild_graph_incremental(repo_root, timeout))
+
+
 def publish_pending_events(
     db: Session, *, limit: int = 50, now: datetime | None = None
 ) -> dict[str, int]:
@@ -119,7 +182,39 @@ def _backoff_elapsed(event: OutboxEvent, now: datetime) -> bool:
     return (now - last_attempted_at).total_seconds() >= delay
 
 
+def _publish_graph_rebuild(db: Session, event: OutboxEvent, now: datetime) -> None:
+    payload = event.payload or {}
+    project_id = payload.get("project_id")
+    repo_root = payload.get("repo_root")
+
+    project = db.get(Project, project_id) if project_id else None
+    if project is not None:
+        project.graph_status = "building"
+        db.flush()
+
+    event.attempts += 1
+    event.last_attempted_at = now
+
+    try:
+        if repo_root:
+            rebuild_graph_incremental_sync(repo_root)
+        if project is not None:
+            project.graph_status = "fresh"
+        event.published_at = now
+        event.last_error = None
+    except Exception as exc:
+        logger.exception("outbox: graph rebuild failed for project %s: %s", project_id, exc)
+        event.last_error = str(exc)[:2000]
+        if project is not None:
+            project.graph_status = "stale"
+        if event.attempts >= MAX_PUBLISH_ATTEMPTS:
+            event.dead_letter = True
+
+
 def _publish_one(db: Session, event: OutboxEvent, now: datetime) -> None:
+    if event.event_type == "graph_rebuild_requested":
+        _publish_graph_rebuild(db, event, now)
+        return
     # Deferred: app.workers.agent_runner imports app.services.task_orchestration
     # at module scope, which (via this module) would otherwise be a cycle.
     from app.workers.agent_runner import run_agent

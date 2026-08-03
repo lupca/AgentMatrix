@@ -39,6 +39,7 @@ from app.services.process_manager import (
     WorktreeManager,
     WorktreeUnsupportedError,
 )
+from app.services.outbox import record_commit_event
 from app.services.task_event_service import emit_task_event
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.services.tool_metrics import record_tool_metric
@@ -1040,6 +1041,15 @@ def execute_agent_run(
                         idempotency_key=f"run:{run.id}:execution-success",
                         run_id=run.id,
                     )
+                    from app.db.models import Task
+                    task_obj = db.get(Task, task_id)
+                    if task_obj and task_obj.project and repo_root:
+                        record_commit_event(
+                            db,
+                            task_obj.project,
+                            repo_root,
+                            commit_sha=run.result_ref,
+                        )
         elif is_review_run:
             orch_svc_cls(db).record_review_failure(
                 task_id=task_id,

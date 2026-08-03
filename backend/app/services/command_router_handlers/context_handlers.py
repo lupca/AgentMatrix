@@ -67,6 +67,38 @@ class ContextHandlersMixin:
             'suggestion': 'Build or refresh the code graph, then retry the research tool.',
         }
 
+    async def _apply_graph_staleness_check(self, repo_root: str, session_id: str, res_dict: dict) -> None:
+        try:
+            from app.services.graph_client import check_graph_staleness
+            from app.services.outbox import record_graph_rebuild_requested
+
+            session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
+            project_id = session.project_id if session else None
+            if session and session.task_id:
+                task = self.db.query(Task).filter(Task.id == session.task_id).first()
+                project_id = task.project if task else project_id
+
+            if not project_id and repo_root:
+                project_obj = self.db.query(Project).filter(Project.repo_root == repo_root).first()
+                if project_obj:
+                    project_id = project_obj.id
+
+            stale_info = await check_graph_staleness(repo_root)
+            if stale_info.get("is_stale"):
+                res_dict["graph_stale"] = True
+                res_dict["warning"] = stale_info.get("warning") or "graph đang cũ"
+                if project_id:
+                    project = self.db.query(Project).filter(Project.id == project_id).first()
+                    if project:
+                        if project.graph_status in (None, "idle", "fresh"):
+                            project.graph_status = "stale"
+                        record_graph_rebuild_requested(
+                            self.db, project.id, repo_root, commit_sha=stale_info.get("head_sha")
+                        )
+                        self.db.flush()
+        except Exception:
+            pass
+
     async def _handle_get_minimal_context(self, args: str, session_id: str) -> dict:
         repo_root, error = self._research_repo_root(session_id)
         if error:
@@ -80,7 +112,9 @@ class ContextHandlersMixin:
             )
         except Exception as exc:
             return self._research_error(exc)
-        return {'status': 'success', 'repo_root': repo_root, 'context': result}
+        res = {'status': 'success', 'repo_root': repo_root, 'context': result}
+        await self._apply_graph_staleness_check(repo_root, session_id, res)
+        return res
 
     async def _handle_get_impact_radius(self, args: str, session_id: str) -> dict:
         repo_root, error = self._research_repo_root(session_id)
@@ -93,7 +127,9 @@ class ContextHandlersMixin:
             )
         except Exception as exc:
             return self._research_error(exc)
-        return {'status': 'success', 'repo_root': repo_root, 'files': result}
+        res = {'status': 'success', 'repo_root': repo_root, 'files': result}
+        await self._apply_graph_staleness_check(repo_root, session_id, res)
+        return res
 
     async def _handle_save_project_context(self, args: str, session_id: str) -> dict:
         import uuid

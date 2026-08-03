@@ -282,3 +282,44 @@ def test_reap_ignores_running_runs_with_no_recorded_pid(seeded):
     assert reaped == 0
     seeded.refresh(run)
     assert run.status == "running"
+
+
+def test_record_graph_rebuild_requested_sets_stale_and_queues_outbox_event(seeded):
+    from app.services.outbox import record_graph_rebuild_requested
+
+    project = seeded.get(Project, "proj-outbox")
+    assert project.graph_status in (None, "idle")
+
+    evt = record_graph_rebuild_requested(seeded, project.id, "/tmp", commit_sha="commit-123")
+    seeded.commit()
+
+    seeded.refresh(project)
+    assert project.graph_status == "stale"
+    assert evt is not None
+    assert evt.event_type == "graph_rebuild_requested"
+    assert evt.payload["project_id"] == project.id
+    assert evt.payload["commit_sha"] == "commit-123"
+
+    # Deduplication: calling again for same project returns existing event
+    evt2 = record_graph_rebuild_requested(seeded, project.id, "/tmp", commit_sha="commit-456")
+    assert evt2.id == evt.id
+
+
+def test_publish_graph_rebuild_event_transitions_status_idle_stale_building_fresh(seeded):
+    from app.services.outbox import record_commit_event
+
+    project = seeded.get(Project, "proj-outbox")
+    record_commit_event(seeded, project.id, "/tmp", commit_sha="commit-789")
+    seeded.commit()
+
+    seeded.refresh(project)
+    assert project.graph_status == "stale"
+
+    with patch("app.services.outbox.rebuild_graph_incremental_sync", return_value={"build": {}, "embed": {}}) as mock_rebuild:
+        counts = publish_pending_events(seeded)
+
+    mock_rebuild.assert_called_once_with("/tmp")
+    assert counts == {"published": 1, "deferred": 0, "dead_lettered": 0}
+    seeded.refresh(project)
+    assert project.graph_status == "fresh"
+

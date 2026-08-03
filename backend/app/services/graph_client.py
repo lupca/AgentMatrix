@@ -68,6 +68,77 @@ def _make_cache_key(func_name: str, repo_root: str, **kwargs) -> str:
     return f"{func_name}:{repo_root}:{sorted_args}"
 
 
+async def check_graph_staleness(
+    repo_root: str,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> Dict[str, Any]:
+    """Check if the code graph at repo_root is stale relative to git HEAD.
+
+    Returns dict with keys:
+      - is_stale: bool
+      - built_at_sha: str | None
+      - head_sha: str | None
+      - warning: str | None
+    """
+    try:
+        async with MCPClient(repo_root=repo_root) as client:
+            raw = await client.call_tool(
+                "list_graph_stats_tool",
+                arguments={"repo_root": repo_root},
+                timeout=timeout,
+            )
+        if isinstance(raw, dict):
+            graph_meta = raw.get("_graph") or {}
+            built_at_sha = graph_meta.get("built_at_sha") or raw.get("built_at_commit")
+            head_sha = graph_meta.get("head_sha") or raw.get("current_sha")
+            head_matches_build = graph_meta.get("head_matches_build")
+            if head_matches_build is None and built_at_sha and head_sha:
+                head_matches_build = (built_at_sha == head_sha)
+            if head_matches_build is False:
+                sha_str = built_at_sha or "unknown"
+                return {
+                    "is_stale": True,
+                    "built_at_sha": built_at_sha,
+                    "head_sha": head_sha,
+                    "warning": f"graph đang cũ tại {sha_str}",
+                }
+            return {
+                "is_stale": False,
+                "built_at_sha": built_at_sha,
+                "head_sha": head_sha,
+                "warning": None,
+            }
+    except Exception as exc:
+        logger.warning("check_graph_staleness check failed: %s", exc)
+
+    return {
+        "is_stale": False,
+        "built_at_sha": None,
+        "head_sha": None,
+        "warning": None,
+    }
+
+
+async def rebuild_graph_incremental(
+    repo_root: str,
+    timeout: float = 60.0,
+) -> Dict[str, Any]:
+    """Run incremental build and vector embedding on code-review-graph for repo_root."""
+    async with MCPClient(repo_root=repo_root) as client:
+        build_res = await client.call_tool(
+            "build_or_update_graph_tool",
+            arguments={"repo_root": repo_root, "full_rebuild": False},
+            timeout=timeout,
+        )
+        embed_res = await client.call_tool(
+            "embed_graph_tool",
+            arguments={"repo_root": repo_root},
+            timeout=timeout,
+        )
+    clear_graph_cache()
+    return {"build": build_res, "embed": embed_res}
+
+
 async def get_impact_radius(
     repo_root: str,
     file: str,

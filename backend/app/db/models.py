@@ -1025,7 +1025,10 @@ class OutboxEvent(Base):
     dead_letter = Column(Boolean, nullable=False, default=False, server_default="false")
 
     __table_args__ = (
-        CheckConstraint("event_type IN ('run_requested')", name="ck_outbox_events_type"),
+        CheckConstraint(
+            "event_type IN ('run_requested', 'graph_rebuild_requested')",
+            name="ck_outbox_events_type",
+        ),
         CheckConstraint("attempts >= 0", name="ck_outbox_events_attempts_nonnegative"),
         Index(
             "ix_outbox_events_unpublished",

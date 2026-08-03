@@ -1279,6 +1279,44 @@ async def test_get_impact_radius_resolves_repo_root_from_task_project(db_session
 
 
 @pytest.mark.asyncio
+async def test_lazy_graph_staleness_check_returns_result_and_warning_without_blocking(db_session, tmp_path):
+    from app.db.models import OutboxEvent, Project, Session as SessionModel
+
+    repo_root = str(tmp_path)
+    project = Project(id="proj-stale-test", name="Stale Test", repo_root=repo_root, graph_status="idle")
+    db_session.add(project)
+    db_session.add(SessionModel(id="session-stale", project_id="proj-stale-test", context_level="project"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    stale_payload = {
+        "is_stale": True,
+        "built_at_sha": "sha123",
+        "head_sha": "sha456",
+        "warning": "graph đang cũ tại sha123",
+    }
+    with patch("app.services.command_router.graph_get_impact_radius", new=AsyncMock(return_value=["res.py"])), \
+         patch("app.services.graph_client.check_graph_staleness", new=AsyncMock(return_value=stale_payload)):
+        result = await router.execute_tool(
+            "get_impact_radius", {"file": "src/index.ts"}, "session-stale"
+        )
+
+    # Tool returns normal results + warning + graph_stale flag without blocking
+    assert result["status"] == "success"
+    assert result["files"] == ["res.py"]
+    assert result["graph_stale"] is True
+    assert result["warning"] == "graph đang cũ tại sha123"
+
+    db_session.refresh(project)
+    assert project.graph_status == "stale"
+
+    outbox_events = db_session.query(OutboxEvent).filter(OutboxEvent.event_type == "graph_rebuild_requested").all()
+    assert len(outbox_events) == 1
+    assert outbox_events[0].payload["project_id"] == "proj-stale-test"
+
+
+
+@pytest.mark.asyncio
 async def test_get_impact_radius_graph_unavailable_returns_structured_error(db_session, tmp_path):
     from app.db.models import Project, Session as SessionModel
 

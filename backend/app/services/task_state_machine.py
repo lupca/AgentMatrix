@@ -28,7 +28,7 @@ from app.db.models import (
 from app.db.models import Session as SessionModel
 from app.services.agent_matcher import AgentMatcher, POLICY_VERSION as AGENT_MATCHER_POLICY_VERSION
 from app.services.landing import LandingResult, head_of, land_result
-from app.services.outbox import record_run_requested
+from app.services.outbox import record_commit_event, record_run_requested
 from app.services.task_event_service import emit_task_event
 from app.services.task_validators import (
     BrakeViolationError,
@@ -1754,6 +1754,15 @@ class TaskStateMachine:
                 },
                 db=self.db,
             )
+            if task.project:
+                project = self.db.get(Project, task.project)
+                if project and project.repo_root:
+                    record_commit_event(
+                        self.db,
+                        project.id,
+                        project.repo_root,
+                        commit_sha=landing.landed_ref,
+                    )
         self.db.commit()
         return {
             "action": "landed" if landing.landed_ref else "landing_skipped",
