@@ -80,13 +80,21 @@ def build_dispatch_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
+        argv.extend(
+            [
+                "-p",
+                prompt,
+                "--dangerously-skip-permissions",
+                "--output-format",
+                "json",
+            ]
+        )
     elif cli == "qwen":
         # qwen uses -m for model, -p for prompt (similar to claude)
         argv = ["qwen"]
         if agent.model:
             argv.extend(["-m", agent.model])
-        argv.extend(["-p", prompt])
+        argv.extend(["-p", prompt, "--output-format", "json"])
     else:
         # agy: the prompt must directly follow --print — another flag in
         # between makes agy drop the prompt and answer about the flag
@@ -96,7 +104,15 @@ def build_dispatch_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        argv.extend(["--dangerously-skip-permissions", "--print", prompt])
+        argv.extend(
+            [
+                "--dangerously-skip-permissions",
+                "--output-format",
+                "json",
+                "--print",
+                prompt,
+            ]
+        )
 
     return shlex.join(argv), repo_root, cli
 
@@ -152,13 +168,21 @@ def build_review_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        argv.extend(["-p", prompt, "--dangerously-skip-permissions"])
+        argv.extend(
+            [
+                "-p",
+                prompt,
+                "--dangerously-skip-permissions",
+                "--output-format",
+                "json",
+            ]
+        )
     elif cli == "qwen":
         # qwen uses -m for model, -p for prompt (similar to claude)
         argv = ["qwen"]
         if agent.model:
             argv.extend(["-m", agent.model])
-        argv.extend(["-p", prompt])
+        argv.extend(["-p", prompt, "--output-format", "json"])
     else:
         # agy: the prompt must directly follow --print (see build_dispatch_command).
         argv = ["agy"]
@@ -166,7 +190,15 @@ def build_review_command(
             argv.extend(["--model", agent.model])
         if not model_has_effort:
             argv.extend(["--effort", resolved_effort])
-        argv.extend(["--dangerously-skip-permissions", "--print", prompt])
+        argv.extend(
+            [
+                "--dangerously-skip-permissions",
+                "--output-format",
+                "json",
+                "--print",
+                prompt,
+            ]
+        )
 
     return shlex.join(argv), repo_root, cli
 

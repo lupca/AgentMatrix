@@ -139,12 +139,67 @@ def test_build_review_command_embeds_explicit_from_to_range(tmp_path):
     command, repo_root, cli = build_review_command(
         task, agent, project, "base-sha", "head-sha"
     )
-    prompt = shlex.split(command)[-2]
+    argv = shlex.split(command)
+    prompt = argv[argv.index("-p") + 1]
 
     assert repo_root == str(tmp_path)
     assert cli == "claude"
     assert prompt.startswith("/code-review --from base-sha --to head-sha")
     assert ".ct/review-REV-002.json" in prompt
+
+
+@pytest.mark.parametrize("cli", ["claude", "qwen", "agy"])
+def test_dispatch_json_output_flags_preserve_prompt_contract(cli, tmp_path):
+    task = Task(id="CMD-JSON", project="p", title="Task")
+    agent = Agent(id="@agent", name="Agent", role="executor", cli=cli, model="model")
+    project = Project(id="p", name="Project", repo_root=str(tmp_path))
+
+    command, _, _ = build_dispatch_command(task, agent, project)
+    argv = shlex.split(command)
+
+    format_index = argv.index("--output-format")
+    assert argv[format_index : format_index + 2] == ["--output-format", "json"]
+    if cli == "agy":
+        assert argv[format_index + 2] == "--print"
+        assert argv[format_index + 3] == argv[-1]
+    elif cli == "claude":
+        assert argv[argv.index("-p") + 1] != "--output-format"
+        assert argv[format_index - 1] == "--dangerously-skip-permissions"
+    else:
+        assert argv[argv.index("-p") + 1] == argv[format_index - 1]
+
+
+def test_codex_does_not_receive_json_output_flag(tmp_path):
+    task = Task(id="CMD-CODEX", project="p", title="Task")
+    agent = Agent(id="@agent", name="Agent", role="executor", cli="codex", model="gpt-5")
+    project = Project(id="p", name="Project", repo_root=str(tmp_path))
+
+    command, _, _ = build_dispatch_command(task, agent, project)
+
+    assert "--output-format" not in shlex.split(command)
+
+
+@pytest.mark.parametrize("cli", ["claude", "qwen", "agy", "codex"])
+def test_review_command_json_output_flags_match_cli_contract(cli, tmp_path):
+    task = Task(id="REV-JSON", project="p", title="Review task")
+    agent = Agent(id="@reviewer", name="Reviewer", role="reviewer", cli=cli)
+    project = Project(id="p", name="Project", repo_root=str(tmp_path))
+
+    command, _, _ = build_review_command(task, agent, project, "base", "head")
+    argv = shlex.split(command)
+
+    if cli == "codex":
+        assert "--output-format" not in argv
+        return
+
+    format_index = argv.index("--output-format")
+    assert argv[format_index : format_index + 2] == ["--output-format", "json"]
+    if cli == "agy":
+        assert argv[format_index + 2] == "--print"
+        assert argv[format_index + 3] == argv[-1]
+    else:
+        prompt_flag = "-p"
+        assert argv[argv.index(prompt_flag) + 1]
 
 
 def test_build_review_command_never_infers_a_missing_base_ref(tmp_path):

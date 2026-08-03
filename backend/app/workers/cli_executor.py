@@ -24,6 +24,7 @@ from app.db.base import SessionLocal
 from app.db.models import (
     AgentEvent,
     AgentOutputChunk,
+    Agent,
     AgentRun,
     LLMUsage,
     RunResourceUsage,
@@ -52,6 +53,7 @@ from app.workers.output_parser import (
     _record_agent_event,
     _record_vendor_output,
     load_review_result,
+    parse_cli_token_usage,
     parse_vendor_event,
 )
 from app.workers.output_streamer import (
@@ -265,6 +267,53 @@ def _record_run_resource_usage(db: Session, run: AgentRun) -> None:
     usage.active_seconds = active_seconds
     usage.rate_limit_events = rate_limit_events
     usage.estimated_cost_usd = sum((item.cost_usd or 0) for item in usages)
+
+
+def _record_cli_usage(db: Session, run: AgentRun, cli: str, stdout: str) -> None:
+    """Parse a completed CLI result and append its usage ledger row.
+
+    The raw output is already persisted as ``VendorRawEvent`` rows while the
+    process streams, so callers can pass it here without retaining a second
+    copy of potentially large agent output in memory.  A row is attributed to
+    both the run and task because either scope is used by cost reporting.
+    """
+    usage_data = parse_cli_token_usage(cli, stdout)
+    if not usage_data:
+        return
+
+    normalized_cli = (cli or "").strip().lower()
+    if normalized_cli not in {"claude", "qwen", "agy"}:
+        return
+    existing = (
+        db.query(LLMUsage)
+        .filter(
+            LLMUsage.agent_run_id == run.id,
+            LLMUsage.provider == normalized_cli,
+            LLMUsage.operation == "cli",
+        )
+        .first()
+    )
+    if existing is not None:
+        return
+
+    agent = db.get(Agent, run.agent_id)
+    db.add(
+        LLMUsage(
+            agent_run_id=run.id,
+            task_id=run.task_id,
+            model=(agent.model if agent and agent.model else normalized_cli),
+            provider=normalized_cli,
+            operation="cli",
+            input_tokens=usage_data["input_tokens"],
+            output_tokens=usage_data["output_tokens"],
+            cached_tokens=usage_data["cached_tokens"],
+            # Qwen/Agy expose token counts but no authoritative USD amount;
+            # keep the ledger schema's numeric default and surface that fact
+            # through get_stats rather than presenting zero as free.
+            cost_usd=usage_data.get("cost_usd", 0),
+        )
+    )
+    db.flush()
 
 
 def _current_attempt(run: AgentRun) -> int:
@@ -932,6 +981,25 @@ def execute_agent_run(
                 error=result.error,
             )
             raise AgentExecutionError(result.error or "Agent process failed")
+
+        # Parse only after a terminal attempt.  A retry must not create a
+        # second usage row for the same AgentRun, and malformed vendor output
+        # is intentionally a no-op.
+        if result.status != ProcessStatus.CANCELLED:
+            raw_output = "\n".join(
+                event.raw_output
+                for event in db.query(VendorRawEvent)
+                .filter(VendorRawEvent.run_id == run.id)
+                .order_by(VendorRawEvent.seq)
+                .all()
+            )
+            # JSON mode may place the executor's final RESULT_REF inside the
+            # result field of one pretty-printed object, so inspect the full
+            # persisted output in addition to the per-line streaming path.
+            explicit_result_ref = (
+                _extract_explicit_result_ref(raw_output) or explicit_result_ref
+            )
+            _record_cli_usage(db, run, run.cli, raw_output)
 
         run.status = result.status.value
         run.completed_at = datetime.now(timezone.utc)
