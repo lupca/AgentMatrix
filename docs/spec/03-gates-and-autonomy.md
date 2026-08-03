@@ -16,6 +16,15 @@ create_task → [spec/plan: generate_spec_plan hoặc update_task đổ plan+AC]
 → verdict pass → done   |   verdict fail → changes-requested
 ```
 
+Review artifact dùng schema strict (`extra="forbid"`). Ba alias metadata đã đo
+từ Claude Opus được chuẩn hóa có kiểm soát vào `toolchain_results`:
+`toolchain_output` (object), `toolchain_notes` (string), và `notes` (string).
+Field lạ khác vẫn bị từ chối; prompt đồng thời cấm thêm top-level key ngoài
+contract. Nếu parse/schema/AC-count vẫn lỗi, review run thành `failed`, chi tiết
+Pydantic được ghi vào JSON payload của `review_result/rejected` và
+`tool_metrics.payload`; Task CAS về `awaiting-review` thay vì `failed`, giữ
+nguyên commit range để coordinator giao reviewer khác ngay.
+
 ## Spec Clarity Loop (CTV2-242)
 
 `generate_spec_plan` là research-first gate: chỉ nhận agent CLI và spawn agent
@@ -98,7 +107,7 @@ CTV2-237, đã sửa; update rỗng giờ báo lỗi).
 
 ## Escalation
 
-Brake đạp (round limit, cost, review result hỏng...) → task set
+Brake đạp (round limit, cost...) → task set
 `awaiting_approval=true` + `approval_prompt`, KHÔNG tạo GateRecord (CTV2-221).
 Spec Clarity Loop dùng cùng escalation này khi spec chưa đạt `high` hoặc còn
 `open_questions`; approval prompt liệt kê đủ câu hỏi và yêu cầu generate lại sau
@@ -118,8 +127,9 @@ per-run: `max_active_seconds_per_run`, `max_tool_calls_per_run`,
 `claude -p` KHÔNG in gì cho đến khi xong → run dài im lặng bị cancel oan
 ("Run made no progress within the allowed interval"). Tạm thời setting
 `max_no_progress_seconds=2400`. Fix chuẩn (chưa làm): heartbeat theo PID sống.
-Hệ quả kép CTV2-231 (chưa sửa): run review bị cancel để task KẸT in-review —
-phải SQL về awaiting-review rồi request_review lại.
+Review run bị cancel/process chết đi qua `record_review_failure`: run hỏng nhưng
+task quay về `awaiting-review`, không cần SQL/attach_result để request reviewer
+khác.
 
 ## Settings (SETTINGS_WHITELIST, entity_admin.py)
 

@@ -236,6 +236,11 @@ def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -
         "issues found (each needs id, severity, category, file, line, description). "
         "Fill tests_run and tests_passed arrays with test commands you ran. "
         "Update base and head with the actual refs. "
+        "The only allowed top-level keys are schema_version, task_id, base, head, "
+        "ac_results, findings, tests_run, tests_passed, and optional "
+        "toolchain_results (an object). Put tool notes inside toolchain_results; "
+        "do NOT add toolchain_output, toolchain_notes, notes, or any other "
+        "top-level key. "
         "Do NOT add or remove ac_results items — the count must stay exactly {ac_count}. "
         "Reviewer execution is read-only: do not create commits or alter refs.".format(
             ac_count=ac_count

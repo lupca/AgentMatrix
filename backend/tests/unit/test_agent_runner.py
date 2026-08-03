@@ -792,6 +792,73 @@ def test_load_review_result_accepts_valid_fixture(tmp_path):
     assert [item.verdict for item in result.ac_results] == ["pass", "pass"]
 
 
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (
+            {"toolchain_notes": "OCR was rate limited"},
+            {"notes": "OCR was rate limited"},
+        ),
+        (
+            {
+                "toolchain_output": {"ocr": {"status": "completed_with_errors"}},
+                "notes": "Git fixture lacked identity",
+            },
+            {
+                "ocr": {"status": "completed_with_errors"},
+                "notes": "Git fixture lacked identity",
+            },
+        ),
+    ],
+)
+def test_load_review_result_accepts_observed_claude_metadata_aliases(
+    tmp_path, metadata, expected
+):
+    """CTV2-1342/1345: preserve only the aliases emitted by real Opus runs."""
+    payload = json.loads((FIXTURES / "valid.json").read_text())
+    payload.update(metadata)
+    result_path = Path(runner.review_result_path(str(tmp_path), "CTV2-102"))
+    result_path.parent.mkdir()
+    result_path.write_text(json.dumps(payload))
+
+    result = runner.load_review_result(str(tmp_path), "CTV2-102", ["one", "two"])
+
+    assert result.toolchain_results == expected
+
+
+def test_load_review_result_schema_validation_keeps_queryable_pydantic_errors(
+    tmp_path,
+):
+    payload = json.loads((FIXTURES / "valid.json").read_text())
+    payload["invented_metadata"] = "must remain forbidden"
+    result_path = Path(runner.review_result_path(str(tmp_path), "CTV2-102"))
+    result_path.parent.mkdir()
+    result_path.write_text(json.dumps(payload))
+
+    with pytest.raises(runner.ReviewResultLoadError) as error:
+        runner.load_review_result(str(tmp_path), "CTV2-102", ["one", "two"])
+
+    assert error.value.code == "schema_validation"
+    [detail] = error.value.details["errors"]
+    assert detail["type"] == "extra_forbidden"
+    assert detail["loc"] == ["invented_metadata"]
+    assert detail["input"] == "must remain forbidden"
+    json.dumps(error.value.as_dict())  # safe for JSON ledger/telemetry columns
+
+
+def test_load_review_result_reports_acceptance_criteria_count_mismatch(tmp_path):
+    payload = json.loads((FIXTURES / "valid.json").read_text())
+    result_path = Path(runner.review_result_path(str(tmp_path), "CTV2-102"))
+    result_path.parent.mkdir()
+    result_path.write_text(json.dumps(payload))
+
+    with pytest.raises(runner.ReviewResultLoadError) as error:
+        runner.load_review_result(str(tmp_path), "CTV2-102", ["only one"])
+
+    assert error.value.code == "acceptance_criteria_count_mismatch"
+    assert error.value.details == {"expected": 1, "actual": 2}
+
+
 def test_update_missing_task_is_not_silent(worker_db):
     db = worker_db()
 

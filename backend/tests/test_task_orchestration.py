@@ -247,6 +247,86 @@ def test_terminal_done_rejects_pending_gate(orchestration, db_session):
     assert task.awaiting_approval is False
 
 
+@pytest.mark.parametrize(
+    ("error_code", "details"),
+    [
+        (
+            "schema_validation",
+            {
+                "code": "schema_validation",
+                "path": "/repo/.ct/review.json",
+                "details": {
+                    "errors": [
+                        {
+                            "type": "extra_forbidden",
+                            "loc": ["unexpected"],
+                            "msg": "Extra inputs are not permitted",
+                            "input": "value",
+                        }
+                    ]
+                },
+            },
+        ),
+        (
+            "acceptance_criteria_count_mismatch",
+            {
+                "code": "acceptance_criteria_count_mismatch",
+                "path": "/repo/.ct/review.json",
+                "details": {"expected": 2, "actual": 1},
+            },
+        ),
+    ],
+)
+def test_review_result_failure_preserves_executor_result_and_allows_new_reviewer(
+    orchestration, db_session, error_code, details
+):
+    db_session.add_all(
+        [
+            Agent(id="@old-reviewer", name="Old", role="reviewer", cli="claude"),
+            Agent(id="@new-reviewer", name="New", role="reviewer", cli="codex"),
+        ]
+    )
+    task = _task(db_session, f"REVIEW-FAIL-{error_code}", mode="bypass")
+    task.status = "in-review"
+    task.executor = "@executor"
+    task.reviewer = "@old-reviewer"
+    task.result_ref = "base..head"
+    starting_version = task.version
+    db_session.commit()
+
+    failure = orchestration.record_review_failure(
+        task_id=task.id,
+        error="Review result could not be loaded",
+        actor="agent:@old-reviewer",
+        idempotency_key=f"review-failure:{error_code}",
+        run_id="failed-review-run",
+        error_details=details,
+    )
+
+    assert failure.task.status == "awaiting-review"
+    assert failure.task.version == starting_version + 1
+    assert failure.task.result_ref == "base..head"
+    assert failure.task.executor == "@executor"
+    assert failure.task.awaiting_approval is False
+    assert failure.gate_record.input_payload["error_details"] == details
+    assert failure.gate_record.status == "rejected"
+
+    reassigned = orchestration.request_review(
+        task_id=task.id,
+        reviewer="@new-reviewer",
+        actor="@operator",
+        idempotency_key=f"review-retry:{error_code}",
+    )
+
+    assert reassigned.task.status == "in-review"
+    assert reassigned.task.result_ref == "base..head"
+    assert reassigned.task.error is None
+    assert reassigned.agent_run.kind == "review"
+    assert reassigned.agent_run.agent_id == "@new-reviewer"
+    assert reassigned.gate_record.reviewer == "@new-reviewer"
+    assert reassigned.gate_record.executor == "@executor"
+
+
 def test_awaiting_approval_sync_ignores_resolved_pending_root(
     orchestration, db_session
 ):

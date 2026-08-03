@@ -180,7 +180,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "- agent_runs (id, task_id, agent_id, kind [execute, review], status [queued, running, success, failed, cancelled], attempt)\n"
                 "- knowledge_items (id, title, category, project, author, content)\n"
                 "- audit_log (id, task_id, action, actor, created_at)\n"
-                "- tool_metrics (id, tool, source, task_id, ok, cache_hit, duration_ms, result_count, bytes_out, error, created_at) — telemetry for graph/ocr/review tooling\n"
+                "- tool_metrics (id, tool, source, task_id, ok, cache_hit, duration_ms, result_count, bytes_out, error, payload JSON, created_at) — telemetry for graph/ocr/review tooling\n"
                 "- settings (key, value)\n\n"
                 "Examples:\n"
                 "SELECT project, count(*) FROM tasks WHERE status='dispatched' GROUP BY project\n"
