@@ -17,6 +17,7 @@ from app.services.command_router_handlers import (
     AdminHandlersMixin,
     ContextHandlersMixin,
     QueryHandlersMixin,
+    SpecHandlersMixin,
     TaskHandlersMixin,
     _QUERY_DB_ENTITIES,
     _coerce_filter_value,
@@ -45,6 +46,7 @@ class CommandRouter(
     QueryHandlersMixin,
     ContextHandlersMixin,
     AdminHandlersMixin,
+    SpecHandlersMixin,
 ):
     def __init__(self, db_session):
         self.db = db_session
@@ -299,6 +301,25 @@ class CommandRouter(
                 'project_id': project_id,
                 'context_md': args.get('context_md'),
                 'rules': args.get('rules') or [],
+            }, ensure_ascii=False)
+        elif canonical_name == 'spec_write':
+            ops = args.get('ops')
+            if not isinstance(ops, list):
+                return {'error': 'ops must be an array'}
+            command_args = json.dumps({
+                'ops': ops,
+                'project_id': args.get('project_id'),
+            }, ensure_ascii=False)
+        elif canonical_name == 'spec_get':
+            ids = args.get('ids')
+            filters = args.get('filter', args.get('filters'))
+            if ids is not None and not isinstance(ids, list):
+                return {'error': 'ids must be an array'}
+            if filters is not None and not isinstance(filters, Mapping):
+                return {'error': 'filter must be an object'}
+            command_args = json.dumps({
+                'ids': ids,
+                'filter': filters,
             }, ensure_ascii=False)
         else:
             return {'error': f'Unknown tool: {tool_name}'}

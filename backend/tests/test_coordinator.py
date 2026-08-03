@@ -412,7 +412,7 @@ async def test_loaded_tool_group_persists_across_turns(db_session):
     turn2_names = {t["name"] for t in provider.calls[2]["tools"]}
     assert turn2_names == baseline_names | {
         "dispatch_task", "record_verdict", "approve_gate", "cancel_task",
-        "request_review", "generate_spec_plan", "update_task", "archive_task",
+        "attach_result", "request_review", "generate_spec_plan", "update_task", "archive_task",
         "save_project_context", "land_task",
     }
     tool_messages = [m for m in session.messages if m.get("name") == "approve_gate"]
@@ -504,7 +504,7 @@ async def test_stream_turn_loaded_tools_persist_across_turns(db_session):
     turn2_names = {t["name"] for t in provider.calls[-1]["tools"]}
     assert turn2_names == baseline_names | {
         "dispatch_task", "record_verdict", "approve_gate", "cancel_task",
-        "request_review", "generate_spec_plan", "update_task", "archive_task",
+        "attach_result", "request_review", "generate_spec_plan", "update_task", "archive_task",
         "save_project_context", "land_task",
     }
 

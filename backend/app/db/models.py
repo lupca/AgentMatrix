@@ -1141,6 +1141,70 @@ class KnowledgeItem(ArchivableMixin, Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
+class SpecItem(ArchivableMixin, Base):
+    """A versioned, queryable proposition in the living specification."""
+
+    __tablename__ = "spec_item"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(
+        String(50), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind = Column(String(20), nullable=False, index=True)
+    title = Column(String(300), nullable=False)
+    body = Column(Text, nullable=False)
+    status = Column(String(20), nullable=False, default="draft", server_default="draft", index=True)
+    supersedes_id = Column(
+        String(36), ForeignKey("spec_item.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_doc_id = Column(String(50), nullable=True, index=True)
+    derived_from_sha = Column(String(64), nullable=True)
+    derived_by = Column(String(100), nullable=True)
+    confidence = Column(String(20), nullable=False, default="asserted", server_default="asserted")
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+    verified_by = Column(String(100), nullable=True)
+    embedding = Column(Vector(1536), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    project = relationship("Project")
+    supersedes = relationship("SpecItem", remote_side=[id], back_populates="superseded_by")
+    superseded_by = relationship("SpecItem", back_populates="supersedes")
+    outgoing_relations = relationship(
+        "SpecRelation",
+        foreign_keys="SpecRelation.from_id",
+        back_populates="from_item",
+        cascade="all, delete-orphan",
+    )
+    incoming_relations = relationship(
+        "SpecRelation",
+        foreign_keys="SpecRelation.to_id",
+        back_populates="to_item",
+        cascade="all, delete-orphan",
+    )
+
+
+class SpecRelation(Base):
+    """A typed edge between two active or historical spec items."""
+
+    __tablename__ = "spec_relation"
+
+    from_id = Column(
+        String(36), ForeignKey("spec_item.id", ondelete="CASCADE"), primary_key=True
+    )
+    to_id = Column(
+        String(36), ForeignKey("spec_item.id", ondelete="CASCADE"), primary_key=True
+    )
+    kind = Column(String(20), primary_key=True)
+
+    from_item = relationship(
+        "SpecItem", foreign_keys=[from_id], back_populates="outgoing_relations"
+    )
+    to_item = relationship(
+        "SpecItem", foreign_keys=[to_id], back_populates="incoming_relations"
+    )
+
+
 class AgentNote(ArchivableMixin, Base):
     __tablename__ = "agent_notes"
 
