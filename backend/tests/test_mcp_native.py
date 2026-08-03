@@ -14,6 +14,7 @@ import app.mcp_native as mcp_native
 from app.db.base import Base
 from app.db.models import Agent, InboxItem, Project, Task
 from app.mcp_native import authenticate_token, build_server, envelope, issue_token
+from app.services.tool_registry import get_mcp_tool_specs
 from app.services.task_orchestration import TaskOrchestrationService
 
 
@@ -131,17 +132,17 @@ async def test_mcp_tool_list_is_filtered_by_token_role(monkeypatch):
     async with Client(executor) as executor_client:
         executor_tools = await executor_client.list_tools()
 
-    assert len(coordinator_tools) == 28
-    assert len(executor_tools) == 7
-    assert {tool.name for tool in executor_tools} == {
-        "get_impact_radius",
-        "get_minimal_context",
-        "get_run_output",
-        "get_status",
-        "get_task_events",
-        "save_project_context",
-        "wait_for_task",
+    # Suy số lượng từ registry, KHÔNG hard-code: thêm tool mới là con số đổi.
+    # Bản đầu hard-code 28/7 và vỡ ngay khi CTV2-1341 thêm spec_write/spec_get
+    # (28 -> 30) dù logic lọc vẫn đúng.
+    all_specs = get_mcp_tool_specs()
+    expected_executor = {
+        spec.name for spec in all_specs if spec.required_role == "executor"
     }
+
+    assert len(coordinator_tools) == len(all_specs)
+    assert len(executor_tools) == len(expected_executor)
+    assert {tool.name for tool in executor_tools} == expected_executor
     assert {tool.name for tool in executor_tools} <= {
         tool.name for tool in coordinator_tools
     }
@@ -181,8 +182,12 @@ async def test_mcp_tool_list_filters_each_http_connection_by_its_token(monkeypat
             async with Client(transport) as client:
                 projections.append(await client.list_tools())
 
-    assert len(projections[0]) == 28
-    assert len(projections[1]) == 7
+    all_specs = get_mcp_tool_specs()
+    executor_names = {
+        spec.name for spec in all_specs if spec.required_role == "executor"
+    }
+    assert len(projections[0]) == len(all_specs)
+    assert len(projections[1]) == len(executor_names)
     assert "manage_agent" in {tool.name for tool in projections[0]}
     assert "manage_agent" not in {tool.name for tool in projections[1]}
 
