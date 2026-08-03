@@ -1,0 +1,392 @@
+# 08 — Hệ spec sống
+
+> **TRẠNG THÁI: THIẾT KẾ, CHƯA TRIỂN KHAI.** File này mô tả tầng dự định xây,
+> không phải hiện trạng code. Khi bắt đầu code, cập nhật lại mục nào đã có thật.
+> Mọi bảng/tool có tiền tố `spec_`, `impl_`, `pm_` đều chưa tồn tại.
+>
+> Bản trước của file này tên `08-pm-layer.md`, xoay quanh WBS/lịch/critical
+> path. Đã cắt phần lớn — xem mục *Đã cắt gì và vì sao* ở cuối.
+
+## Vấn đề: tái suy diễn, không phải thiếu tài liệu
+
+Triệu chứng người dùng gặp: mỗi khi có chức năng mới đều phải nhờ agent đọc spec
+xem có trùng hay xung đột không. Thao tác này lặp lại liên tục trước khi ra được
+task.
+
+Nhưng triệu chứng nặng hơn nằm ở chỗ khác: **đọc lại nhiều lần cho ra kết luận
+khác nhau.** Ví dụ có thật, ghi lại từ chính phiên thiết kế ra file này
+(2026-08-04):
+
+- Đọc lượt 1 → kết luận "tách 2 process". Đọc lượt 2 → tự sửa thành "2 endpoint
+  trên 1 process".
+- Khẳng định "`spec_clarity` là biến dự báo số vòng tốt nhất" → đo lại → **tự
+  bác bỏ**.
+- Khẳng định "`tasks.priority` chỉ cần kiểm chứng" → tra tiếp → hoá ra **không
+  có hàng đợi nào cả**.
+
+Cả ba lần đều đọc đúng file, không lần nào sai thao tác. Nguyên nhân là **đọc
+tức là lấy mẫu**: mỗi lượt chạm vào một phần khác của cơ sở mã, nên ra kết luận
+khác. Càng nhiều repo (hiện 12 app VOMA) thì phương sai càng lớn.
+
+Chữa bằng "đọc kỹ hơn" hay "context lớn hơn" là chữa sai bệnh. Cách chữa đúng:
+
+> **Ghi lại cái đã suy ra, kèm nguồn gốc và điều kiện hết hạn. Lần sau truy vấn,
+> chỉ suy lại phần đã bị gắn cờ lỗi thời.**
+
+Đây là điểm khác căn bản so với "kho tài liệu": tài liệu chỉ ghi *kết luận*, hệ
+này ghi thêm *dẫn xuất từ đâu* và *khi nào thì không còn đúng nữa*.
+
+## Số liệu nền (đo 2026-08-04, 57 task có run thật)
+
+```
+Số vòng execute/task            Thời lượng mỗi run
+1 vòng  ██████████████  37      execute  median 6.1'  p90 10.2'
+2 vòng  ███              8      review   median 5.0'  p90  9.4'
+3 vòng  ███              7
+5 vòng  █                1      trung bình 1.82 vòng/task
+6 vòng  ██               3      65% one-shot, 35% phải làm lại
+7 vòng  █                1
+```
+
+Thời lượng một run gần như **hằng số** (~6 phút); phương sai nằm ở **số vòng**.
+Nên đơn vị ước lượng là **vòng**, không phải phút.
+
+### Mô tả task đang quá mỏng
+
+| Nhóm | Task | Vòng TB | Vòng max | Độ dài mô tả TB |
+|---|---|---|---|---|
+| 4–6 AC | 31 | **2.00** | 7 | **204 ký tự** |
+| 7+ AC | 21 | 1.62 | 6 | 306 ký tự |
+| 1–3 AC | 6 | 1.50 | 3 | 264 ký tự |
+
+Nhiều AC hơn **không** làm tăng số vòng — ngược lại. Nhóm tệ nhất là nhóm **mô tả
+ngắn nhất**. Mô tả trung bình 200–300 ký tự tức 2–3 câu; với công việc không tầm
+thường thì đó là đặc tả thiếu. Bằng chứng yếu (n nhỏ, có nhiễu) nhưng không mâu
+thuẫn giả thuyết "đặc tả kỹ thì ít làm lại".
+
+### Hai cảnh báo phải giữ
+
+**`spec_clarity` chưa chứng minh được là giảm số vòng.** Đo: nhóm `high` trung
+bình 2.27 vòng (n=11) so với nhóm chưa set 1.72 vòng (n=46) — **ngược chiều** giả
+định. Nhiều khả năng do thiên lệch chọn mẫu (`generate_spec_plan` chỉ chạy cho
+task vốn đã khó), nhưng **không được dùng số này biện minh cho việc xây tầng
+mới**. Bối cảnh: **381/391 task chưa từng set `spec_clarity`** — cơ chế chốt chất
+lượng sẵn có gần như không ai bật.
+
+**Chi phí hiện KHÔNG đo được.** `llm_usage` có 158 bản ghi, `agent_run_id` và
+`task_id` **NULL toàn bộ**; chỉ agent API ghi được cost (DeepSeek 145, LongCat 12,
+Kimi 1; tổng $1.32), **không bản ghi nào từ agent CLI** vì chạy subscription.
+`_task_cost()` (`task_validators.py:336`) join đúng hai cột NULL đó nên **luôn trả
+0** ⇒ brake `max_cost_usd_per_task` **chưa từng kích hoạt**, dù CLAUDE.md mô tả là
+có. Không được hứa "giảm cost" trước khi sửa attribution. Đại lượng tiêu hao thật
+với agent CLI là **quota và thời gian**, đo bằng **số vòng**.
+
+## Data model
+
+### Lõi: mệnh đề spec có neo
+
+```sql
+spec_item (
+  id, project_id,
+  kind,              -- requirement | decision | constraint | interface | design
+  title, body,
+  status,            -- draft | active | stale | superseded
+  supersedes_id,
+  source_doc_id,     -- pm_document sinh ra nó
+
+  -- nguồn gốc: thứ làm nên khác biệt so với một kho tài liệu
+  derived_from_sha,  -- commit lúc suy ra
+  derived_by,        -- agent/người
+  confidence,        -- asserted | derived | verified
+  verified_at, verified_by,
+  embedding,         -- pgvector, phục vụ tìm trùng
+  archived_at
+)
+
+spec_anchor (
+  spec_item_id,
+  repo, path, symbol,   -- trỏ tới node của code graph
+  relation,             -- implements | constrains | tests | documents
+  anchor_sha            -- băm nội dung symbol lúc neo
+)
+
+spec_relation (
+  from_id, to_id,
+  kind                  -- conflicts_with | duplicates | refines | depends_on
+)
+```
+
+`spec_anchor` là bộ phận quyết định. Không có neo thì spec chỉ là văn bản và
+không thể biết khi nào nó hết đúng.
+
+`kind='decision'` chính là ADR. Hiện `docs/adr/` là file rời — chuyển vào đây thì
+quyết định mới **neo được vào code**, tránh việc agent đời sau vô hiệu hoá một
+quyết định có chủ đích vì không biết nó tồn tại. Đây là dạng lệch spec nguy hiểm
+nhất vì nó âm thầm.
+
+### Bản thiết kế thực thi
+
+```sql
+impl_design (
+  id, task_id,
+  summary,
+  files jsonb,        -- [{path, action: create|modify|delete, why}]
+  changes jsonb,      -- [{symbol, signature, behavior, edge_cases}]
+  data_changes jsonb, -- migration, đổi schema
+  test_plan jsonb,
+  risks jsonb,
+  derived_from_sha,
+  authored_by,        -- model mạnh
+  completeness,       -- điểm do code chấm, xem mục dưới
+  reviewed_by
+)
+```
+
+Đây chính là artifact `Physical design_chức năng [...]` trong bộ template ở
+`/home/lupca/Documents/agmx` — quy trình của bạn đã có khái niệm này, chỉ chưa
+đưa vào hệ thống.
+
+### Phần WBS còn giữ
+
+```sql
+pm_wbs_node (
+  id, project_id, parent_id, code, path,
+  node_type,          -- deliverable | work_package
+  stage,              -- frame|decompose|specify|build|verify|integrate|done
+  title, description, acceptance_criteria,
+  estimate_rounds, actual_rounds,
+  assignee_agent_id, task_id,
+  progress_pct, sort_order, version, archived_at
+)
+
+pm_document (id, project_id, doc_type, title, content, structured jsonb,
+             version, supersedes_id)
+pm_template (doc_type PK, section_schema jsonb, sample_content)
+```
+
+WBS **hạ xuống vai trò phụ** — nó là khung nhìn "việc" trên cùng đồ thị, không
+phải trung tâm. Nhưng giữ lại vì hai lý do phục vụ chất lượng:
+
+- **Quy tắc 100%**: tổng phạm vi node con phải phủ 100% node cha. Chống **sót
+  phạm vi** — kiểu "tưởng thằng kia làm phần migration rồi". Đây là cơ chế chất
+  lượng thật, không phải thủ tục hành chính.
+- **Trả lời "có ai đang làm cái tương tự chưa"** trước khi tạo task mới.
+
+`stage` là **cột trên node, không phải bảng cha**: agent chạy pipeline song song
+nên "cả dự án đang ở giai đoạn thiết kế" không còn đúng. WP-1 có thể đang
+`verify` trong khi WP-7 còn ở `specify`.
+
+Hai điều chỉnh so với quy trình cũ: **gộp Coding + Unit test** (agent viết cả hai
+cùng lúc, tách trên giấy chỉ làm sai số liệu) và **thêm `integrate`** (nợ tích hợp
+do chạy song song sinh ra; tầng DEV đã có `land_task`).
+
+## Cơ chế mất hiệu lực
+
+Đây là thứ làm hệ này "sống".
+
+```
+commit mới
+   ↓
+diff ra danh sách symbol bị đụng
+   ↓
+tra spec_anchor: symbol trùng VÀ anchor_sha đã khác
+   ↓
+spec_item.status = 'stale'  + ghi lý do (symbol nào, commit nào)
+   ↓
+agent chỉ suy lại NHỮNG CÁI bị gắn cờ, phần còn lại truy vấn thẳng
+```
+
+Chạy trong worker, kích hoạt bởi cùng sự kiện commit mà `land_task` dùng. Không
+cần LLM — thuần code.
+
+Hệ quả quan trọng: **truy vấn spec trở nên rẻ và ổn định**. Hai agent hỏi cùng câu
+ở cùng thời điểm sẽ nhận cùng câu trả lời, khác hẳn tình trạng "mỗi lần đọc ra
+một kết luận".
+
+## Phát hiện trùng và xung đột
+
+Luồng khi có ý tưởng chức năng mới — thay thế việc "nhờ agent đọc spec":
+
+```
+mô tả chức năng mới
+   ↓ embed
+spec_search → top-K spec_item gần nghĩa  (pgvector)
+   ↓
+với mỗi ứng viên: kiểm tra neo có chồng lấn code không (dùng code graph)
+   ↓
+phân loại: duplicates | conflicts_with | refines | không liên quan
+   ↓
+ghi vào spec_relation → lần sau khỏi phán lại
+```
+
+Bước "ghi lại" là mấu chốt: kết luận trùng/xung đột được **lưu**, không phán lại
+từ đầu mỗi lần.
+
+> **Phụ thuộc chặn:** code graph hiện có `embeddings: 0` (đo trên
+> `voma-invoice`: 4.068 node, 30.864 cạnh, nhưng chưa embed node nào). Không có
+> embedding thì `spec_search` chỉ tra được theo tên định danh, không tra được
+> theo ngữ nghĩa. **Phải embed trước.**
+>
+> Đồng thời đồ thị đang **cũ**: build tại `3dbb750`, HEAD là `eaa6767`
+> (`head_matches_build: false`), và cả 16 project đều `graph_status='idle'` —
+> Control Tower không tự build lại. Phải nối vào workflow.
+
+## Bản thiết kế thực thi: chốt trước khi dispatch
+
+### Vì sao
+
+Với mô tả 250 ký tự, model **vẫn phải thiết kế** — nhưng nó thiết kế **bên trong
+mỗi lượt build**, và mỗi lần retry lại thiết kế lại từ đầu, mỗi lần một khác.
+Chính là bệnh tái suy diễn ở cấp task.
+
+Tách ra thì được **chênh lệch giá**:
+
+```
+HIỆN TẠI:  mô tả mỏng → [model mạnh: thiết kế + code] × 1.82 vòng
+ĐỀ XUẤT:   mô tả mỏng → [model mạnh: thiết kế] × 1 → [model rẻ: code] × N vòng
+```
+
+Thiết kế một lần bằng model mạnh, thực thi nhiều lần bằng model rẻ. Retry chỉ
+lặp lại phần rẻ. Đây cũng là câu trả lời thực tế cho mục tiêu giảm chi phí — theo
+**quota**, thứ đo được, chứ không theo đô-la, thứ hiện không đo được.
+
+### Nội dung bắt buộc
+
+Đủ chi tiết để một LLM yếu nhìn vào là làm được, không phải tự quyết định gì:
+
+- **`files`** — đường dẫn cụ thể, tạo/sửa/xoá, và *vì sao* file đó
+- **`changes`** — từng symbol: chữ ký hàm, hành vi mong đợi, các ca biên
+- **`data_changes`** — migration, đổi schema, tương thích ngược
+- **`test_plan`** — test nào phải thêm/sửa, khẳng định điều gì
+- **`risks`** — chỗ nào dễ hỏng, cần chú ý
+
+### Chốt chặn
+
+```
+task chỉ dispatch được cho executor rẻ khi:
+  impl_design tồn tại  VÀ  completeness >= ngưỡng
+ngược lại → hoặc dispatch cho model mạnh, hoặc chặn và đòi thiết kế trước
+```
+
+`completeness` do **code chấm**, không phải LLM tự chấm: có ít nhất 1 file, mỗi
+file có lý do, mỗi thay đổi có symbol + hành vi, có test_plan, mọi symbol nêu ra
+đều tồn tại trong code graph (hoặc được đánh dấu là tạo mới). Kiểm tra cơ học,
+không cần suy luận.
+
+## Ranh giới code / LLM
+
+Nguyên tắc: **LLM soạn và phán đoán; code kiểm tra, tính toán, và ghi nhớ.**
+
+| Việc | Ai làm |
+|---|---|
+| Gắn cờ spec lỗi thời khi commit | Code |
+| Chấm `completeness` của impl_design | Code |
+| Kiểm tra quy tắc 100% của WBS | Code |
+| Sinh mã WBS `1.2.3`, rollup tiến độ | Code / SQL |
+| Đối chiếu symbol trong design với code graph | Code |
+| Gợi ý `estimate_rounds` từ node tương tự | SQL |
+| — | — |
+| Soạn `spec_item`, ADR, charter, scope | LLM |
+| Soạn `impl_design` | LLM (model mạnh) |
+| Phán "trùng hay xung đột" trên ứng viên đã lọc | LLM |
+| Phân rã scope → WBS | LLM |
+
+Điểm mấu chốt: LLM **không bao giờ** được hỏi "cái này còn đúng không" — đó là
+việc của cơ chế mất hiệu lực. Hỏi LLM tức là quay lại tái suy diễn.
+
+## Tool surface
+
+Tách endpoint để cô lập context: `/mcp/spec` (8 tool dưới đây) và `/mcp/dev` (28
+tool hiện có). **Cùng một process**, chung DB, chung model — mục tiêu là cô lập
+context chứ không phải scale; hai process chỉ nhân đôi việc vận hành.
+
+```
+spec_search(project, query, kinds?)     → tìm trùng/xung đột TRƯỚC khi tạo task
+spec_get(ids[] | anchor)                → đọc spec_item + neo + quan hệ
+spec_write(ops[])                       → tạo/sửa/supersede theo lô
+spec_link(ops[])                        → neo vào code, nối quan hệ spec-spec
+spec_stale(project)                     → cái gì đang lỗi thời và vì sao
+impl_design(action, task_id, ...)       → soạn/đọc/chấm bản thiết kế thực thi
+pm_plan(project, ops?)                  → WBS: đọc cả cây hoặc sửa theo lô
+pm_document(action, project, doc_type)  → charter/scope/template
+```
+
+Tối ưu token bằng **một lệnh đọc béo + mutation theo lô**: `spec_get` và
+`pm_plan` trả nguyên cụm thay vì để LLM đi từng node. Tài liệu **không có gate**,
+chỉ version + `supersedes_id`.
+
+## Bàn giao sang tầng DEV
+
+```
+PM stage      DEV task status
+specify   →   impl_design đạt ngưỡng → create_task → todo
+build     →   dispatched / running          (executor rẻ)
+verify    →   awaiting-review / in-review
+integrate →   land_task → chạy cơ chế mất hiệu lực
+done      →   done
+              changes-requested → quay lại build; ghi nhận vào actual_rounds
+```
+
+**Cardinality 1:1.** Rework dùng lại chính task đó (`task_rounds`), nên
+`pm_wbs_node.task_id` đơn trị là đủ. Cần N task thì phân rã node sâu thêm — cũng
+là điều quy tắc 100% đòi hỏi.
+
+**Tầng DEV gần như không phải đổi gì:**
+
+- `task_events` + outbox đã có → đồng bộ `stage` tự động
+- `land_task` đã có → móc thêm bước gắn cờ spec lỗi thời
+- `depends_on` giữ nguyên
+- **Thay đổi DEV duy nhất**: thêm chốt `impl_design` vào điều kiện dispatch
+
+## Đã cắt gì khỏi bản trước và vì sao
+
+Bản `08-pm-layer.md` có những phần sau, nay **bỏ** vì không phục vụ hai mối lo đã
+nêu (chất lượng, lệch spec):
+
+| Phần bị cắt | Lý do |
+|---|---|
+| CPM / critical path | Công cụ dự báo *ngày*. Nền móng lập lịch cũng đang hỏng: concurrency là bể chung không lọc project (`task_validators.py:191`), và **không có hàng đợi** — `check_brakes` trả `queue=True, retry_after_seconds=30` tức là *retry*; `tasks.priority` chỉ dùng chọn agent (`agent_matcher.py:234`), không xếp thứ tự dispatch |
+| `pm_baseline` / variance | Để báo cáo cho khách hàng bên ngoài. Bối cảnh hiện tại không có |
+| `pm_report` / Gantt | Trang trí |
+| `pm_portfolio_policy` | Không liên quan chất lượng |
+| `estimate_cost_usd` | Không đo được (xem cảnh báo chi phí) |
+| Milestone | Đã cân nhắc và bỏ từ bản trước — không có mốc hợp đồng |
+
+**Vẫn nên làm nhưng tách riêng, không thuộc tầng này:** sửa hàng đợi dispatch từ
+retry ngẫu nhiên thành hàng đợi có thứ tự. Đây là lỗi vận hành thật (23 lần
+`dispatch_queue` bị từ chối), đáng sửa độc lập.
+
+## Thứ tự triển khai
+
+Xếp sao cho thứ rẻ và chặn cửa đi trước:
+
+```
+0. Nền đo lường
+   0.1  Sửa attribution llm_usage (điền task_id + agent_run_id)
+   0.2  Embed code graph + nối graph_status vào workflow CT
+
+1. Lõi spec sống                     2. Chất lượng đầu vào
+   1.1  Bảng spec_* + migration         2.1  impl_design + chấm completeness
+   1.2  spec_write / spec_get           2.2  Chốt dispatch theo completeness
+   1.3  Neo + cơ chế mất hiệu lực       2.3  Thí nghiệm đối chứng: đo vòng
+   1.4  spec_search (cần 0.2)                trước/sau khi có impl_design
+
+3. Khung nhìn việc
+   3.1  pm_wbs_node + quy tắc 100%
+   3.2  pm_document + pm_template (nạp từ Documents/agmx)
+   3.3  Đồng bộ stage từ task_events
+```
+
+Mục **0.2 chặn 1.4**: không embed thì không tìm được trùng theo ngữ nghĩa.
+Mục **2.3** là phép thử thật cho giả thuyết "đặc tả kỹ thì ít làm lại" — nếu số
+liệu không ủng hộ thì phải xem lại phần 2, đừng xây tiếp.
+
+## Việc còn treo
+
+- Nạp `/home/lupca/Documents/agmx` vào `pm_template`: phải tách **cấu trúc rỗng**
+  (thành template) khỏi **nội dung NextEvent** (là dữ liệu mẫu). File hiện lẫn cả
+  hai.
+- Kiến thức nền tảng quản lý dự án (vì sao cần WBS, khi nào dùng): dùng
+  `knowledge_items` sẵn có, ngoài phạm vi bản này.
+- Ngưỡng `completeness` bao nhiêu là đủ: phải hiệu chỉnh bằng dữ liệu thật ở mục
+  2.3, đừng chọn số tuỳ ý.
