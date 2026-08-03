@@ -2,6 +2,8 @@ import json
 import logging
 from collections.abc import Mapping
 
+from sqlalchemy import or_
+
 from app.db.models import (
     AgentRun,
     LLMUsage,
@@ -41,13 +43,22 @@ class AdminHandlersMixin:
         task_id = str(payload.get('task_id') or '').strip() or None
         agent_id = str(payload.get('agent_id') or '').strip() or None
         usage_query = self.db.query(LLMUsage)
-        if task_id:
-            usage_query = usage_query.filter(LLMUsage.task_id == task_id)
-        if agent_id:
-            usage_query = usage_query.join(AgentRun, LLMUsage.agent_run_id == AgentRun.id).filter(
-                AgentRun.agent_id == agent_id
+        if task_id or agent_id:
+            usage_query = usage_query.outerjoin(
+                AgentRun, LLMUsage.agent_run_id == AgentRun.id
             )
+        if task_id:
+            usage_query = usage_query.filter(
+                or_(LLMUsage.task_id == task_id, AgentRun.task_id == task_id)
+            )
+        if agent_id:
+            usage_query = usage_query.filter(AgentRun.agent_id == agent_id)
         usage = usage_query.all()
+        cli_runs = self.db.query(AgentRun)
+        if task_id:
+            cli_runs = cli_runs.filter(AgentRun.task_id == task_id)
+        if agent_id:
+            cli_runs = cli_runs.filter(AgentRun.agent_id == agent_id)
         resources = self.db.query(RunResourceUsage)
         if task_id or agent_id:
             resources = resources.join(AgentRun, RunResourceUsage.agent_run_id == AgentRun.id)
@@ -55,6 +66,25 @@ class AdminHandlersMixin:
                 resources = resources.filter(AgentRun.task_id == task_id)
             if agent_id:
                 resources = resources.filter(AgentRun.agent_id == agent_id)
+        resource_rows = resources.all()
+        measured_calls = len(usage)
+        unmeasured_cli_runs = cli_runs.count()
+        if measured_calls and unmeasured_cli_runs:
+            cost_status = 'partial'
+            cost_note = (
+                'Recorded API usage is measured; subscription CLI run cost is not measured.'
+            )
+        elif measured_calls:
+            cost_status = 'measured'
+            cost_note = 'Recorded API usage is measured, including a measured value of zero.'
+        elif unmeasured_cli_runs:
+            cost_status = 'unmeasured'
+            cost_note = (
+                'Subscription CLI runs do not expose authoritative token cost; zero is not a cost estimate.'
+            )
+        else:
+            cost_status = 'no_data'
+            cost_note = 'No recorded API usage or completed CLI run is available for this scope.'
         return {
             'task_id': task_id,
             'agent_id': agent_id,
@@ -63,8 +93,14 @@ class AdminHandlersMixin:
             'output_tokens': sum(row.output_tokens or 0 for row in usage),
             'cached_tokens': sum(row.cached_tokens or 0 for row in usage),
             'cost_usd': round(sum(float(row.cost_usd or 0) for row in usage), 8),
-            'runs': resources.count(),
-            'run_cost_usd': round(sum(float(row.estimated_cost_usd or 0) for row in resources), 8),
+            'cost_status': cost_status,
+            'cost_scope': 'recorded_api_usage_only',
+            'unmeasured_cli_runs': unmeasured_cli_runs,
+            'cost_note': cost_note,
+            'runs': len(resource_rows),
+            'run_cost_usd': round(
+                sum(float(row.estimated_cost_usd or 0) for row in resource_rows), 8
+            ),
         }
 
     async def _handle_suggest_agents(self, args: str, session_id: str) -> dict:

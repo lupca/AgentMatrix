@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from unittest.mock import AsyncMock, patch
+from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
 
-from app.db.models import Agent, LLMUsage, Session, Task
-from app.services.coordinator import (
-    CoordinatorService,
-)
+from app.db.models import Agent, AgentRun, LLMUsage, Project, Session, Task
+from app.services.coordinator import CoordinatorService
 from app.services.llm_client import UsageCounts
 from app.services.providers import ProviderResponse
 from app.services.task_orchestration import TaskOrchestrationService
+from app.services.task_validators import TaskValidator
 
 
 @dataclass
@@ -183,7 +183,52 @@ async def test_openai_and_cli_paths_share_rehydrated_history_in_one_session(db_s
     assert "USER:\nWhat is my name?" in prompt
     assert session.selected_provider == "anthropic"
     assert session.selected_model == "claude-sonnet-4"
-    assert db_session.query(LLMUsage).count() == 2
+    # The CLI path only estimates tokens from text length. It must not create
+    # a measured usage/cost ledger row for a subscription-backed invocation.
+    assert db_session.query(LLMUsage).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_task_scoped_usage_is_attributed_and_included_in_task_cost(db_session):
+    openai = _FakeProvider("openai", ["Attributed response"])
+    service = _service(db_session, openai)
+    project = Project(id="usage-project", name="Usage Project")
+    task = Task(id="USAGE-1", project=project.id, title="Attribute API usage")
+    run = AgentRun(
+        id="usage-run-1",
+        task_id=task.id,
+        agent_id="@usage-agent",
+        cli="codex",
+        command="codex exec task",
+    )
+    session = Session(
+        id="usage-session-1",
+        task_id=task.id,
+        project_id=project.id,
+        context_level="task",
+        messages=[],
+    )
+    db_session.add_all([project, task, run, session])
+    db_session.commit()
+
+    with patch(
+        "app.services.coordinator.calculate_cost",
+        return_value=Decimal("1.25000000"),
+    ):
+        await service.complete_turn(
+            session,
+            "Record this task usage",
+            model="gpt-4o",
+            idempotency_key="usage-turn-1",
+            agent_run_id=run.id,
+        )
+
+    usage = db_session.query(LLMUsage).one()
+    assert usage.session_id == session.id
+    assert usage.task_id == task.id
+    assert usage.agent_run_id == run.id
+    assert usage.cost_usd == Decimal("1.25000000")
+    assert TaskValidator(db_session)._task_cost(task) == Decimal("1.25000000")
 
 
 @pytest.mark.asyncio

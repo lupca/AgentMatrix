@@ -53,6 +53,7 @@ class CLIProvider:
             model=model,
             request_id=f"cli-{uuid.uuid4()}",
             stop_reason="stop",
+            usage_is_measured=False,
             usage=UsageCounts(
                 input_tokens=sum(_estimate_tokens(item.get("content", "")) for item in messages),
                 output_tokens=0,

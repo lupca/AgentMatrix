@@ -20,6 +20,9 @@ class ProviderResponse:
     model: str
     text: str = ""
     usage: UsageCounts = field(default_factory=UsageCounts)
+    # CLI-backed providers can estimate tokens from text length, but that is
+    # not provider telemetry and must not be persisted as measured usage/cost.
+    usage_is_measured: bool = True
     request_id: str | None = None
     stop_reason: str | None = None
     tool_calls: list[dict[str, Any]] | None = None

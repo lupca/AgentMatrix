@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from app.core.config import settings
 from app.db.models import Agent as AgentModel
-from app.db.models import LLMUsage
+from app.db.models import AgentRun, LLMUsage
 from app.db.models import Session as SessionModel
 from app.db.models import Task as TaskModel
 from app.graph.context import invalidate_context_snapshot
@@ -750,6 +750,8 @@ class CoordinatorService:
         latency_ms: int,
         tool_iterations: int = 0,
         digest_event_id: int | None = None,
+        usage_task_id: str | None = None,
+        usage_agent_run_id: str | None = None,
     ) -> CoordinatorResult:
         assistant = self.append_message(
             db_session,
@@ -775,7 +777,13 @@ class CoordinatorService:
         db_session.selected_provider = response.provider
         db_session.selected_model = response.model
         self.db.commit()
-        self._record_usage(db_session, response, latency_ms)
+        self._record_usage(
+            db_session,
+            response,
+            latency_ms,
+            task_id=usage_task_id,
+            agent_run_id=usage_agent_run_id,
+        )
         logger.info(
             "Coordinator turn completed for session=%s turn_id=%s model=%s iterations=%d latency_ms=%d",
             db_session.id,
@@ -814,7 +822,12 @@ class CoordinatorService:
         db_session: SessionModel,
         response: ProviderResponse,
         latency_ms: int,
+        *,
+        task_id: str | None,
+        agent_run_id: str | None,
     ) -> None:
+        if not response.usage_is_measured:
+            return
         usage = response.usage or UsageCounts()
 
         # Detect operation type
@@ -826,7 +839,8 @@ class CoordinatorService:
 
         record = LLMUsage(
             session_id=db_session.id,
-            task_id=db_session.task_id,
+            task_id=task_id,
+            agent_run_id=agent_run_id,
             model=response.model,
             provider=response.provider,
             operation=operation,
@@ -852,6 +866,33 @@ class CoordinatorService:
                 db_session.id,
                 response.model,
             )
+
+    def _usage_attribution(
+        self,
+        db_session: SessionModel,
+        agent_run_id: str | None,
+    ) -> tuple[str | None, str | None]:
+        """Resolve task/run attribution without storing a stale run on Session."""
+        if not agent_run_id:
+            return db_session.task_id, None
+        run = self.db.get(AgentRun, agent_run_id)
+        if run is None:
+            logger.warning(
+                "Ignoring unknown agent_run_id=%s for usage session=%s",
+                agent_run_id,
+                db_session.id,
+            )
+            return db_session.task_id, None
+        if db_session.task_id and db_session.task_id != run.task_id:
+            logger.warning(
+                "Ignoring mismatched agent_run_id=%s task=%s for usage session=%s task=%s",
+                run.id,
+                run.task_id,
+                db_session.id,
+                db_session.task_id,
+            )
+            return db_session.task_id, None
+        return db_session.task_id or run.task_id, run.id
 
     def _persist_failure(
         self,
@@ -898,6 +939,7 @@ class CoordinatorService:
         provider: str | None = None,
         idempotency_key: str | None = None,
         temperature: float = 0.7,
+        agent_run_id: str | None = None,
     ) -> CoordinatorResult:
         """Complete and persist one non-streaming coordinator turn."""
 
@@ -907,6 +949,9 @@ class CoordinatorService:
             # The ORM object may have been loaded before another request
             # finished waiting on this lock.
             self.db.refresh(db_session)
+            usage_task_id, usage_agent_run_id = self._usage_attribution(
+                db_session, agent_run_id
+            )
             self.ensure_user_message(db_session, message, turn_id)
             completed = self.completed_turn(db_session, turn_id)
             if completed:
@@ -925,10 +970,11 @@ class CoordinatorService:
                     temperature=kwargs.get("temperature", 0),
                 )
                 # Track compaction usage
-                if response.usage:
+                if response.usage and response.usage_is_measured:
                     record = LLMUsage(
                         session_id=db_session.id,
-                        task_id=db_session.task_id,
+                        task_id=usage_task_id,
+                        agent_run_id=usage_agent_run_id,
                         model=response.model,
                         provider=response.provider,
                         operation="compaction",
@@ -1006,6 +1052,8 @@ class CoordinatorService:
                                     latency_ms=round((perf_counter() - started) * 1000),
                                     tool_iterations=iteration,
                                     digest_event_id=digest_event_id,
+                                    usage_task_id=usage_task_id,
+                                    usage_agent_run_id=usage_agent_run_id,
                                 )
 
                             # Track tool call responses separately (final response tracked in _persist_success)
@@ -1013,6 +1061,8 @@ class CoordinatorService:
                                 db_session,
                                 response,
                                 latency_ms=round((perf_counter() - started) * 1000),
+                                task_id=usage_task_id,
+                                agent_run_id=usage_agent_run_id,
                             )
 
                             tool_activity = True
@@ -1095,6 +1145,8 @@ class CoordinatorService:
                                 latency_ms=round((perf_counter() - started) * 1000),
                                 tool_iterations=iteration,
                                 digest_event_id=digest_event_id,
+                                usage_task_id=usage_task_id,
+                                usage_agent_run_id=usage_agent_run_id,
                             )
                     else:
                         response = await self.llm_service.complete(
@@ -1112,6 +1164,8 @@ class CoordinatorService:
                         response=response,
                         latency_ms=round((perf_counter() - started) * 1000),
                         digest_event_id=digest_event_id,
+                        usage_task_id=usage_task_id,
+                        usage_agent_run_id=usage_agent_run_id,
                     )
                 except Exception as exc:
                     if (
@@ -1141,6 +1195,7 @@ class CoordinatorService:
         provider: str | None = None,
         idempotency_key: str | None = None,
         temperature: float = 0.7,
+        agent_run_id: str | None = None,
     ) -> AsyncIterator[str | dict[str, Any]]:
         """Stream text and tool progress, then persist one logical response."""
 
@@ -1148,6 +1203,9 @@ class CoordinatorService:
         lock = self._session_locks.setdefault(db_session.id, asyncio.Lock())
         async with lock:
             self.db.refresh(db_session)
+            usage_task_id, usage_agent_run_id = self._usage_attribution(
+                db_session, agent_run_id
+            )
             self.ensure_user_message(db_session, message, turn_id)
             completed = self.completed_turn(db_session, turn_id)
             if completed:
@@ -1167,10 +1225,11 @@ class CoordinatorService:
                     temperature=kwargs.get("temperature", 0),
                 )
                 # Track compaction usage
-                if response.usage:
+                if response.usage and response.usage_is_measured:
                     record = LLMUsage(
                         session_id=db_session.id,
-                        task_id=db_session.task_id,
+                        task_id=usage_task_id,
+                        agent_run_id=usage_agent_run_id,
                         model=response.model,
                         provider=response.provider,
                         operation="compaction",
@@ -1257,6 +1316,8 @@ class CoordinatorService:
                                 db_session,
                                 response,
                                 latency_ms=round((perf_counter() - started) * 1000),
+                                task_id=usage_task_id,
+                                agent_run_id=usage_agent_run_id,
                             )
 
                             tool_activity = True
@@ -1374,6 +1435,8 @@ class CoordinatorService:
                         latency_ms=round((perf_counter() - started) * 1000),
                         tool_iterations=iteration if getattr(agent.agent_type, "value", agent.agent_type) == "api" else 1,
                         digest_event_id=digest_event_id,
+                        usage_task_id=usage_task_id,
+                        usage_agent_run_id=usage_agent_run_id,
                     )
                     return
                 except Exception as exc:
@@ -1403,6 +1466,7 @@ class CoordinatorService:
         message: str,
         *,
         source_event_id: int,
+        agent_run_id: str | None = None,
     ) -> CoordinatorResult:
         """Run a complete non-SSE turn for a worker wake-up event."""
 
@@ -1410,6 +1474,7 @@ class CoordinatorService:
             db_session,
             message,
             idempotency_key=f"wake-{source_event_id}",
+            agent_run_id=agent_run_id,
         )
         if result.cached:
             return result

@@ -79,6 +79,7 @@ async def test_llm_service_forwards_cwd_through_cli_provider_to_spawn():
     assert response.text == '{"ok": true}'
     assert dispatcher.spawn_kwargs["cwd"] == "/project/repo"
     assert dispatcher.spawn_kwargs["effort"] == "high"
+    assert response.usage_is_measured is False
 
 
 def test_usage_extraction_normalizes_anthropic_cache_tokens():
