@@ -382,3 +382,104 @@ def test_prompt_without_description_or_context_still_valid():
     prompt = _build_prompt(task, [])
     assert "Task description:" not in prompt
     assert "Project context" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_warns_when_graph_raises():
+    """Graph exception must NOT be silent — plan is generated but flagged."""
+    with patch(
+        "app.services.spec_plan_generator.semantic_search",
+        new=AsyncMock(side_effect=RuntimeError("graph MCP unreachable")),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(
+            _valid_payload(spec_clarity="high", open_questions=[])
+        ))),
+    ):
+        result, flows = await generate_spec_plan(_task(), "/tmp/repo", _agent())
+
+    assert result.spec_clarity == "low"
+    assert any("without repository grounding" in q for q in result.open_questions)
+    assert flows == []
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_warns_when_graph_returns_empty():
+    """Empty graph results must also flag the plan as ungrounded."""
+    with patch(
+        "app.services.spec_plan_generator.semantic_search",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(
+            _valid_payload(spec_clarity="medium", open_questions=[])
+        ))),
+    ):
+        result, _ = await generate_spec_plan(_task(), "/tmp/repo", _agent())
+
+    assert result.spec_clarity == "low"
+    assert any("without repository grounding" in q for q in result.open_questions)
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_graph_error_preserves_existing_low_clarity():
+    """If the LLM already set spec_clarity='low', post-process keeps it."""
+    with patch(
+        "app.services.spec_plan_generator.semantic_search",
+        new=AsyncMock(side_effect=ConnectionError("refused")),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(
+            _valid_payload(spec_clarity="low", open_questions=["already unclear"])
+        ))),
+    ):
+        result, _ = await generate_spec_plan(_task(), "/tmp/repo", _agent())
+
+    assert result.spec_clarity == "low"
+    assert "already unclear" in result.open_questions
+    assert any("without repository grounding" in q for q in result.open_questions)
+
+
+def test_build_search_query_combines_raw_input_and_title():
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_search_query
+
+    task = Task(
+        id="Q-1", project="p", title="Fix auth bug",
+        raw_input="Rate limiter in app/auth.py bypassed when X-Forwarded-For is spoofed",
+    )
+    query = _build_search_query(task)
+    assert "Rate limiter" in query
+    assert "Fix auth bug" in query
+
+
+def test_build_search_query_deduplicates_title_in_raw_input():
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_search_query
+
+    task = Task(
+        id="Q-2", project="p", title="Fix auth bug",
+        raw_input="Fix auth bug in the login flow",
+    )
+    query = _build_search_query(task)
+    # title is a substring of raw_input (case-insensitive), so not duplicated
+    assert query.lower().count("fix auth bug") == 1
+
+
+def test_build_prompt_includes_graph_warning():
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_prompt
+
+    task = Task(id="T-3", project="p1", title="Something")
+    prompt = _build_prompt(task, [], graph_warning="graph is broken")
+    assert "graph is broken" in prompt
+    assert "spec_clarity" in prompt
+
+
+def test_build_prompt_no_warning_when_graph_ok():
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_prompt
+
+    task = Task(id="T-4", project="p1", title="Something")
+    prompt = _build_prompt(task, ["app/foo.py"])
+    assert "IMPORTANT" not in prompt
