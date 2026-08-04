@@ -9,7 +9,12 @@ from sqlalchemy import inspect
 from app.db.models import OutboxEvent, Project, SpecAnchor, SpecItem
 from app.services.command_router import CommandRouter
 from app.services.outbox import publish_pending_events
-from app.services.spec_anchor import apply_commit_staleness, compute_anchor_sha
+from app.services.spec_anchor import (
+    apply_commit_staleness,
+    compute_anchor_sha,
+    extract_python_symbol_source,
+    hash_symbol_source,
+)
 from app.services.spec_service import SpecError, write_specs
 
 
@@ -74,6 +79,56 @@ def test_anchor_op_hashes_symbol_content_from_repo(anchored_item, db_session, gi
     assert row.anchor_sha == expected
 
 
+def test_python_anchor_supports_assignments_and_class_attributes(tmp_path):
+    source = """MAX_COST = 10
+
+class Config:
+    LIMIT: int = 3
+"""
+    assert extract_python_symbol_source(source, "MAX_COST") == "MAX_COST = 10"
+    assert extract_python_symbol_source(source, "Config.LIMIT") == "LIMIT: int = 3"
+    assert extract_python_symbol_source(source, "missing") is None
+
+    path = tmp_path / "settings.py"
+    path.write_text(source)
+    assert compute_anchor_sha(str(tmp_path), "settings.py", "MAX_COST") == hash_symbol_source(
+        "MAX_COST = 10"
+    )
+
+
+def test_non_python_anchor_hashes_whole_file_and_staleness_uses_same_mode(
+    db_session, git_repo_root
+):
+    config_path = Path(git_repo_root) / "nginx.conf"
+    config_path.write_text("client_max_body_size 10m;\nkeep = true\n")
+    _commit(git_repo_root, "add config")
+
+    db_session.add(Project(id="config-anchor-proj", name="Config project", repo_root=git_repo_root))
+    db_session.commit()
+    written = write_specs(db_session, [
+        {
+            "op": "create", "id": "config-anchor-item", "project_id": "config-anchor-proj",
+            "kind": "constraint", "title": "config", "body": "config must stay valid",
+            "status": "active",
+        },
+        {
+            "op": "anchor", "spec_item_id": "config-anchor-item", "repo": git_repo_root,
+            "path": "nginx.conf", "symbol": "client_max_body_size", "relation": "constrains",
+        },
+    ])
+    assert written["anchors"][0]["anchor_sha"] == compute_anchor_sha(
+        git_repo_root, "nginx.conf", "client_max_body_size"
+    )
+
+    config_path.write_text("client_max_body_size 10m;\nkeep = false\n")
+    head = _commit(git_repo_root, "change unrelated config line")
+    result = apply_commit_staleness(db_session, "config-anchor-proj", git_repo_root, head)
+
+    item = db_session.get(SpecItem, "config-anchor-item")
+    assert item.status == "stale"
+    assert result["staled"][0]["reason"].startswith("file 'client_max_body_size'")
+
+
 def test_anchor_op_ignores_supplied_hash_when_source_is_available(
     anchored_item, db_session, git_repo_root
 ):
@@ -106,6 +161,23 @@ def test_anchor_op_rejects_commit_sha_even_when_source_is_available(
                 "op": "anchor", "spec_item_id": "spec-anchor-invalid", "repo": git_repo_root,
                 "path": "mod.py", "symbol": "foo", "relation": "implements",
                 "anchor_sha": "b" * 40,
+            },
+        ])
+
+
+def test_anchor_op_rejects_unresolved_python_symbol_even_with_manual_hash(
+    anchored_item, db_session, git_repo_root
+):
+    with pytest.raises(SpecError, match="could not resolve Python symbol"):
+        write_specs(db_session, [
+            {
+                "op": "create", "id": "spec-anchor-unresolved-python", "project_id": "anchor-proj",
+                "kind": "constraint", "title": "invalid Python symbol", "body": "reject it",
+            },
+            {
+                "op": "anchor", "spec_item_id": "spec-anchor-unresolved-python", "repo": git_repo_root,
+                "path": "mod.py", "symbol": "not_a_declaration", "relation": "implements",
+                "anchor_sha": "b" * 64,
             },
         ])
 

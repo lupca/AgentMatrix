@@ -2,8 +2,9 @@
 """Recalculate living-spec anchor hashes from each project's checked-out repo.
 
 This is a one-off data repair for anchors written with a commit SHA instead of
-the hash of the anchored symbol.  It never deletes anchors.  Anchors whose
-file or symbol cannot be resolved are reported and left unchanged.
+the canonical content hash. Non-Python anchors are recalculated as whole-file
+hashes. Python anchors are recalculated from local AST declarations; Python
+anchors that do not identify a local declaration are deleted and reported.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "backend"))
 
 from app.db.base import SessionLocal
 from app.db.models import Project, SpecAnchor, SpecItem
-from app.services.spec_anchor import compute_anchor_sha
+from app.services.spec_anchor import compute_anchor_sha, is_python_path, source_available
 
 _ANCHOR_SHA_RE = re.compile(r"[0-9a-fA-F]{64}")
 
@@ -29,10 +30,10 @@ def recalculate(*, dry_run: bool = False) -> dict:
     db = SessionLocal()
     legacy_candidates = 0
     updated = 0
-    recomputed_matches = 0
     all_computable = 0
-    valid_anchor_drift = 0
+    valid_anchor_drift_recomputed = 0
     uncomputable: list[dict[str, str | None]] = []
+    deleted_python: list[dict[str, str | None]] = []
     try:
         rows = (
             db.query(SpecAnchor, SpecItem.project_id, Project.repo_root)
@@ -48,25 +49,26 @@ def recalculate(*, dry_run: bool = False) -> dict:
                 legacy_candidates += 1
             current_sha = compute_anchor_sha(repo_root or "", anchor.path, anchor.symbol)
             if current_sha is None:
-                if is_legacy_anchor:
-                    uncomputable.append({
-                        "anchor_id": anchor.id,
-                        "project_id": project_id,
-                        "repo_root": repo_root,
-                        "path": anchor.path,
-                        "symbol": anchor.symbol,
-                        "stored_anchor_sha": anchor.anchor_sha,
-                    })
+                detail = {
+                    "anchor_id": anchor.id,
+                    "project_id": project_id,
+                    "repo_root": repo_root,
+                    "path": anchor.path,
+                    "symbol": anchor.symbol,
+                    "stored_anchor_sha": anchor.anchor_sha,
+                }
+                if is_python_path(anchor.path) and source_available(repo_root or "", anchor.path):
+                    deleted_python.append(detail)
+                    if not dry_run:
+                        db.delete(anchor)
+                else:
+                    uncomputable.append(detail)
                 continue
 
             all_computable += 1
-            if not is_legacy_anchor:
-                if current_sha != anchor.anchor_sha:
-                    valid_anchor_drift += 1
-                continue
-
-            recomputed_matches += 1
             if current_sha != anchor.anchor_sha:
+                if not is_legacy_anchor:
+                    valid_anchor_drift_recomputed += 1
                 updated += 1
                 if not dry_run:
                     anchor.anchor_sha = current_sha
@@ -83,13 +85,13 @@ def recalculate(*, dry_run: bool = False) -> dict:
     return {
         "total": len(rows),
         "legacy_candidates": legacy_candidates,
-        "recomputed_matches": recomputed_matches,
-        "matched_after_recalculation": recomputed_matches,
         "updated": updated,
+        "deleted_python": len(deleted_python),
+        "deleted_python_anchors": deleted_python,
         "uncomputable": len(uncomputable),
         "uncomputable_anchors": uncomputable,
         "all_anchors_computable": all_computable,
-        "valid_anchor_drift_preserved": valid_anchor_drift,
+        "valid_anchor_drift_recomputed": valid_anchor_drift_recomputed,
         "dry_run": dry_run,
     }
 

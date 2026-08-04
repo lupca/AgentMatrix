@@ -975,9 +975,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "Write living-spec items, relations, code anchors, and manual task links "
                 "in one transaction. Task-link relations are implements, modifies, "
                 "violates, or references. "
-                "For anchor operations, omit anchor_sha: the server computes the symbol "
-                "hash from the repository source. A manual fallback is accepted only "
-                "when the repo is not checked out and must be exactly 64 hex characters. "
+                "For anchor operations, omit anchor_sha: the server computes a Python "
+                "declaration hash or a whole-file hash for non-Python paths. A manual "
+                "fallback is accepted only when the repo is not checked out and must be "
+                "exactly 64 hex characters. "
                 "Always preserve derived_from_sha and confidence when recording a claim."
             ),
             parameters={

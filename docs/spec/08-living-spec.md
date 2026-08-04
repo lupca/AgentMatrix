@@ -133,7 +133,7 @@ spec_anchor (
   spec_item_id,
   repo, path, symbol,   -- trỏ tới node của code graph
   relation,             -- implements | constrains | tests | documents
-  anchor_sha            -- băm nội dung symbol lúc neo
+  anchor_sha            -- băm khai báo Python hoặc toàn bộ file lúc neo
 )
 
 spec_relation (
@@ -249,10 +249,9 @@ cần LLM — thuần code.
 **Đã triển khai (CTV2-1342):** `app.services.spec_anchor.apply_commit_staleness`,
 gọi từ `_publish_graph_rebuild` trong `app.services.outbox` — cùng
 `OutboxEvent(event_type="graph_rebuild_requested")` mà CTV2-1339 dùng để
-rebuild graph, không dựng event mới. `anchor_sha` băm bằng
-`hash_symbol_source` trên block trích ra bởi `extract_symbol_source` (khớp
-định nghĩa theo dòng `def/class/function/...`, cắt block theo indent hoặc
-brace-depth — heuristic, không cần parser riêng theo ngôn ngữ). Diff dùng
+rebuild graph, không dựng event mới. Với `.py`, `anchor_sha` băm bằng
+`hash_symbol_source` trên khai báo cục bộ trích bằng AST. Với mọi file khác,
+`anchor_sha` băm toàn bộ file; `symbol` chỉ là nhãn mô tả. Diff dùng
 `git diff --name-only <before> <after>`: với sha đơn (merge commit của
 `land_task`) thì `before = sha^1`; với `result_ref` dạng `<base>..<head>`
 (worktree trước khi land) thì dùng thẳng làm range. Neo tạo qua op `"anchor"`
