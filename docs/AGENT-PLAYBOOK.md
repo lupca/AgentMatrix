@@ -24,6 +24,7 @@ lupca — tiếng Việt, vai quản lý (không đọc sâu code, vì thế m�
 - **KHÔNG dùng fable**. Commit + push thẳng `main`, message nói VÌ SAO.
 - **Báo cáo trung thực nguyên văn**: failed là failed; khoe cả cái mình làm hỏng.
 - Chỉ làm dự án đang được giao — task của project khác thì để nguyên.
+- **Bảo vệ repo chính và backend**: Executor CHỈ được thao tác git trong worktree riêng (`/tmp/control-tower-worktrees/...`). KHÔNG checkout/reset/stash trong repo chính, KHÔNG gửi SIGTERM/restart backend giữa chừng làm sập session coordinator.
 
 ## 1. Vòng lặp giải quyết vấn đề (làm đúng thứ tự này)
 

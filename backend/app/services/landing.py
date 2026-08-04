@@ -120,9 +120,14 @@ def land_result(repo_root: str, head: str, message: str) -> LandingResult:
 
     branch = _git(repo_root, "rev-parse", "--abbrev-ref", "HEAD")
     if branch.returncode != 0 or branch.stdout.strip() == "HEAD":
+        head_sha = _git(repo_root, "rev-parse", "--short", "HEAD").stdout.strip()
+        sha_info = f" (at {head_sha})" if head_sha else ""
         return LandingResult(
             ok=False,
-            error="repo is on a detached HEAD; check out the integration branch first",
+            error=(
+                f"repo is on a detached HEAD{sha_info}; "
+                "check out the integration branch first using: git checkout main"
+            ),
         )
 
     # Idempotent: an earlier attempt (or a human) may have merged already.
@@ -136,11 +141,16 @@ def land_result(repo_root: str, head: str, message: str) -> LandingResult:
     # the merge itself collides with them (git aborts on its own then).
     dirty = _git(repo_root, "status", "--porcelain", "--untracked-files=no")
     if dirty.stdout.strip():
+        dirty_lines = [line.strip() for line in dirty.stdout.strip().splitlines() if line.strip()]
+        dirty_files = [line.split(maxsplit=1)[-1] for line in dirty_lines]
+        files_str = ", ".join(dirty_files[:5])
+        if len(dirty_files) > 5:
+            files_str += f" (+{len(dirty_files) - 5} more)"
         return LandingResult(
             ok=False,
             error=(
-                "repo working tree has uncommitted tracked changes; "
-                "commit or stash them before landing"
+                f"repo working tree has uncommitted tracked changes in: {files_str}; "
+                "commit or stash them before landing using: git stash"
             ),
         )
 

@@ -16,18 +16,18 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.drop_constraint("ck_outbox_events_type", "outbox_events", type_="check")
-    op.create_check_constraint(
-        "ck_outbox_events_type",
-        "outbox_events",
-        "event_type IN ('run_requested', 'graph_rebuild_requested')",
-    )
+    with op.batch_alter_table("outbox_events") as batch_op:
+        batch_op.drop_constraint("ck_outbox_events_type", type_="check")
+        batch_op.create_check_constraint(
+            "ck_outbox_events_type",
+            "event_type IN ('run_requested', 'graph_rebuild_requested')",
+        )
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_outbox_events_type", "outbox_events", type_="check")
-    op.create_check_constraint(
-        "ck_outbox_events_type",
-        "outbox_events",
-        "event_type IN ('run_requested')",
-    )
+    with op.batch_alter_table("outbox_events") as batch_op:
+        batch_op.drop_constraint("ck_outbox_events_type", type_="check")
+        batch_op.create_check_constraint(
+            "ck_outbox_events_type",
+            "event_type IN ('run_requested')",
+        )

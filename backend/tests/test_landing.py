@@ -93,7 +93,8 @@ def test_dirty_tracked_tree_refuses_to_land(repo):
     result = land_result(str(repo), head, "Merge T-1")
 
     assert not result.ok
-    assert "uncommitted" in result.error
+    assert "uncommitted tracked changes in: a.txt" in result.error
+    assert "git stash" in result.error
 
 
 def test_untracked_files_do_not_block_landing(repo):
@@ -125,11 +126,13 @@ def test_missing_head_commit_fails(repo):
 def test_detached_head_fails(repo):
     _, head = _run_branch_commit(repo)
     _git(repo, "checkout", "-q", "--detach")
+    detached_sha = _git(repo, "rev-parse", "--short", "HEAD").stdout.strip()
 
     result = land_result(str(repo), head, "Merge T-1")
 
     assert not result.ok
-    assert "detached" in result.error
+    assert f"detached HEAD (at {detached_sha})" in result.error
+    assert "git checkout main" in result.error
 
 
 @pytest.fixture

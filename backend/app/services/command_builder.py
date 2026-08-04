@@ -301,6 +301,11 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
         '- get_impact_radius {"file": "<project-relative-path>"}\n'
         '- get_minimal_context {"query": "<search-text>", "limit": 10}'
     )
+    sections.append(
+        "Execution boundaries:\n"
+        "- Perform git operations ONLY inside your assigned worktree. NEVER checkout, reset, stash, or switch branches in the main repository.\n"
+        "- NEVER send process signals (e.g. SIGTERM/kill) or restart backend/workers."
+    )
     if task.acceptance_criteria:
         sections.append(
             "Acceptance criteria:\n"
