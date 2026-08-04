@@ -3,9 +3,11 @@ import json
 import pytest
 
 from app.db.models import Agent, AgentRun, LLMUsage, Project, RunResourceUsage, Task
+from app.services.command_router_handlers import admin_handlers
 from app.services.command_router import CommandRouter
 from app.services.task_validators import TaskValidator
 from app.workers.cli_executor import _record_cli_usage, _record_run_resource_usage
+from app.workers import output_parser
 from app.workers.output_parser import _extract_explicit_result_ref, parse_cli_token_usage
 
 
@@ -150,7 +152,7 @@ CODEX_OUTPUT = "\n".join(
         (
             "claude",
             CLAUDE_OUTPUT,
-            {"input_tokens": 2, "output_tokens": 14, "cached_tokens": 15273, "cost_usd": 0.139},
+            {"input_tokens": 15275, "output_tokens": 14, "cached_tokens": 15273, "cost_usd": 0.139},
         ),
         (
             "qwen",
@@ -160,7 +162,7 @@ CODEX_OUTPUT = "\n".join(
         (
             "agy",
             AGY_OUTPUT,
-            {"input_tokens": 10249, "output_tokens": 79, "cached_tokens": 8142},
+            {"input_tokens": 18391, "output_tokens": 79, "cached_tokens": 8142},
         ),
         (
             "codex",
@@ -175,7 +177,9 @@ CODEX_OUTPUT = "\n".join(
     ],
 )
 def test_parse_cli_token_usage(cli, output, expected):
-    assert parse_cli_token_usage(cli, output) == expected
+    parsed = parse_cli_token_usage(cli, output)
+    assert parsed == expected
+    assert parsed["cached_tokens"] <= parsed["input_tokens"]
 
 
 def test_parse_cli_token_usage_accepts_jsonl_result_as_last_object():
@@ -196,7 +200,7 @@ def test_parse_cli_token_usage_accepts_jsonl_result_as_last_object():
             "agy",
             AGY_STREAM_OUTPUT,
             "agy-stream-ref",
-            {"input_tokens": 10249, "output_tokens": 79, "cached_tokens": 8142},
+            {"input_tokens": 18391, "output_tokens": 79, "cached_tokens": 8142},
         ),
         (
             "qwen",
@@ -217,7 +221,7 @@ def test_parse_claude_cost_has_same_session_scope_as_total_usage():
     usage = parse_cli_token_usage("claude", CLAUDE_MULTI_MODEL_OUTPUT)
 
     assert usage == {
-        "input_tokens": 224,
+        "input_tokens": 13659336,
         "output_tokens": 69332,
         "cached_tokens": 13659112,
         "cost_usd": pytest.approx(6.175989600000001),
@@ -251,7 +255,7 @@ def test_parse_cli_token_usage_extracts_last_usage_from_json_array():
     )
     usage = parse_cli_token_usage("claude", array_line)
     assert usage == {
-        "input_tokens": 100,
+        "input_tokens": 110,
         "output_tokens": 50,
         "cached_tokens": 10,
         "cost_usd": 0.05,
@@ -274,7 +278,7 @@ def test_parse_cli_token_usage_extracts_usage_from_array_after_banner_garbage():
     )
     usage = parse_cli_token_usage("agy", stdout)
     assert usage == {
-        "input_tokens": 200,
+        "input_tokens": 240,
         "output_tokens": 80,
         "cached_tokens": 40,
     }
@@ -343,7 +347,7 @@ def test_record_cli_usage_attributes_run_and_task(db_session):
     assert usage.task_id == task.id
     assert usage.model == "claude-opus-5"
     assert usage.provider == "claude"
-    assert usage.input_tokens == 2
+    assert usage.input_tokens == 15275
     assert usage.output_tokens == 14
     assert usage.cached_tokens == 15273
     assert float(usage.cost_usd) == pytest.approx(0.139)
@@ -386,6 +390,116 @@ def test_record_cli_usage_codex_attributes_run_and_task(db_session):
     assert usage.output_tokens == 5
     assert usage.cached_tokens == 9984
     assert float(usage.cost_usd) == 0.0
+
+
+def test_parse_cli_token_usage_warns_and_caps_invalid_subset(monkeypatch):
+    output = json.dumps(
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 10,
+                "cached_input_tokens": 99,
+                "output_tokens": 2,
+            },
+        }
+    )
+
+    warnings = []
+    monkeypatch.setattr(output_parser.logger, "warning", lambda *args: warnings.append(args))
+    usage = parse_cli_token_usage("codex", output)
+
+    assert usage["input_tokens"] == 10
+    assert usage["cached_tokens"] == 10
+    assert "invariant violated" in warnings[0][0]
+
+
+@pytest.mark.asyncio
+async def test_get_stats_warns_for_legacy_mixed_token_row(db_session, monkeypatch):
+    project = Project(id="legacy-stats-project", name="Legacy stats project")
+    task = Task(id="LEGACY-001", project=project.id, title="Legacy usage")
+    db_session.add_all(
+        [
+            project,
+            task,
+            LLMUsage(
+                task_id=task.id,
+                model="claude-opus-5",
+                provider="claude",
+                operation="cli",
+                input_tokens=2,
+                output_tokens=14,
+                cached_tokens=15273,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    warnings = []
+    monkeypatch.setattr(admin_handlers.logger, "warning", lambda *args: warnings.append(args))
+    stats = await CommandRouter(db_session).execute_tool(
+        "get_stats", {"task_id": task.id}, "legacy-stats-session"
+    )
+
+    assert stats["input_tokens"] == 2
+    assert stats["uncached_input_tokens"] == 0
+    assert stats["usage_warnings"]
+    assert "historical data is not cross-CLI comparable" in stats["usage_warnings"][0]
+    assert "historical rows were not rewritten" in warnings[0][0]
+
+
+@pytest.mark.asyncio
+async def test_get_stats_sums_normalized_cli_input_without_double_counting_cache(db_session):
+    project = Project(id="normalized-stats-project", name="Normalized stats project")
+    task = Task(id="NORMALIZED-001", project=project.id, title="Normalized usage")
+    rows = [
+        LLMUsage(
+            task_id=task.id,
+            model="claude-opus-5",
+            provider="claude",
+            operation="cli",
+            input_tokens=15275,
+            output_tokens=14,
+            cached_tokens=15273,
+        ),
+        LLMUsage(
+            task_id=task.id,
+            model="gemini-3.1-pro",
+            provider="agy",
+            operation="cli",
+            input_tokens=18391,
+            output_tokens=79,
+            cached_tokens=8142,
+        ),
+        LLMUsage(
+            task_id=task.id,
+            model="gpt-5.6-luna",
+            provider="codex",
+            operation="cli",
+            input_tokens=15134,
+            output_tokens=5,
+            cached_tokens=9984,
+        ),
+        LLMUsage(
+            task_id=task.id,
+            model="qwen3.7-plus",
+            provider="qwen",
+            operation="cli",
+            input_tokens=49714,
+            output_tokens=165,
+            cached_tokens=0,
+        ),
+    ]
+    db_session.add_all([project, task, *rows])
+    db_session.commit()
+
+    stats = await CommandRouter(db_session).execute_tool(
+        "get_stats", {"task_id": task.id}, "normalized-stats-session"
+    )
+
+    assert stats["input_tokens"] == 98514
+    assert stats["cached_tokens"] == 33399
+    assert stats["uncached_input_tokens"] == 65115
+    assert stats["usage_warnings"] == []
 
 
 @pytest.mark.asyncio

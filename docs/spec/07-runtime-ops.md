@@ -68,6 +68,13 @@
   session nhưng cost Haiku riêng lẻ `0.00354`. `LLMUsage` vẫn là một row cho
   mỗi `AgentRun`, và `_record_run_resource_usage` cộng các row khi có nhiều
   row.
+- Contract ghi nhận CLI hiện tại là `input_tokens` luôn bao gồm cache và
+  `cached_tokens` luôn là tập con của nó. Claude/Agy được chuẩn hóa từ
+  `raw_input_tokens + cache_read`; Codex giữ `input_tokens` tổng và Qwen giữ
+  tổng input mà CLI đã báo (cache là một phần của tổng đó). `get_stats` cộng
+  `input_tokens` giữa các CLI theo contract này, không cộng thêm
+  `cached_tokens`; trường `uncached_input_tokens` là `input_tokens - cached_tokens`
+  cho các row đã chuẩn hóa.
 - Dưới subscription, `total_cost_usd`/`modelUsage.*.costUSD` là **vendor-reported
   USD usage telemetry** do CLI tính theo model; output không chứng minh đó là
   tiền đã trừ, tiền hoá đơn, hay phần còn lại của gói. Nó cũng không phải tổng
@@ -76,8 +83,9 @@
   được dùng làm ngưỡng an toàn.
 - `max_cost_usd_per_task` chỉ cộng `LLMUsage` không phải CLI (chi phí API có
   thẩm quyền). CLI subscription dùng brake `max_tokens_per_task`, mặc định
-  20,000,000 và cấu hình được qua `update_settings`; tổng token là
-  `input_tokens + cached_tokens + output_tokens`. `RunResourceUsage` và
+  20,000,000 và cấu hình được qua `update_settings`; từ 2026-08-04, tổng token là
+  `input_tokens + output_tokens` vì `input_tokens` đã bao gồm cache và
+  `cached_tokens` chỉ là tập con để phân tích giá. `RunResourceUsage` và
   `get_stats.cost_usd` cũng loại cost CLI khỏi số USD authoritative, nhưng vẫn
   giữ token CLI để quan sát. Đây là chủ ý fail-safe: cost CLI không tạo cảm
   giác an toàn giả.
@@ -86,6 +94,13 @@
   run chưa parse), `unmeasured` (chỉ có CLI token hoặc CLI chưa có cost đáng
   tin), `no_data` (không có dữ liệu). `unmeasured_cli_runs` cho biết số run nằm
   ngoài coverage token.
+- Trước khi sửa parser ngày 2026-08-04, `llm_usage.input_tokens` trộn hai quy ước:
+  Claude/Agy ghi input chưa cache còn Codex/Qwen ghi tổng input đã gồm cache.
+  Các row cũ vì vậy không được so sánh chéo CLI. Không backfill tự động: dù có
+  thể suy ra CLI từ một số `AgentRun`, raw vendor output không luôn còn đủ để
+  xác nhận semantics, và việc sửa ledger lịch sử immutable có rủi ro làm sai số
+  liệu đã dùng cho audit. `get_stats` đánh dấu row cũ vi phạm bằng
+  `usage_warnings`; chỉ row được ghi sau thay đổi mới có contract thống nhất.
 
 ## Coordinator workspace
 

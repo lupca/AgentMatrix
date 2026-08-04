@@ -73,6 +73,18 @@ class AdminHandlersMixin:
         has_usage = exists().where(LLMUsage.agent_run_id == AgentRun.id)
         unmeasured_cli_runs = cli_runs.filter(~has_usage).count()
         unpriced_cli_usage = cli_usage
+        invalid_usage = [
+            row
+            for row in usage
+            if max(0, int(row.cached_tokens or 0)) > max(0, int(row.input_tokens or 0))
+        ]
+        if invalid_usage:
+            logger.warning(
+                "LLMUsage invariant violation while serving get_stats: %d row(s) "
+                "have cached_tokens greater than input_tokens; historical rows "
+                "were not rewritten",
+                len(invalid_usage),
+            )
         known_cost_usd = sum(
             float(row.cost_usd or 0)
             for row in authoritative_usage
@@ -119,8 +131,20 @@ class AdminHandlersMixin:
             'agent_id': agent_id,
             'calls': len(usage),
             'input_tokens': sum(row.input_tokens or 0 for row in usage),
+            'uncached_input_tokens': sum(
+                max(0, int(row.input_tokens or 0) - int(row.cached_tokens or 0))
+                for row in usage
+            ),
             'output_tokens': sum(row.output_tokens or 0 for row in usage),
             'cached_tokens': sum(row.cached_tokens or 0 for row in usage),
+            'usage_warnings': [
+                (
+                    f"LLMUsage row {row.id} has cached_tokens={row.cached_tokens} "
+                    f"> input_tokens={row.input_tokens}; historical data is not "
+                    "cross-CLI comparable"
+                )
+                for row in invalid_usage
+            ],
             'cost_usd': round(cost_value, 8) if cost_value is not None else None,
             'cost_status': cost_status,
             'cost_scope': 'recorded_api_usage_only',

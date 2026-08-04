@@ -182,7 +182,7 @@ def test_json_cli_output_records_usage_and_keeps_result_ref_flow(
     assert run.status == "success"
     assert usage.agent_run_id == run.id
     assert usage.task_id == "RUN-001"
-    assert usage.input_tokens == 10
+    assert usage.input_tokens == 12
     assert usage.output_tokens == 4
     assert usage.cached_tokens == 2
     assert run.result_ref and ".." in run.result_ref

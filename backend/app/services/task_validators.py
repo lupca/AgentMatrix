@@ -391,16 +391,15 @@ class TaskValidator:
 
     def _task_tokens(self, task: Task) -> int:
         rows = (
-            self.db.query(LLMUsage.input_tokens, LLMUsage.cached_tokens, LLMUsage.output_tokens)
+            self.db.query(LLMUsage.input_tokens, LLMUsage.output_tokens)
             .outerjoin(AgentRun, LLMUsage.agent_run_id == AgentRun.id)
             .filter(or_(LLMUsage.task_id == task.id, AgentRun.task_id == task.id))
             .all()
         )
         return sum(
             max(0, int(input_tokens or 0))
-            + max(0, int(cached_tokens or 0))
             + max(0, int(output_tokens or 0))
-            for input_tokens, cached_tokens, output_tokens in rows
+            for input_tokens, output_tokens in rows
         )
 
     def _setting(self, key: str, default: Any, converter: Any) -> Any:
