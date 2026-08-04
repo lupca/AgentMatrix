@@ -81,7 +81,15 @@ def clear_graph_cache() -> None:
     graph_cache.clear()
 
 
-def _observe(tool: str, started: float, ok: bool, result=None, cached=False, error=None) -> None:
+def _observe(
+    tool: str,
+    started: float,
+    ok: bool,
+    result=None,
+    cached=False,
+    error=None,
+    task_id: str | None = None,
+) -> None:
     """One tool_metrics row per graph call — success, failure, or cache hit."""
     record_tool_metric(
         tool=tool,
@@ -92,6 +100,7 @@ def _observe(tool: str, started: float, ok: bool, result=None, cached=False, err
         result_count=(len(result) if isinstance(result, (list, dict)) else None),
         bytes_out=(len(str(result)) if result is not None else None),
         error=error,
+        task_id=task_id,
     )
 
 
@@ -180,6 +189,7 @@ async def get_impact_radius(
     raise_on_error: bool = False,
     detail_level: str = "minimal",
     max_depth: int = 2,
+    task_id: str | None = None,
 ) -> Union[List[str], Dict[str, Any], str]:
     """Get files affected by changes to given file.
 
@@ -201,7 +211,7 @@ async def get_impact_radius(
     if use_cache and not raise_on_error:
         cached = graph_cache.get(cache_key)
         if cached is not None:
-            _observe(_tool_name, started, True, cached, cached=True)
+            _observe(_tool_name, started, True, cached, cached=True, task_id=task_id)
             return compress_for_prompt(cached) if compress_output else cached
 
     try:
@@ -251,11 +261,11 @@ async def get_impact_radius(
             raise GraphClientError(
                 "Graph MCP returned an empty response", kind="empty_response"
             )
-        _observe(_tool_name, started, True, result)
+        _observe(_tool_name, started, True, result, task_id=task_id)
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("get_impact_radius failed with fallback to []: %s", e)
-        _observe("get_impact_radius", started, False, error=str(e))
+        _observe("get_impact_radius", started, False, error=str(e), task_id=task_id)
         if raise_on_error:
             error = _graph_client_error(e)
             raise error from e
@@ -270,6 +280,7 @@ async def semantic_search(
     use_cache: bool = True,
     compress_output: bool = False,
     raise_on_error: bool = False,
+    task_id: str | None = None,
 ) -> Union[List[Dict[str, Any]], str]:
     """Search nodes by semantic similarity.
 
@@ -282,7 +293,7 @@ async def semantic_search(
     if use_cache and not raise_on_error:
         cached = graph_cache.get(cache_key)
         if cached is not None:
-            _observe(_tool_name, started, True, cached, cached=True)
+            _observe(_tool_name, started, True, cached, cached=True, task_id=task_id)
             return compress_for_prompt(cached) if compress_output else cached
 
     try:
@@ -311,11 +322,11 @@ async def semantic_search(
             raise GraphClientError(
                 "Graph MCP returned an empty response", kind="empty_response"
             )
-        _observe(_tool_name, started, True, result)
+        _observe(_tool_name, started, True, result, task_id=task_id)
         return compress_for_prompt(result) if compress_output else result
     except Exception as e:
         logger.warning("semantic_search failed with fallback to []: %s", e)
-        _observe("semantic_search", started, False, error=str(e))
+        _observe("semantic_search", started, False, error=str(e), task_id=task_id)
         if raise_on_error:
             error = _graph_client_error(e)
             raise error from e

@@ -81,12 +81,15 @@ async def test_graph_success_records_ok_metric(monkeypatch):
         graph_client, "MCPClient", lambda **kw: _FakeMCP(result={"results": [{"name": "a.py"}]})
     )
 
-    out = await graph_client.semantic_search("/tmp/x", "query", use_cache=False)
+    out = await graph_client.semantic_search(
+        "/tmp/x", "query", use_cache=False, task_id="TASK-1"
+    )
 
     assert out == [{"name": "a.py"}]
     assert len(captured) == 1
     assert captured[0]["ok"] is True and captured[0]["tool"] == "semantic_search"
     assert captured[0]["result_count"] == 1
+    assert captured[0]["task_id"] == "TASK-1"
 
 
 @pytest.mark.asyncio

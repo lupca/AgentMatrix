@@ -42,6 +42,10 @@ def _get_record_tool_metric():
 
 
 class ContextHandlersMixin:
+    def _research_task_id(self, session_id: str) -> str | None:
+        session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
+        return session.task_id if session and session.task_id else None
+
     def _research_repo_root(self, session_id: str) -> tuple[str | None, dict | None]:
         session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
         project_id = session.project_id if session else None
@@ -119,9 +123,16 @@ class ContextHandlersMixin:
         try:
             payload = json.loads(args)
             search_fn = _get_semantic_search()
+            search_kwargs = {
+                'raise_on_error': True,
+                'compress_output': True,
+            }
+            task_id = self._research_task_id(session_id)
+            if task_id:
+                search_kwargs['task_id'] = task_id
             result = await search_fn(
                 repo_root, str(payload['query']), int(payload.get('limit', 10)),
-                raise_on_error=True, compress_output=True,
+                **search_kwargs,
             )
         except Exception as exc:
             return self._research_error(exc)
@@ -139,12 +150,16 @@ class ContextHandlersMixin:
             except (json.JSONDecodeError, TypeError):
                 payload = {'file': args.strip(), 'max_depth': 2}
             impact_fn = _get_graph_get_impact_radius()
+            impact_kwargs = {
+                'max_depth': int(payload.get('max_depth', 2)),
+                'raise_on_error': True,
+                'compress_output': True,
+            }
+            task_id = self._research_task_id(session_id)
+            if task_id:
+                impact_kwargs['task_id'] = task_id
             result = await impact_fn(
-                repo_root,
-                str(payload['file']).strip(),
-                max_depth=int(payload.get('max_depth', 2)),
-                raise_on_error=True,
-                compress_output=True,
+                repo_root, str(payload['file']).strip(), **impact_kwargs
             )
         except Exception as exc:
             return self._research_error(exc)

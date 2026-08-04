@@ -1337,6 +1337,7 @@ async def test_get_impact_radius_resolves_repo_root_from_task_project(db_session
         max_depth=2,
         raise_on_error=True,
         compress_output=True,
+        task_id="TASK-500",
     )
 
 
