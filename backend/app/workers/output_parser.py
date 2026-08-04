@@ -218,21 +218,26 @@ def _nonnegative_float(value: Any) -> float | None:
 def parse_cli_token_usage(cli: str, stdout: str) -> dict[str, Any] | None:
     """Extract measured token usage from a CLI's JSON result output.
 
-    Claude, Qwen, and Agy use slightly different result schemas.  This
+    Claude, Qwen, Agy, and Codex use slightly different result schemas.  This
     parser deliberately accepts both JSONL and a single pretty-printed JSON
     document, and returns ``None`` for unsupported or malformed output so a
     usage-format change cannot fail an agent run.
     """
     vendor = (cli or "").strip().lower()
-    if vendor not in {"claude", "qwen", "agy"}:
+    if vendor not in {"claude", "qwen", "agy", "codex"}:
         return None
 
     for data in reversed(_json_objects(stdout)):
+        if vendor == "codex" and data.get("type") != "turn.completed":
+            continue
+
         usage = data.get("usage")
         if not isinstance(usage, dict):
             continue
 
-        if vendor == "claude":
+        if vendor == "codex":
+            cached_tokens = usage.get("cached_input_tokens", 0)
+        elif vendor == "claude":
             cached_tokens = usage.get("cache_read_input_tokens", 0)
         elif vendor == "agy":
             cached_tokens = usage.get("cache_read_tokens", 0)
@@ -257,6 +262,16 @@ def parse_cli_token_usage(cli: str, stdout: str) -> dict[str, Any] | None:
             "output_tokens": _nonnegative_int(usage.get("output_tokens")),
             "cached_tokens": _nonnegative_int(cached_tokens),
         }
+
+        if vendor == "codex" and "reasoning_output_tokens" in usage:
+            # Reasoning output tokens rationale:
+            # In OpenAI API / Codex CLI, usage.output_tokens (completion_tokens)
+            # already includes reasoning_output_tokens. We do NOT add reasoning_output_tokens
+            # to output_tokens to avoid double-counting, but record reasoning_output_tokens
+            # separately in the returned dictionary for detailed telemetry.
+            result["reasoning_output_tokens"] = _nonnegative_int(
+                usage.get("reasoning_output_tokens")
+            )
 
         # Claude's top-level total_cost_usd has the same invocation/session
         # scope as the top-level usage object.  Do not overwrite it with the

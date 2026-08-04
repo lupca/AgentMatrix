@@ -68,7 +68,7 @@ def build_dispatch_command(
     prompt = _task_prompt(task, review_result_path(repo_root, task.id))
     prompt = _inject_project_context(prompt, project, task, db)
     if cli == "codex":
-        argv = ["codex", "exec"]
+        argv = ["codex", "exec", "--json"]
         if agent.model:
             argv.extend(["-m", agent.model])
         if not model_has_effort:
@@ -156,7 +156,7 @@ def build_review_command(
     resolved_effort = agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
     if cli == "codex":
-        argv = ["codex", "exec"]
+        argv = ["codex", "exec", "--json"]
         if agent.model:
             argv.extend(["-m", agent.model])
         if not model_has_effort:

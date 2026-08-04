@@ -81,6 +81,34 @@ AGY_OUTPUT = json.dumps(
     }
 )
 
+CODEX_OUTPUT = "\n".join(
+    [
+        json.dumps({"type": "thread.started", "thread_id": "thr-123"}),
+        json.dumps({"type": "turn.started", "turn_id": "turn-1"}),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": "Task completed successfully.\nRESULT_REF: 4a3b2c1d",
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 15134,
+                    "cached_input_tokens": 9984,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": 5,
+                    "reasoning_output_tokens": 0,
+                },
+            }
+        ),
+    ]
+)
+
 
 @pytest.mark.parametrize(
     ("cli", "output", "expected"),
@@ -99,6 +127,16 @@ AGY_OUTPUT = json.dumps(
             "agy",
             AGY_OUTPUT,
             {"input_tokens": 10249, "output_tokens": 79, "cached_tokens": 8142},
+        ),
+        (
+            "codex",
+            CODEX_OUTPUT,
+            {
+                "input_tokens": 15134,
+                "output_tokens": 5,
+                "cached_tokens": 9984,
+                "reasoning_output_tokens": 0,
+            },
         ),
     ],
 )
@@ -128,7 +166,7 @@ def test_parse_claude_cost_has_same_session_scope_as_total_usage():
     }
 
 
-@pytest.mark.parametrize("cli", ["codex", "unknown"])
+@pytest.mark.parametrize("cli", ["unknown", "invalid_vendor"])
 def test_parse_cli_token_usage_fails_closed_for_unsupported_cli(cli):
     assert parse_cli_token_usage(cli, CLAUDE_OUTPUT) is None
 
@@ -180,6 +218,39 @@ def test_record_cli_usage_attributes_run_and_task(db_session):
     _record_run_resource_usage(db_session, run)
     resource_usage = db_session.query(RunResourceUsage).one()
     assert float(resource_usage.estimated_cost_usd) == pytest.approx(0)
+
+
+def test_record_cli_usage_codex_attributes_run_and_task(db_session):
+    project = Project(id="codex-project", name="Codex project")
+    task = Task(id="CODEX-001", project=project.id, title="Measure Codex")
+    agent = Agent(
+        id="@gpt-5.6-luna",
+        name="Luna",
+        role="executor",
+        cli="codex",
+        model="gpt-5.6-luna",
+    )
+    run = AgentRun(
+        id="codex-run-001",
+        task_id=task.id,
+        agent_id=agent.id,
+        cli="codex",
+        command="codex exec --json",
+    )
+    db_session.add_all([project, task, agent, run])
+    db_session.commit()
+
+    _record_cli_usage(db_session, run, "codex", CODEX_OUTPUT)
+
+    usage = db_session.query(LLMUsage).one()
+    assert usage.agent_run_id == run.id
+    assert usage.task_id == task.id
+    assert usage.model == "gpt-5.6-luna"
+    assert usage.provider == "codex"
+    assert usage.input_tokens == 15134
+    assert usage.output_tokens == 5
+    assert usage.cached_tokens == 9984
+    assert float(usage.cost_usd) == 0.0
 
 
 @pytest.mark.asyncio

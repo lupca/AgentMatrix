@@ -287,7 +287,7 @@ def _record_cli_usage(db: Session, run: AgentRun, cli: str, stdout: str) -> None
         return
 
     normalized_cli = (cli or "").strip().lower()
-    if normalized_cli not in {"claude", "qwen", "agy"}:
+    if normalized_cli not in {"claude", "qwen", "agy", "codex"}:
         return
     existing = (
         db.query(LLMUsage)

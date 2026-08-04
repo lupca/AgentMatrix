@@ -103,8 +103,7 @@ Attribution đã sửa ở CTV2-1338.
 > Bài học lặp lại lần thứ tư trong cùng phiên: **đừng suy từ mô hình kinh doanh
 > (subscription ⇒ không có token) — hãy gõ lệnh thử `--help`.**
 
-Cho tới khi CTV2-1350 xong, đại lượng tiêu hao đo được vẫn là **số vòng ×
-thời lượng run**, và **không được hứa "giảm cost"** bằng đô-la.
+Sau khi CTV2-1350 và CTV2-1360 hoàn tất, cả 4 CLI (claude, qwen, agy, codex) đều đã được nối dây đo token thành công trong `llm_usage`.
 
 ## Data model
 

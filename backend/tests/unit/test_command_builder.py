@@ -9,7 +9,7 @@ from app.services.command_builder import build_dispatch_command, build_review_co
 @pytest.mark.parametrize(
     ("cli", "model", "expected_prefix"),
     [
-        ("codex", "gpt-5.6-sol", ["codex", "exec", "-m", "gpt-5.6-sol"]),
+        ("codex", "gpt-5.6-sol", ["codex", "exec", "--json", "-m", "gpt-5.6-sol"]),
         ("claude", "claude-opus-4", ["claude", "--model", "claude-opus-4"]),
         ("agy", "gemini-3.6-pro", ["agy", "--model", "gemini-3.6-pro"]),
     ],
@@ -171,14 +171,15 @@ def test_dispatch_json_output_flags_preserve_prompt_contract(cli, tmp_path):
         assert argv[argv.index("-p") + 1] == argv[format_index - 1]
 
 
-def test_codex_does_not_receive_json_output_flag(tmp_path):
+def test_codex_receives_json_output_flag(tmp_path):
     task = Task(id="CMD-CODEX", project="p", title="Task")
     agent = Agent(id="@agent", name="Agent", role="executor", cli="codex", model="gpt-5")
     project = Project(id="p", name="Project", repo_root=str(tmp_path))
 
     command, _, _ = build_dispatch_command(task, agent, project)
+    argv = shlex.split(command)
 
-    assert "--output-format" not in shlex.split(command)
+    assert argv[:3] == ["codex", "exec", "--json"]
 
 
 @pytest.mark.parametrize("cli", ["claude", "qwen", "agy", "codex"])
@@ -191,7 +192,7 @@ def test_review_command_json_output_flags_match_cli_contract(cli, tmp_path):
     argv = shlex.split(command)
 
     if cli == "codex":
-        assert "--output-format" not in argv
+        assert argv[:3] == ["codex", "exec", "--json"]
         return
 
     format_index = argv.index("--output-format")
