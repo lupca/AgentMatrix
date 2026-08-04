@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shlex
 import tempfile
 from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass
@@ -18,9 +17,9 @@ from typing import Any
 
 from app.services.process_manager import ProcessManager, ProcessResult, ProcessStatus
 from app.core.config import settings
+from app.services.cli_command import SUPPORTED_CLIS, build_cli_command
 
 
-SUPPORTED_CLIS = {"agy", "claude", "codex", "qwen"}
 INSTRUCTION_FILES = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "agy": "PROJECT.md", "qwen": "CLAUDE.md"}
 COORDINATOR_RULES_PATH = "docs/coordinator-rules.md"
 
@@ -136,74 +135,6 @@ def format_history_as_prompt(messages: list[dict[str, Any]]) -> str:
         sections.append(f"{label}:\n{body}" if body else f"{label}:")
 
     return "\n\n".join(sections)
-
-
-_EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
-
-
-def _model_carries_effort(model: str) -> bool:
-    return (model or "").strip().lower().endswith(_EFFORT_SUFFIXES)
-
-
-def build_cli_command(
-    cli: str,
-    model: str,
-    prompt: str,
-    mcp_config_path: str | None = None,
-    effort: str | None = None,
-) -> str:
-    """Build a shell-safe command for one coordinator invocation.
-
-    ``mcp_config_path``, when given, registers the Control Tower MCP
-    projection (ADR-001 §D5) with the CLI so the turn can call CT tools. It
-    is always placed before the prompt-carrying flag so the prompt — which
-    may contain arbitrary text — stays the final argument.
-
-    ``effort`` is forwarded when the agent configures one and the model name
-    does not already carry an effort suffix. Some agy models *require* it
-    (gemini-3.6-flash exits 1 with "invalid model selection" without it),
-    while others reject the flag — so it is only ever sent when configured.
-    """
-
-    normalized_cli = (cli or "").strip().lower()
-    if normalized_cli not in SUPPORTED_CLIS:
-        raise ValueError(
-            f"Unsupported coordinator CLI '{cli}'. "
-            f"Supported CLIs: {', '.join(sorted(SUPPORTED_CLIS))}"
-        )
-
-    effort = (effort or "").strip().lower() or None
-    if effort and _model_carries_effort(model):
-        effort = None
-
-    if normalized_cli == "claude":
-        argv = ["claude", "--model", model]
-        if effort:
-            argv += ["--effort", effort]
-        if mcp_config_path:
-            argv += ["--mcp-config", mcp_config_path]
-        argv += ["-p", prompt]
-    elif normalized_cli == "agy":
-        # --model (not --agent, which selects an agent profile, not a model).
-        # --mcp-config is not supported by agy; MCP config is omitted.
-        # The prompt must directly follow --print (CTV2-211).
-        argv = ["agy", "--model", model]
-        if effort:
-            argv += ["--effort", effort]
-        argv += ["--print", prompt]
-    elif normalized_cli == "qwen":
-        # qwen uses -m for model, -p for prompt (similar to claude)
-        argv = ["qwen", "-m", model]
-        if mcp_config_path:
-            argv += ["--mcp-config", mcp_config_path]
-        argv += ["-p", prompt]
-    else:
-        # --mcp-config is not supported by codex exec.
-        argv = ["codex", "exec", "-m", model]
-        if effort:
-            argv += ["-c", f"model_reasoning_effort={effort}"]
-        argv += [prompt]
-    return shlex.join(argv)
 
 
 def build_mcp_config(
@@ -323,7 +254,9 @@ class CLIDispatcher:
         """
 
         effective_cwd = cwd or self.working_directory
-        base_command = build_cli_command(cli, model, prompt, effort=effort)
+        base_command = build_cli_command(
+            cli, model, prompt, effort=effort, timeout_seconds=self.timeout_seconds
+        )
         from app.services.mcp_attach import attach_mcp
 
         command, extra_env, cleanup_paths = attach_mcp(
@@ -334,6 +267,8 @@ class CLIDispatcher:
             timeout_seconds=3600,
             mcp_secret=self.mcp_secret,
         )
+        if (cli or "").strip().lower() == "qwen":
+            extra_env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
         process_manager = self._new_process_manager()
         loop = asyncio.get_running_loop()
         events: asyncio.Queue[tuple[str, object]] = asyncio.Queue()

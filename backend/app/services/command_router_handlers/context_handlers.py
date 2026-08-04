@@ -333,7 +333,7 @@ class ContextHandlersMixin:
 
         try:
             result, flows = await spec_plan_generator.generate_spec_plan(
-                task, repo_root, agent, project_context=project_context
+                task, repo_root, agent, project_context=project_context, db=self.db
             )
             critic_result, critic_tokens = await spec_plan_generator.criticize_spec_plan(
                 task,
@@ -342,8 +342,10 @@ class ContextHandlersMixin:
                 agent,
                 critic_agent,
                 project_context=project_context,
+                db=self.db,
             )
         except (SpecPlanGenerationError, PlanCriticError, ConfigurationError) as exc:
+            self.db.commit()
             return {'error': str(exc)}
 
         record_metric_fn = _get_record_tool_metric()

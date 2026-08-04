@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass
 from decimal import Decimal
 from types import SimpleNamespace
@@ -83,7 +84,7 @@ async def test_llm_service_forwards_cwd_through_cli_provider_to_spawn():
 
 
 @pytest.mark.asyncio
-async def test_cli_provider_enforces_max_output_tokens():
+async def test_cli_provider_forwards_complete_cli_output_without_api_truncation():
     class FakeDispatcher:
         async def spawn(self, cli, model, prompt, **kwargs):
             del cli, model, prompt, kwargs
@@ -100,8 +101,34 @@ async def test_cli_provider_enforces_max_output_tokens():
         agent, [{"role": "user", "content": "bounded"}], max_tokens=3
     )
 
-    assert response.text == "a" * 10 + "b" * 2
-    assert response.usage.output_tokens <= 3
+    assert response.text == "a" * 10 + "b" * 10
+    assert response.usage.output_tokens >= 5
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_extracts_final_agent_message_from_codex_jsonl():
+    class FakeDispatcher:
+        async def spawn(self, cli, model, prompt, **kwargs):
+            del cli, model, prompt, kwargs
+            yield json.dumps({"type": "thread.started"}) + "\n"
+            yield json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "content": [{"type": "output_text", "text": '{"ok":true}'}],
+                },
+            }) + "\n"
+            yield json.dumps({"type": "turn.completed", "usage": {"output_tokens": 4}}) + "\n"
+
+    agent = SimpleNamespace(
+        id="cli-agent", agent_type="cli", provider="openai",
+        cli="codex", model="gpt-5", effort="low",
+    )
+    response = await LLMService(
+        cli_provider=CLIProvider(dispatcher=FakeDispatcher())
+    ).complete(agent, [{"role": "user", "content": "plan"}])
+
+    assert response.text == '{"ok":true}'
 
 
 def test_usage_extraction_normalizes_anthropic_cache_tokens():

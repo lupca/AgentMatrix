@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import ValidationError
-from app.db.models import Task
+from app.db.models import AgentRun, LLMUsage, Project, Task
 from app.services.llm_service import ConfigurationError
 from app.services.providers import ProviderResponse
 from app.services.spec_plan_generator import (
@@ -168,6 +168,46 @@ async def test_generate_spec_plan_uses_the_passed_agent():
 async def test_generate_spec_plan_requires_an_agent():
     with pytest.raises(ConfigurationError):
         await generate_spec_plan(_task(), "/tmp/repo", None)
+
+
+@pytest.mark.asyncio
+async def test_planner_and_critic_requests_are_recorded_as_agent_runs(db_session, tmp_path):
+    task = Task(id="SPEC-RUN-1", project="proj", title="Build the widget")
+    db_session.add(Project(id="proj", name="Project", repo_root=str(tmp_path)))
+    db_session.add(task)
+    db_session.commit()
+    payload = _valid_payload()
+    plan_response = _response(json.dumps(payload))
+    critic_response = _response(json.dumps({
+        "schema_version": "1.0",
+        "verdict": "accept",
+        "findings": [],
+        "summary": "Citations reproduced.",
+    }))
+
+    with patch(
+        "app.services.spec_plan_generator.semantic_search",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(side_effect=[plan_response, critic_response]),
+    ):
+        await generate_spec_plan(task, str(tmp_path), _agent(), db=db_session)
+        await criticize_spec_plan(
+            task,
+            __import__("app.schemas.task", fromlist=["SpecPlanResult"]).SpecPlanResult.model_validate(payload),
+            str(tmp_path),
+            _agent(),
+            _critic_agent(),
+            db=db_session,
+        )
+
+    runs = db_session.query(AgentRun).order_by(AgentRun.created_at).all()
+    usages = db_session.query(LLMUsage).all()
+    assert [run.kind for run in runs] == ["execute", "review"]
+    assert all(run.status == "success" for run in runs)
+    assert {usage.operation for usage in usages} == {"plan", "plan_critic"}
+    assert {usage.agent_run_id for usage in usages} == {run.id for run in runs}
 
 
 @pytest.mark.asyncio

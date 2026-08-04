@@ -11,10 +11,13 @@ from __future__ import annotations
 
 import json
 import re
+import time
+import uuid
+from datetime import datetime, timezone
 
 from pydantic import ValidationError
 
-from app.db.models import Agent, Task
+from app.db.models import Agent, AgentRun, LLMUsage, Task
 from app.schemas.task import (
     PLAN_CRITIC_RESULT_SCHEMA_VERSION,
     SPEC_PLAN_RESULT_SCHEMA_VERSION,
@@ -22,12 +25,107 @@ from app.schemas.task import (
     SpecPlanResult,
 )
 from app.services.graph_client import get_affected_flows, semantic_search
+from app.services.cli_command import build_cli_command
+from app.services.cli_dispatcher import route_model
+from app.services.llm_client import calculate_cost
 from app.services.llm_service import ConfigurationError, LLMService
+from app.core.config import settings
 
 UNCONFIRMED_SUFFIX = " *(chưa xác nhận)*"
 _MAX_ATTEMPTS = 2
 PLAN_CRITIC_TOKEN_BUDGET = 50_000
 _PLAN_CRITIC_MAX_OUTPUT_TOKENS = 4_096
+
+
+def _agent_cli(agent: Agent) -> str:
+    cli = str(getattr(agent, "cli", "") or "").strip().lower()
+    if cli:
+        return cli
+    return route_model(str(getattr(agent, "model", "") or "")).cli
+
+
+def _begin_llm_run(
+    db,
+    task: Task,
+    agent: Agent,
+    prompt: str,
+    *,
+    kind: str,
+) -> AgentRun | None:
+    """Create a local, non-dispatch AgentRun for a planner/critic request.
+
+    Planner calls are synchronous service work, not task dispatches, so they
+    do not go through the dispatch outbox or a worker. Reusing the existing
+    execute/review kinds keeps the no-migration schema contract intact while
+    still making every request and its token estimate queryable.
+    """
+    if db is None:
+        return None
+    cli = _agent_cli(agent)
+    model = str(getattr(agent, "model", "") or "")
+    run = AgentRun(
+        id=str(uuid.uuid4()),
+        task_id=task.id,
+        agent_id=str(agent.id),
+        cli=cli,
+        command=build_cli_command(
+            cli,
+            model,
+            prompt,
+            effort=getattr(agent, "effort", None),
+            timeout_seconds=settings.RUN_TIMEOUT_SECONDS,
+        ),
+        kind=kind,
+        agent_role="reviewer" if kind == "review" else "executor",
+        status="running",
+        timeout_seconds=settings.RUN_TIMEOUT_SECONDS,
+        max_attempts=1,
+        idempotency_key=f"planner:{task.id}:{kind}:{uuid.uuid4().hex[:16]}",
+    )
+    db.add(run)
+    db.flush()
+    return run
+
+
+def _finish_llm_run(
+    db,
+    run: AgentRun | None,
+    response,
+    *,
+    started: float,
+    operation: str,
+    error: str | None = None,
+) -> None:
+    if db is None or run is None:
+        return
+    usage = response.usage if response is not None else None
+    input_tokens = max(0, int(getattr(usage, "input_tokens", 0) or 0))
+    output_tokens = max(0, int(getattr(usage, "output_tokens", 0) or 0))
+    provider = str(getattr(response, "provider", "") or "cli")
+    model = str(getattr(response, "model", "") or "")
+    if response is not None:
+        db.add(
+            LLMUsage(
+                task_id=run.task_id,
+                agent_run_id=run.id,
+                model=model,
+                provider=provider,
+                operation=operation,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cached_tokens=0,
+                cost_usd=calculate_cost(model, provider, input_tokens, output_tokens),
+                latency_ms=max(0, int((time.monotonic() - started) * 1000)),
+            )
+        )
+        text = str(getattr(response, "text", "") or "")
+        run.output_bytes = len(text.encode("utf-8"))
+        run.output_lines = text.count("\n") + (1 if text else 0)
+    run.status = "failed" if error else "success"
+    run.error_message = error
+    run.exit_code = 1 if error else 0
+    run.completed_at = datetime.now(timezone.utc)
+    db.flush()
 
 
 class SpecPlanGenerationError(RuntimeError):
@@ -142,6 +240,7 @@ async def generate_spec_plan(
     repo_root: str | None,
     agent: Agent,
     project_context: str | None = None,
+    db=None,
 ) -> tuple[SpecPlanResult, list[str]]:
     """Call the LLM once (with one retry on schema mismatch) and ground its
     file claims and flows in the code graph. Returns (result, flows).
@@ -194,22 +293,35 @@ async def generate_spec_plan(
             retry_reason=retry_reason,
             project_context=project_context,
         )
-        response = await llm.complete(
-            agent,
-            [{"role": "user", "content": prompt}],
-            # Reasoning models spend most of the budget on the <think> block
-            # before emitting the JSON; 1200 truncated them mid-thought.
-            max_tokens=4096,
-            temperature=0.3,
-            cwd=repo_root,
-        )
+        run = _begin_llm_run(db, task, agent, prompt, kind="execute")
+        started = time.monotonic()
+        response = None
+        try:
+            response = await llm.complete(
+                agent,
+                [{"role": "user", "content": prompt}],
+                # This remains an API-provider output hint only. CLIProvider
+                # deliberately does not truncate the CLI stream.
+                max_tokens=4096,
+                temperature=0.3,
+                cwd=repo_root,
+            )
+        except Exception as exc:
+            _finish_llm_run(
+                db, run, None, started=started, operation="plan", error=str(exc)
+            )
+            raise
         content = response.text
         try:
             parsed = _parse_json(content)
             result = SpecPlanResult.model_validate(parsed)
+            _finish_llm_run(db, run, response, started=started, operation="plan")
             last_error = None
             break
         except (json.JSONDecodeError, ValidationError) as exc:
+            _finish_llm_run(
+                db, run, response, started=started, operation="plan", error=str(exc)
+            )
             last_error = exc
             retry_reason = str(exc)
             continue
@@ -296,6 +408,7 @@ async def criticize_spec_plan(
     planner_agent: Agent,
     critic_agent: Agent,
     project_context: str | None = None,
+    db=None,
 ) -> tuple[PlanCriticResult, int]:
     """Run one independent, focused critic after planning and before dispatch."""
 
@@ -332,23 +445,53 @@ async def criticize_spec_plan(
             raise PlanCriticError(
                 f"Plan critic input exceeds the {PLAN_CRITIC_TOKEN_BUDGET}-token budget"
             )
-        response = await llm.complete(
-            critic_agent,
-            [{"role": "user", "content": prompt}],
-            max_tokens=min(_PLAN_CRITIC_MAX_OUTPUT_TOKENS, remaining),
-            temperature=0.1,
-            cwd=repo_root,
-        )
+        run = _begin_llm_run(db, task, critic_agent, prompt, kind="review")
+        started = time.monotonic()
+        response = None
+        try:
+            response = await llm.complete(
+                critic_agent,
+                [{"role": "user", "content": prompt}],
+                max_tokens=min(_PLAN_CRITIC_MAX_OUTPUT_TOKENS, remaining),
+                temperature=0.1,
+                cwd=repo_root,
+            )
+        except Exception as exc:
+            _finish_llm_run(
+                db, run, None, started=started, operation="plan_critic", error=str(exc)
+            )
+            raise
         attempt_tokens = input_tokens + _estimate_tokens(response.text)
         spent_tokens += attempt_tokens
         if spent_tokens > PLAN_CRITIC_TOKEN_BUDGET:
+            _finish_llm_run(
+                db,
+                run,
+                response,
+                started=started,
+                operation="plan_critic",
+                error=(
+                    f"Plan critic exceeded the {PLAN_CRITIC_TOKEN_BUDGET}-token budget"
+                ),
+            )
             raise PlanCriticError(
                 f"Plan critic exceeded the {PLAN_CRITIC_TOKEN_BUDGET}-token budget"
             )
         try:
             result = PlanCriticResult.model_validate(_parse_json(response.text))
+            _finish_llm_run(
+                db, run, response, started=started, operation="plan_critic"
+            )
             return result, spent_tokens
         except (json.JSONDecodeError, ValidationError) as exc:
+            _finish_llm_run(
+                db,
+                run,
+                response,
+                started=started,
+                operation="plan_critic",
+                error=str(exc),
+            )
             last_error = exc
             retry_reason = str(exc)
 
