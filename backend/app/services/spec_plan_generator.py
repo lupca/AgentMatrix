@@ -10,12 +10,15 @@ exclusively from `get_affected_flows` (the LLM never invents flow names).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 import uuid
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
+
+logger = logging.getLogger(__name__)
 
 from app.db.models import Agent, AgentRun, LLMUsage, Task
 from app.schemas.task import (
@@ -35,6 +38,11 @@ UNCONFIRMED_SUFFIX = " *(chưa xác nhận)*"
 _MAX_ATTEMPTS = 2
 PLAN_CRITIC_TOKEN_BUDGET = 50_000
 _PLAN_CRITIC_MAX_OUTPUT_TOKENS = 4_096
+_SEARCH_QUERY_MAX_CHARS = 500
+_GRAPH_UNAVAILABLE_WARNING = (
+    "The code graph search failed or returned no results. This plan was generated "
+    "without repository grounding — treat file paths and flow references as unverified."
+)
 
 
 def _agent_cli(agent: Agent) -> str:
@@ -136,18 +144,45 @@ class PlanCriticError(RuntimeError):
     """The independent critic could not produce a valid in-budget verdict."""
 
 
+def _build_search_query(task: Task) -> str:
+    """Combine raw_input and title into a single search query for the code graph.
+
+    The title alone is often too short or abstract (e.g. "Fix auth bug") to
+    surface relevant files.  ``raw_input`` carries the coordinator's investigation
+    and is a much richer signal.  We concatenate both, truncate, and deduplicate
+    so the graph gets the best single-query shot it can.
+    """
+    parts: list[str] = []
+    raw = (task.raw_input or "").strip()
+    title = (task.title or "").strip()
+    if raw:
+        parts.append(raw)
+    if title and title.lower() not in (raw or "").lower():
+        parts.append(title)
+    query = " ".join(parts) if parts else title
+    return query[:_SEARCH_QUERY_MAX_CHARS]
+
+
 def _build_prompt(
     task: Task,
     graph_candidates: list[str],
     *,
     retry_reason: str | None = None,
     project_context: str | None = None,
+    graph_warning: str | None = None,
 ) -> str:
     candidates = "\n".join(f"- {c}" for c in graph_candidates) or "(none found)"
     retry_note = (
         f"\nYour previous reply was rejected: {retry_reason}. "
         "Reply again with ONLY the corrected JSON object.\n"
         if retry_reason
+        else ""
+    )
+    warning_block = (
+        f"⚠ IMPORTANT: {graph_warning}\n"
+        "Set spec_clarity to \"low\" and add a note in open_questions that the "
+        "plan lacks repository grounding.\n\n"
+        if graph_warning
         else ""
     )
     # The task description is the single most important planning input — a
@@ -167,6 +202,7 @@ def _build_prompt(
         f"Project: {task.project}\n\n"
         f"{details_block}"
         f"{context_block}"
+        f"{warning_block}"
         "Bạn đang đứng TRONG repo của project. Hãy ĐỌC (read-only, không sửa gì) "
         "các file liên quan tới task — bắt đầu từ README/docs/entry points rồi "
         "lần theo — TRƯỚC KHI viết plan. Dựa trên những gì đã đọc: nếu spec còn "
@@ -267,10 +303,12 @@ async def generate_spec_plan(
         )
 
     graph_candidates: list[str] = []
+    graph_warning: str | None = None
     if repo_root:
+        search_query = _build_search_query(task)
         try:
             found = await semantic_search(
-                repo_root, task.title, limit=15, raise_on_error=True
+                repo_root, search_query, limit=15, raise_on_error=True
             )
             if isinstance(found, list):
                 graph_candidates = [
@@ -278,8 +316,21 @@ async def generate_spec_plan(
                     for item in found
                     if isinstance(item, dict)
                 ]
-        except Exception:
+            if not graph_candidates:
+                logger.warning(
+                    "semantic_search returned no results for task %s (query=%r)",
+                    task.id,
+                    search_query[:120],
+                )
+                graph_warning = _GRAPH_UNAVAILABLE_WARNING
+        except Exception as exc:
+            logger.warning(
+                "semantic_search failed for task %s: %s", task.id, exc,
+            )
             graph_candidates = []
+            graph_warning = (
+                f"{_GRAPH_UNAVAILABLE_WARNING} (search error: {exc})"
+            )
 
     llm = LLMService()
     retry_reason: str | None = None
@@ -292,6 +343,7 @@ async def generate_spec_plan(
             graph_candidates,
             retry_reason=retry_reason,
             project_context=project_context,
+            graph_warning=graph_warning,
         )
         run = _begin_llm_run(db, task, agent, prompt, kind="execute")
         started = time.monotonic()
@@ -331,6 +383,23 @@ async def generate_spec_plan(
             f"LLM did not return a schema-valid spec/plan after "
             f"{_MAX_ATTEMPTS} attempts: {last_error}"
         )
+
+    if graph_warning:
+        clarity_order = {"high": 2, "medium": 1, "low": 0}
+        current = clarity_order.get(result.spec_clarity, 0)
+        updates: dict = {}
+        if current > 0:
+            updates["spec_clarity"] = "low"
+        grounding_note = (
+            "Code graph search failed or returned no results — this plan was "
+            "generated without repository grounding. File paths and flow "
+            "references are unverified."
+        )
+        existing_questions = list(result.open_questions)
+        if grounding_note not in existing_questions:
+            updates["open_questions"] = [grounding_note] + existing_questions
+        if updates:
+            result = result.model_copy(update=updates)
 
     confirmed = set(graph_candidates)
     marked_files = [
