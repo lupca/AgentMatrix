@@ -191,6 +191,32 @@ def test_json_cli_output_records_usage_and_keeps_result_ref_flow(
     db.close()
 
 
+def test_failed_attempt_records_cli_usage_before_retry(worker_db, git_repo_root):
+    output = json.dumps(
+        {
+            "usage": {
+                "input_tokens": 398536,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+            },
+            "result": "Error: timeout waiting for response",
+        }
+    )
+    command = f"printf '%s\\n' '{output}' && exit 1"
+
+    with pytest.raises(runner.AgentExecutionError, match="Exit code: 1"):
+        runner.run_agent.fn("run-001", "RUN-001", command, git_repo_root, 5)
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    usage = db.query(LLMUsage).one()
+    assert run.status == "queued"
+    assert usage.agent_run_id == run.id
+    assert usage.input_tokens == 398536
+    assert usage.output_tokens == 0
+    db.close()
+
+
 def _worktree_entries(repo_root: str) -> str:
     return subprocess.run(
         ["git", "worktree", "list"], cwd=repo_root, check=True, capture_output=True, text=True

@@ -164,7 +164,8 @@ def test_dispatch_stream_json_output_flags_preserve_prompt_contract(cli, tmp_pat
     assert argv[format_index : format_index + 2] == ["--output-format", expected_format]
     if cli == "agy":
         assert argv[format_index + 2] == "--print"
-        assert argv[format_index + 3] == argv[-1]
+        assert argv[format_index + 3] == argv[-3]
+        assert argv[-2:] == ["--print-timeout", "1800s"]
     elif cli == "claude":
         assert argv[argv.index("-p") + 1] != "--output-format"
         assert argv[format_index - 1] == "--dangerously-skip-permissions"
@@ -206,7 +207,8 @@ def test_review_command_output_flags_match_cli_contract(cli, tmp_path):
         assert "--verbose" in argv
     if cli == "agy":
         assert argv[format_index + 2] == "--print"
-        assert argv[format_index + 3] == argv[-1]
+        assert argv[format_index + 3] == argv[-3]
+        assert argv[-2:] == ["--print-timeout", "1800s"]
     else:
         prompt_flag = "-p"
         assert argv[argv.index(prompt_flag) + 1]
@@ -221,6 +223,36 @@ def test_build_review_command_never_infers_a_missing_base_ref(tmp_path):
 
     with pytest.raises(ValueError, match="base_ref"):
         build_review_command(task, agent, project, "", "head-sha")
+
+
+def test_agy_dispatch_print_timeout_uses_agent_run_timeout(tmp_path):
+    task = Task(id="CMD-AGY-TIMEOUT", project="p", title="Task")
+    agent = Agent(id="@agent", name="Agent", role="executor", cli="agy")
+    project = Project(id="p", name="Project", repo_root=str(tmp_path))
+
+    command, _, cli = build_dispatch_command(
+        task, agent, project, timeout_seconds=2400
+    )
+    argv = shlex.split(command)
+
+    assert cli == "agy"
+    assert argv[argv.index("--print") + 1] == argv[-3]
+    assert argv[-2:] == ["--print-timeout", "2400s"]
+
+
+def test_agy_review_print_timeout_uses_agent_run_timeout(tmp_path):
+    task = Task(id="REV-AGY-TIMEOUT", project="p", title="Review task")
+    agent = Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="agy")
+    project = Project(id="p", name="Project", repo_root=str(tmp_path))
+
+    command, _, cli = build_review_command(
+        task, agent, project, "base", "head", timeout_seconds=2400
+    )
+    argv = shlex.split(command)
+
+    assert cli == "agy"
+    assert argv[argv.index("--print") + 1] == argv[-3]
+    assert argv[-2:] == ["--print-timeout", "2400s"]
 
 
 def test_task_prompt_includes_graph_tool_guidance(tmp_path):

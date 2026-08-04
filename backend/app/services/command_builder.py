@@ -16,6 +16,7 @@ from app.services.cli_dispatcher import build_mcp_config
 
 SUPPORTED_CLIS = {"agy", "codex", "claude", "qwen"}
 _EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
+_AGY_PRINT_TIMEOUT_FALLBACK_SECONDS = 1_800
 
 
 def _normalize_acceptance_criteria(ac: list | str | None) -> list[str]:
@@ -36,6 +37,16 @@ def _model_has_effort_suffix(model: str | None) -> bool:
     return any(lowered.endswith(suffix) for suffix in _EFFORT_SUFFIXES)
 
 
+def _agy_print_timeout(timeout_seconds: int | None) -> str:
+    """Format the AgentRun timeout for agy's duration-valued CLI option."""
+    seconds = (
+        timeout_seconds
+        if timeout_seconds is not None and timeout_seconds > 0
+        else _AGY_PRINT_TIMEOUT_FALLBACK_SECONDS
+    )
+    return f"{seconds}s"
+
+
 def review_result_path(repo_root: str, task_id: str) -> str:
     """Return the stable, ignored path used by a review run's JSON result."""
     safe_task_id = task_id.replace("/", "_").replace("\\", "_")
@@ -48,6 +59,7 @@ def build_dispatch_command(
     project: Optional[Project] = None,
     effort: Optional[str] = None,
     db: Optional[Session] = None,
+    timeout_seconds: Optional[int] = None,
 ) -> tuple[str, str, str]:
     cli = (agent.cli or _infer_cli(agent.model, agent.id)).strip().lower()
     if cli not in SUPPORTED_CLIS:
@@ -112,6 +124,8 @@ def build_dispatch_command(
                 "stream-json",
                 "--print",
                 prompt,
+                "--print-timeout",
+                _agy_print_timeout(timeout_seconds),
             ]
         )
 
@@ -125,6 +139,7 @@ def build_review_command(
     base_ref: str,
     head_ref: str,
     db: Optional[Session] = None,
+    timeout_seconds: Optional[int] = None,
 ) -> tuple[str, str, str]:
     """Build the CLI invocation for a real ``/code-review`` run.
 
@@ -199,6 +214,8 @@ def build_review_command(
                 "stream-json",
                 "--print",
                 prompt,
+                "--print-timeout",
+                _agy_print_timeout(timeout_seconds),
             ]
         )
 
