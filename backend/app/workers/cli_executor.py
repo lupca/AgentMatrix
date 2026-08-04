@@ -7,8 +7,8 @@ import logging
 import os
 import re
 import shlex
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,9 +23,9 @@ from sqlalchemy.orm import Session
 
 from app.db.base import SessionLocal
 from app.db.models import (
+    Agent,
     AgentEvent,
     AgentOutputChunk,
-    Agent,
     AgentRun,
     LLMUsage,
     RunResourceUsage,
@@ -33,8 +33,13 @@ from app.db.models import (
     VendorRawEvent,
 )
 from app.schemas.task import ReviewResult
+from app.services.agent_run_classification import (
+    classify_review_outcome,
+    classify_termination,
+)
 from app.services.command_builder import _is_review_task, review_result_path
 from app.services.coordinator import CoordinatorService
+from app.services.outbox import record_commit_event
 from app.services.process_manager import (
     ProcessManager,
     ProcessResult,
@@ -43,7 +48,6 @@ from app.services.process_manager import (
     WorktreeUnsupportedError,
 )
 from app.services.review_criteria import merged_review_criteria
-from app.services.outbox import record_commit_event
 from app.services.task_event_service import emit_task_event
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.services.tool_metrics import record_tool_metric
@@ -633,6 +637,19 @@ def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResu
         for ac in review_result.ac_results
     ]
     verdict = "pass" if all(item["passed"] for item in ac_results) else "changes"
+    if verdict == "changes":
+        executor_run = (
+            db.query(AgentRun)
+            .filter(
+                AgentRun.task_id == run.task_id,
+                AgentRun.kind == "execute",
+                AgentRun.result_ref == run.task.result_ref,
+            )
+            .order_by(AgentRun.completed_at.desc(), AgentRun.created_at.desc())
+            .first()
+        )
+        if executor_run is not None:
+            executor_run.failure_category = classify_review_outcome(ac_results)
     orch_cls = _get_attr("TaskOrchestrationService", TaskOrchestrationService)
     try:
         orch_cls(db).request_verdict(
@@ -813,6 +830,7 @@ def _record_unexpected_failure(
             run.pid = None
             run.completed_at = run.completed_at or datetime.now(timezone.utc)
             run.error_message = run.error_message or "Task reached terminal state"
+            run.failure_category = "cancelled"
             db.commit()
             return False
 
@@ -829,6 +847,9 @@ def _record_unexpected_failure(
             run.status = "failed"
             run.pid = None
             run.error_message = str(exc)
+            run.failure_category = classify_termination(
+                status="failed", error=str(exc), kind=run.kind
+            )
             run.completed_at = datetime.now(timezone.utc)
             _record_execution_failure(
                 db,
@@ -909,6 +930,7 @@ def execute_agent_run(
         if task is not None and task.status in {"done", "failed", "cancelled"}:
             run.status = "cancelled"
             run.error_message = f"Task reached terminal state: {task.status}"
+            run.failure_category = "cancelled"
             run.completed_at = datetime.now(timezone.utc)
             db.commit()
             return None
@@ -948,6 +970,7 @@ def execute_agent_run(
             run.status = "cancelled"
             run.completed_at = datetime.now(timezone.utc)
             run.error_message = error
+            run.failure_category = "brake_stopped"
             db.flush()
 
             # A watchdog decision is a terminal run failure, not merely a run
@@ -991,6 +1014,9 @@ def execute_agent_run(
         if base_ref is None:
             run.status = "failed"
             run.error_message = "Could not determine repository HEAD before execution"
+            run.failure_category = classify_termination(
+                status="failed", error=run.error_message, kind=run.kind
+            )
             db.commit()
             _emit_decision_event(
                 db,
@@ -1255,6 +1281,7 @@ def execute_agent_run(
             run.pid = None
             run.completed_at = run.completed_at or datetime.now(timezone.utc)
             run.error_message = run.error_message or f"Task reached terminal state: {task.status}"
+            run.failure_category = "cancelled"
             _record_run_resource_usage(db, run)
             db.commit()
             publish_status(run_id, "cancelled", attempt=attempt, error=run.error_message)
@@ -1410,6 +1437,13 @@ def execute_agent_run(
                 run_id=run.id,
                 error_code=f"execution-{result.status.value}",
             )
+        run.failure_category = classify_termination(
+            status=effective_status,
+            error=run.error_message or result.error,
+            exit_code=result.exit_code,
+            output_lines=run.output_lines,
+            kind=run.kind,
+        )
         _record_run_resource_usage(db, run)
         db.commit()
         effective_error = run.error_message or result.error

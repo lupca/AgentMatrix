@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Agent, AgentAccount, AgentRun, Task
 from app.schemas.agent import AgentSuggestion
+from app.services.agent_run_classification import INFRA_CATEGORIES, LEGACY_DATA
 
 # Bumped whenever the scoring formula (weights, signals) changes, so
 # DispatchDecision.policy_version tells you which formula produced a given
@@ -305,6 +306,13 @@ class AgentMatcher:
             .join(Task, AgentRun.task_id == Task.id)
             .filter(AgentRun.agent_id == agent.id)
             .filter(AgentRun.status.in_(("success", "failed", "timeout")))
+            # Infrastructure failures measure the platform, not the agent.
+            # Legacy rows are also excluded from the clean capability signal;
+            # they are retained for audit and can be reported separately.
+            .filter(
+                ~AgentRun.failure_category.in_(INFRA_CATEGORIES),
+                AgentRun.failure_data_quality != LEGACY_DATA,
+            )
             .all()
         )
         similar_results: list[bool] = []

@@ -133,6 +133,8 @@ def test_run_agent_persists_output_and_success(worker_db, git_repo_root):
     run = db.get(AgentRun, "run-001")
     assert result == 0
     assert run.status == "success"
+    assert run.failure_category == "unknown"
+    assert run.failure_data_quality == "current"
     assert run.pid is None
     assert run.output_lines == 2
     assert run.output_bytes == len("firstsecond")
@@ -778,6 +780,7 @@ def test_timeout_is_terminal_and_not_retried(worker_db, monkeypatch, git_repo_ro
     run = db.get(AgentRun, "run-001")
     assert result == -1
     assert run.status == "timeout"
+    assert run.failure_category == "infra_timeout"
     assert run.attempt == 1
     db.close()
 

@@ -91,6 +91,57 @@ def test_suggested_agents_consider_similar_run_outcomes(db_session):
     assert suggestions[0].agent_id == good.id
 
 
+def test_agent_performance_excludes_infrastructure_failures(db_session):
+    infra_agent = Agent(
+        id="@infra-agent",
+        name="Infra Agent",
+        role="executor",
+        capabilities=["python"],
+        success_rate=0.5,
+        status="idle",
+    )
+    agent_agent = Agent(
+        id="@agent-agent",
+        name="Agent Agent",
+        role="executor",
+        capabilities=["python"],
+        success_rate=0.5,
+        status="idle",
+    )
+    infra_task = Task(id="MATCH-INFRA", project="backend", title="Python API")
+    agent_task = Task(id="MATCH-AGENT", project="backend", title="Python API")
+    current = Task(id="MATCH-CURRENT", project="backend", title="Python API endpoint")
+    db_session.add_all([infra_agent, agent_agent, infra_task, agent_task, current])
+    db_session.flush()
+    db_session.add_all(
+        [
+            AgentRun(
+                task_id=infra_task.id,
+                agent_id=infra_agent.id,
+                cli="agy",
+                command="agy",
+                status="failed",
+                failure_category="infra_timeout",
+            ),
+            AgentRun(
+                task_id=agent_task.id,
+                agent_id=agent_agent.id,
+                cli="agy",
+                command="agy",
+                status="failed",
+                failure_category="agent_no_output",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    result = AgentMatcher(db_session).score_candidates(current, top_n=2)
+    scores = {candidate.agent_id: candidate.performance for candidate in result.candidates}
+
+    assert scores[infra_agent.id] == 0.5
+    assert scores[agent_agent.id] == 0.0
+
+
 def test_agent_suggester_executor_role_has_no_capability_filter(db_session):
     db_session.add(
         Agent(

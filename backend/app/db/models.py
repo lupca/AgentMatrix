@@ -894,6 +894,16 @@ class AgentRun(Base):
     exit_code = Column(Integer, nullable=True)
     result_ref = Column(String(255), nullable=True)
     error_message = Column(Text, nullable=True)
+    # A deliberately low-cardinality attribution of how the run ended.  The
+    # default is unknown: an exit code or free-form stderr is not evidence of
+    # agent fault.  Historical rows are marked by the migration's data-quality
+    # column and are never relabelled from their old evidence.
+    failure_category = Column(
+        String(30), nullable=False, default="unknown", server_default="unknown", index=True
+    )
+    failure_data_quality = Column(
+        String(20), nullable=False, default="current", server_default="current", index=True
+    )
 
     output_lines = Column(Integer, nullable=False, default=0)
     output_bytes = Column(Integer, nullable=False, default=0)
@@ -941,6 +951,17 @@ class AgentRun(Base):
         CheckConstraint("kind IN ('execute', 'review')", name="ck_agent_runs_kind"),
         CheckConstraint(
             "agent_role IN ('executor', 'reviewer')", name="ck_agent_runs_agent_role"
+        ),
+        CheckConstraint(
+            "failure_category IN ("
+            "'infra_timeout', 'infra_config', 'infra_conflict', 'infra_parse', "
+            "'agent_no_output', 'agent_wrong', 'agent_incomplete', "
+            "'brake_stopped', 'cancelled', 'unknown')",
+            name="ck_agent_runs_failure_category",
+        ),
+        CheckConstraint(
+            "failure_data_quality IN ('current', 'legacy')",
+            name="ck_agent_runs_failure_data_quality",
         ),
         UniqueConstraint(
             "task_round_id",

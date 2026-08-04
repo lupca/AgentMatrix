@@ -12,6 +12,7 @@ from app.db.models import (
 )
 from app.services import entity_admin
 from app.services.admin_gate import AdminGateService, AdminOrchestrationError
+from app.services.agent_run_classification import failure_report
 from app.services.agent_suggester import AgentSuggester
 from app.services.crypto import encrypt_api_key
 from app.services.plan_critic_analytics import plan_critic_report
@@ -60,6 +61,7 @@ class AdminHandlersMixin:
             cli_runs = cli_runs.filter(AgentRun.task_id == task_id)
         if agent_id:
             cli_runs = cli_runs.filter(AgentRun.agent_id == agent_id)
+        failure_rows = cli_runs.all()
         resources = self.db.query(RunResourceUsage)
         if task_id or agent_id:
             resources = resources.join(AgentRun, RunResourceUsage.agent_run_id == AgentRun.id)
@@ -156,6 +158,7 @@ class AdminHandlersMixin:
             if run_cost_value is not None
             else None,
             'plan_critic': plan_critic_report(self.db, task_id=task_id),
+            'failure_classification': failure_report(failure_rows),
         }
 
     async def _handle_suggest_agents(self, args: str, session_id: str) -> dict:

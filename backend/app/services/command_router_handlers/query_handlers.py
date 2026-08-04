@@ -159,6 +159,8 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
             "agent_id": "str",
             "status": "str",
             "kind": "str",
+            "failure_category": "str",
+            "failure_data_quality": "str",
         },
         "order_by": AgentRun.queued_at.desc(),
         "serialize": lambda r: {
@@ -167,6 +169,8 @@ _QUERY_DB_ENTITIES: dict[str, dict[str, Any]] = {
             "agent_id": r.agent_id,
             "kind": r.kind,
             "status": r.status,
+            "failure_category": r.failure_category,
+            "failure_data_quality": r.failure_data_quality,
             "effort": r.effort,
             "exit_code": r.exit_code,
             "queued_at": r.queued_at.isoformat() if r.queued_at else None,
