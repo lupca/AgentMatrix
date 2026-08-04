@@ -483,3 +483,38 @@ async def query_graph(
         logger.warning("query_graph failed with fallback to []: %s", e)
         _observe("query_graph", started, False, error=str(e))
         return []
+
+
+async def symbol_exists(
+    repo_root: str,
+    symbol: str,
+    timeout: float = DEFAULT_TIMEOUT,
+) -> bool:
+    """Check symbol resolvability using the graph's node resolver.
+
+    The graph server has no standalone symbol-existence pattern.  The
+    ``callers_of`` query resolves its target before looking for edges, so its
+    ``ok``/``not_found`` status answers existence even when there are no callers.
+    """
+
+    started = time.monotonic()
+    try:
+        async with MCPClient(repo_root=repo_root) as client:
+            raw = await client.call_tool(
+                "query_graph_tool",
+                arguments={
+                    "repo_root": repo_root,
+                    "pattern": "callers_of",
+                    "target": symbol,
+                    "detail_level": "minimal",
+                    "max_results": 1,
+                },
+                timeout=timeout,
+            )
+        exists = isinstance(raw, dict) and raw.get("status") == "ok"
+        _observe("symbol_exists", started, True, {"exists": exists})
+        return exists
+    except Exception as exc:
+        logger.warning("symbol_exists failed with fallback to false: %s", exc)
+        _observe("symbol_exists", started, False, error=str(exc))
+        return False

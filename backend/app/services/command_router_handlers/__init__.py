@@ -3,6 +3,7 @@ from .query_handlers import QueryHandlersMixin, _QUERY_DB_ENTITIES, _coerce_filt
 from .context_handlers import ContextHandlersMixin
 from .admin_handlers import AdminHandlersMixin
 from .spec_handlers import SpecHandlersMixin
+from .impl_design_handlers import ImplDesignHandlersMixin
 
 __all__ = [
     "TaskHandlersMixin",
@@ -10,6 +11,7 @@ __all__ = [
     "ContextHandlersMixin",
     "AdminHandlersMixin",
     "SpecHandlersMixin",
+    "ImplDesignHandlersMixin",
     "_QUERY_DB_ENTITIES",
     "_coerce_filter_value",
 ]

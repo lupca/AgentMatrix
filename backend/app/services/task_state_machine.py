@@ -20,6 +20,7 @@ from app.db.models import (
     DispatchCandidate,
     DispatchDecision,
     GateRecord,
+    ImplDesign,
     Project,
     Task,
     TaskDependency,
@@ -46,6 +47,14 @@ from app.services.task_validators import (
 logger = logging.getLogger(__name__)
 
 GateDecision = Literal["approved", "rejected"]
+
+
+def _is_cheap_executor(agent: Agent) -> bool:
+    """Identify the explicitly low-cost executor tier for impl-design gating."""
+
+    effort = (agent.effort or "").strip().lower()
+    model = f"{agent.model or ''} {agent.name or ''}".lower()
+    return effort == "low" or "flash" in model or "mini" in model
 
 
 def _split_result_range(result_ref: str) -> tuple[str | None, str | None]:
@@ -911,6 +920,17 @@ class TaskStateMachine:
         agent = self.db.get(Agent, agent_id)
         if agent is None:
             raise PrerequisiteError(f"Agent {agent_id} not found")
+        if kind == "execute" and _is_cheap_executor(agent):
+            design = (
+                self.db.query(ImplDesign)
+                .filter(ImplDesign.task_id == task.id)
+                .first()
+            )
+            if design is not None and not bool((design.completeness or {}).get("passed")):
+                raise PrerequisiteError(
+                    f"impl_design for task {task.id} has not passed all six completeness checks; "
+                    "score_completeness or revise the design before dispatching a cheap executor"
+                )
         if kind == "review":
             self.validator.require_independent(task.executor, agent_id)
         project = self.db.get(Project, task.project)

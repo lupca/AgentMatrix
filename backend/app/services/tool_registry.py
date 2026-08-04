@@ -910,6 +910,50 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             required_role="executor",
         ),
         ToolSpec(
+            name="impl_design",
+            description=(
+                "Create, read, or code-score the one implementation design directly "
+                "above a task. Completeness returns six mechanical checks with reasons; "
+                "it never calls an LLM and never scores document length."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "get", "score_completeness"],
+                        "default": "get",
+                    },
+                    "task_id": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "[{path, action: create|modify|delete, why}]",
+                    },
+                    "changes": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "[{symbol, signature, behavior, edge_cases}]",
+                    },
+                    "data_changes": {"type": "array"},
+                    "test_plan": {"type": "array"},
+                    "risks": {"type": "array"},
+                    "non_goals": {"type": "array"},
+                    "derived_from_sha": {"type": "string"},
+                    "authored_by": {"type": "string"},
+                    "reviewed_by": {"type": "string"},
+                },
+                "required": ["task_id"],
+            },
+            handler="impl_design",
+            tier="deferred",
+            permission="write",
+            entity="impl_design",
+            slash_alias=None,
+            group="spec",
+        ),
+        ToolSpec(
             name="spec_write",
             description=(
                 "Write living-spec items and relations in one transaction. "
@@ -1004,8 +1048,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "archive_task, generate_spec_plan), admin (project/agent/"
                 "knowledge/settings management), session (compact_context), "
                 "research (get_minimal_context, get_impact_radius), query "
-                "(get_task_events, suggest_agents), spec (spec_write, spec_get, "
-                "spec_stale)."
+                "(get_task_events, suggest_agents), spec (impl_design, spec_write, "
+                "spec_get, spec_stale)."
             ),
             parameters={
                 "type": "object",

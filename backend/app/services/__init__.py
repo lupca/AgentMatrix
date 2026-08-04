@@ -5,6 +5,7 @@ from app.services.graph_client import (
     query_tests_for,
     get_affected_flows,
     query_graph,
+    symbol_exists,
     clear_graph_cache,
 )
 
@@ -18,5 +19,6 @@ __all__ = [
     "query_tests_for",
     "get_affected_flows",
     "query_graph",
+    "symbol_exists",
     "clear_graph_cache",
 ]
