@@ -86,7 +86,8 @@ def build_dispatch_command(
                 prompt,
                 "--dangerously-skip-permissions",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
             ]
         )
     elif cli == "qwen":
@@ -174,7 +175,8 @@ def build_review_command(
                 prompt,
                 "--dangerously-skip-permissions",
                 "--output-format",
-                "json",
+                "stream-json",
+                "--verbose",
             ]
         )
     elif cli == "qwen":

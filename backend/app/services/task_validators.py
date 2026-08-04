@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+import psutil
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -84,6 +86,29 @@ class AutonomyPolicy:
     autonomy: str = "supervised"
     auto_max_risk: str = "normal"
     auto_max_rounds: int = 3
+
+
+def _is_pid_alive_and_active(pid: int | None) -> bool:
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() in (psutil.STATUS_ZOMBIE, psutil.STATUS_DEAD):
+            return False
+        return True
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    except psutil.AccessDenied:
+        return True
 
 
 class TaskValidator:
@@ -244,6 +269,10 @@ class TaskValidator:
                     usage = self.db.get(RunResourceUsage, run_id)
                     active_seconds = float(usage.active_seconds if usage else 0)
                     tool_calls = int(usage.tool_calls if usage else 0)
+                    if run.status == "running" and run.pid and _is_pid_alive_and_active(run.pid):
+                        now_utc = datetime.now(timezone.utc)
+                        run.updated_at = now_utc
+                        self.db.flush()
                     last_activity = run.updated_at or run.started_at
                     if last_activity is None:
                         no_progress_seconds = 0

@@ -160,13 +160,15 @@ def test_dispatch_json_output_flags_preserve_prompt_contract(cli, tmp_path):
     argv = shlex.split(command)
 
     format_index = argv.index("--output-format")
-    assert argv[format_index : format_index + 2] == ["--output-format", "json"]
+    expected_format = "stream-json" if cli == "claude" else "json"
+    assert argv[format_index : format_index + 2] == ["--output-format", expected_format]
     if cli == "agy":
         assert argv[format_index + 2] == "--print"
         assert argv[format_index + 3] == argv[-1]
     elif cli == "claude":
         assert argv[argv.index("-p") + 1] != "--output-format"
         assert argv[format_index - 1] == "--dangerously-skip-permissions"
+        assert "--verbose" in argv
     else:
         assert argv[argv.index("-p") + 1] == argv[format_index - 1]
 
@@ -196,7 +198,10 @@ def test_review_command_json_output_flags_match_cli_contract(cli, tmp_path):
         return
 
     format_index = argv.index("--output-format")
-    assert argv[format_index : format_index + 2] == ["--output-format", "json"]
+    expected_format = "stream-json" if cli == "claude" else "json"
+    assert argv[format_index : format_index + 2] == ["--output-format", expected_format]
+    if cli == "claude":
+        assert "--verbose" in argv
     if cli == "agy":
         assert argv[format_index + 2] == "--print"
         assert argv[format_index + 3] == argv[-1]

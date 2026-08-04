@@ -102,6 +102,21 @@ def test_cancel_check_terminates_process():
     assert final_result(results).status == ProcessStatus.CANCELLED
 
 
+def test_on_heartbeat_fires_during_long_execution():
+    heartbeat_pids = []
+    manager = ProcessManager(
+        timeout_seconds=5,
+        poll_interval=0.02,
+        heartbeat_interval=0.05,
+        on_heartbeat=lambda pid: heartbeat_pids.append(pid),
+    )
+    results = list(manager.run_with_streaming("sleep 0.25", "/tmp"))
+
+    assert final_result(results).status == ProcessStatus.COMPLETED
+    assert len(heartbeat_pids) >= 2
+    assert all(isinstance(pid, int) and pid > 0 for pid in heartbeat_pids)
+
+
 def test_cancel_check_error_is_treated_as_not_cancelled():
     manager = ProcessManager(
         timeout_seconds=2,

@@ -2096,3 +2096,58 @@ def test_dispatch_decision_flags_human_override_when_selected_agent_is_not_top_r
 
     decision = db_session.get(DispatchDecision, result.agent_run.dispatch_decision_id)
     assert decision.human_override is True
+
+
+def test_check_brakes_pumps_updated_at_when_pid_is_alive(orchestration, db_session):
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    task = _task(db_session, "BRAKE-PID-1", mode="bypass")
+    old_time = datetime.now(timezone.utc) - timedelta(seconds=500)
+    run = AgentRun(
+        id="run-pid-alive",
+        task_id=task.id,
+        agent_id="@executor",
+        cli="claude",
+        command="claude -p 'test'",
+        status="running",
+        started_at=old_time,
+        updated_at=old_time,
+        pid=os.getpid(),
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    brake = orchestration.check_brakes(task, run_id=run.id, audit=True)
+
+    assert brake.allowed is True
+    db_session.refresh(run)
+    updated_at = run.updated_at
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    assert updated_at > old_time + timedelta(seconds=400)
+
+
+def test_check_brakes_triggers_no_progress_limit_when_pid_is_dead(orchestration, db_session):
+    from datetime import datetime, timedelta, timezone
+
+    task = _task(db_session, "BRAKE-PID-2", mode="bypass")
+    old_time = datetime.now(timezone.utc) - timedelta(seconds=500)
+    run = AgentRun(
+        id="run-pid-dead",
+        task_id=task.id,
+        agent_id="@executor",
+        cli="claude",
+        command="claude -p 'test'",
+        status="running",
+        started_at=old_time,
+        updated_at=old_time,
+        pid=99999999,
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    brake = orchestration.check_brakes(task, run_id=run.id, audit=True)
+
+    assert brake.allowed is False
+    assert brake.code == "no_progress_limit"

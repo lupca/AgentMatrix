@@ -870,7 +870,16 @@ def execute_agent_run(
                 db=db,
             )
 
+        def record_heartbeat(pid: int) -> None:
+            try:
+                run.updated_at = datetime.now(timezone.utc)
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.warning("Failed to update heartbeat for run %s", run_id, exc_info=True)
+
         process_manager.on_start = record_pid
+        process_manager.on_heartbeat = record_heartbeat
         publish_status(run_id, "running", attempt=attempt)
         logger.info(
             "Starting agent run %s for task %s (attempt %d/%d)",

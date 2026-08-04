@@ -51,6 +51,8 @@ class ProcessManager:
         poll_interval: float = 0.1,
         cancel_check: Optional[Callable[[], bool]] = None,
         on_start: Optional[Callable[[int], None]] = None,
+        on_heartbeat: Optional[Callable[[int], None]] = None,
+        heartbeat_interval: float = 10.0,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
@@ -60,6 +62,8 @@ class ProcessManager:
         self.poll_interval = poll_interval
         self.cancel_check = cancel_check
         self.on_start = on_start
+        self.on_heartbeat = on_heartbeat
+        self.heartbeat_interval = heartbeat_interval
         self.process: Optional[subprocess.Popen[str]] = None
         self._cancelled = threading.Event()
         self._terminate_lock = threading.Lock()
@@ -87,6 +91,7 @@ class ProcessManager:
 
         output_queue: queue.Queue[object] = queue.Queue()
         started_at = time.monotonic()
+        last_heartbeat_at = started_at
         result: Optional[ProcessResult] = None
 
         try:
@@ -123,7 +128,20 @@ class ProcessManager:
                     )
                     break
 
-                elapsed = time.monotonic() - started_at
+                now = time.monotonic()
+                if (
+                    self.on_heartbeat is not None
+                    and self.process is not None
+                    and self.process.poll() is None
+                    and now - last_heartbeat_at >= self.heartbeat_interval
+                ):
+                    try:
+                        self.on_heartbeat(self.process.pid)
+                    except Exception:
+                        logger.warning("on_heartbeat callback failed", exc_info=True)
+                    last_heartbeat_at = now
+
+                elapsed = now - started_at
                 if elapsed >= self.timeout:
                     self._terminate()
                     result = ProcessResult(
