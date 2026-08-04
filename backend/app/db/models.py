@@ -1280,11 +1280,13 @@ class SpecItem(ArchivableMixin, Base):
 class SpecAnchor(Base):
     """A pure-code anchor from a spec item to a repo/path/symbol (CTV2-1342).
 
-    ``anchor_sha`` hashes the symbol's source at anchor time (see
-    ``app.services.spec_anchor.compute_anchor_sha``). ``spec_write`` always
-    computes it on the server and ignores a supplied value when the source is
-    available; a supplied value is only a compatibility fallback for a repo
-    that is not checked out and must be a 64-character hexadecimal symbol hash.
+    ``anchor_sha`` hashes the canonical anchored content at anchor time (see
+    ``app.services.spec_anchor.compute_anchor_sha``): a local Python AST
+    declaration for ``.py`` files, or the whole file for every other path.
+    ``spec_write`` always computes it on the server and ignores a supplied
+    value when the source is available; a supplied value is only a
+    compatibility fallback for a repo that is not checked out and must be a
+    64-character hexadecimal content hash.
     The commit-triggered invalidation engine recomputes the same hash at the
     changed commit and flips the owning ``spec_item`` to ``stale`` when it no
     longer matches; the anchor row itself is never rewritten by that engine,

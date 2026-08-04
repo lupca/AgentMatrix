@@ -5,27 +5,31 @@ whole module is deterministic subprocess/string work -- no LLM call anywhere.
 An LLM is never asked "is this still true"; that question is answered here,
 in code, from the git history.
 
-``anchor_sha`` is a hash of one symbol's source block, computed the same way
-at anchor time (``compute_anchor_sha``) and at invalidation time
-(``apply_commit_staleness``) so the two are directly comparable. Symbol
-extraction is a best-effort, language-agnostic heuristic (locate the
-definition line, then capture its body by indentation or brace depth) -- it
-does not require a language-specific parser.
+``anchor_sha`` is a hash of the anchored content, computed the same way at
+anchor time (``compute_anchor_sha``) and at invalidation time
+(``apply_commit_staleness``) so the two are directly comparable. Python files
+use AST declarations. Configuration and other non-Python files use a
+whole-file hash because the existing symbol extractor cannot define a stable
+source block for those formats. This distinction is derived from the path, so
+it does not require a schema migration.
 """
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 import re
 import subprocess
 import uuid
+from pathlib import PurePosixPath
 
 from sqlalchemy.orm import Session
 
 from app.db.models import SpecAnchor, SpecItem, SpecTaskLink, Task
 
 _GIT_TIMEOUT_SECONDS = 30
+_PYTHON_SUFFIX = ".py"
 
 _DEF_LINE_RE = (
     r'^[ \t]*(?:export\s+)?(?:default\s+)?(?:async\s+)?'
@@ -36,6 +40,15 @@ _DEF_LINE_RE = (
 def _symbol_name(symbol: str) -> str:
     """The leaf name of a dotted/namespaced symbol, e.g. ``Foo.bar`` -> ``bar``."""
     return symbol.rsplit(".", 1)[-1].rsplit("::", 1)[-1].strip()
+
+
+def is_python_path(path: str) -> bool:
+    return PurePosixPath(path).suffix.lower() == _PYTHON_SUFFIX
+
+
+def anchor_mode(path: str) -> str:
+    """Return the content mode used for both writing and invalidation."""
+    return "python-symbol" if is_python_path(path) else "whole-file"
 
 
 def extract_symbol_source(text: str, symbol: str) -> str | None:
@@ -86,6 +99,81 @@ def hash_symbol_source(source: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _python_node_source(text: str, node: ast.AST) -> str | None:
+    source = ast.get_source_segment(text, node)
+    if source is not None:
+        return source
+    start = getattr(node, "lineno", None)
+    end = getattr(node, "end_lineno", None)
+    if start is None or end is None:
+        return None
+    return "\n".join(text.splitlines()[start - 1 : end])
+
+
+def _assignment_names(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+        targets = [node.target]
+    else:
+        return set()
+
+    names: set[str] = set()
+
+    def visit(target: ast.AST) -> None:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for element in target.elts:
+                visit(element)
+
+    for target in targets:
+        visit(target)
+    return names
+
+
+def _python_declaration(node: ast.AST, name: str) -> bool:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name == name
+    return name in _assignment_names(node)
+
+
+def extract_python_symbol_source(text: str, symbol: str) -> str | None:
+    """Extract a local Python declaration, including assignments and class attrs.
+
+    Imported names, call-site references, constraint names, and comma-separated
+    pseudo-symbols are intentionally not accepted: they do not identify source
+    owned by this file and would make staleness silently meaningless.
+    """
+    if not symbol or "," in symbol:
+        return None
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return None
+
+    if "." in symbol:
+        owner, member = symbol.rsplit(".", 1)
+        owner = _symbol_name(owner)
+        member = member.strip()
+        if not owner or not member:
+            return None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == owner:
+                for child in node.body:
+                    if _python_declaration(child, member):
+                        return _python_node_source(text, child)
+        return None
+
+    name = symbol.strip()
+    if not name:
+        return None
+    for node in ast.walk(tree):
+        if _python_declaration(node, name):
+            return _python_node_source(text, node)
+    return None
+
+
 def _read_file_at(repo_root: str, path: str, commit_sha: str | None) -> str | None:
     """Read `path` at `commit_sha` (git object), or the working tree if None."""
     if commit_sha:
@@ -106,17 +194,22 @@ def _read_file_at(repo_root: str, path: str, commit_sha: str | None) -> str | No
         return None
 
 
+def source_available(repo_root: str, path: str) -> bool:
+    """Whether the current working tree contains the requested source file."""
+    return _read_file_at(repo_root, path, None) is not None
+
+
 def compute_anchor_sha(
     repo_root: str, path: str, symbol: str, commit_sha: str | None = None
 ) -> str | None:
-    """Hash of `symbol`'s current source block in `path`, or None if unresolvable."""
+    """Hash the canonical content selected by :func:`anchor_mode`."""
     text = _read_file_at(repo_root, path, commit_sha)
     if text is None:
         return None
-    source = extract_symbol_source(text, symbol)
-    if source is None:
-        return None
-    return hash_symbol_source(source)
+    if anchor_mode(path) == "whole-file":
+        return hash_symbol_source(text)
+    source = extract_python_symbol_source(text, symbol)
+    return hash_symbol_source(source) if source is not None else None
 
 
 def _diff_range(commit_sha: str) -> tuple[str, str]:
@@ -264,8 +357,9 @@ def apply_commit_staleness(
         item = db.get(SpecItem, anchor.spec_item_id)
         if item is None or item.archived_at is not None:
             continue
+        target_label = "file" if anchor_mode(anchor.path) == "whole-file" else "symbol"
         reason = (
-            f"symbol '{anchor.symbol}' in {anchor.path} changed at commit {after} "
+            f"{target_label} '{anchor.symbol}' in {anchor.path} changed at commit {after} "
             f"(anchor_sha {anchor.anchor_sha[:12]} -> "
             f"{current_sha[:12] if current_sha else 'missing'})"
         )

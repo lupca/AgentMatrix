@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from app.db.models import SpecAnchor, SpecItem, SpecRelation, SpecTaskLink, Task
-from app.services.spec_anchor import compute_anchor_sha
+from app.services.spec_anchor import compute_anchor_sha, is_python_path, source_available
 
 
 SPEC_KINDS = {"requirement", "decision", "constraint", "interface", "design"}
@@ -279,6 +279,15 @@ def write_specs(
                     raise SpecError(
                         "anchor_sha must be exactly 64 hexadecimal characters; "
                         "a commit SHA or other value is not accepted"
+                    )
+                if (
+                    computed_anchor_sha is None
+                    and is_python_path(path)
+                    and source_available(repo, path)
+                ):
+                    raise SpecError(
+                        f"could not resolve Python symbol '{symbol}' in {path}; "
+                        "use a local declaration or remove the anchor"
                     )
                 anchor_sha = computed_anchor_sha or supplied_anchor_sha
                 if not anchor_sha:
