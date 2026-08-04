@@ -19,6 +19,7 @@ from sqlalchemy import (
     event,
 )
 from sqlalchemy.orm import validates, relationship
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.ext.compiler import compiles
@@ -63,6 +64,9 @@ class SessionStatus(str, Enum):
 class AgentType(str, Enum):
     CLI = "cli"
     API = "api"
+
+
+IMPL_DESIGN_JSON = JSON().with_variant(JSONB(), "postgresql")
 
 
 class AgentRole(str, Enum):
@@ -244,6 +248,10 @@ class Task(ArchivableMixin, Base):
     )
     notes = relationship("AgentNote", secondary="note_tasks", back_populates="tasks")
     task_events = relationship("TaskEvent", back_populates="task", cascade="all, delete-orphan")
+    impl_design = relationship(
+        "ImplDesign", back_populates="task", uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -523,6 +531,38 @@ class GateRecord(Base):
                 f"Four-eyes violation: reviewer '{value}' cannot be the same as executor '{other_val}'."
             )
         return value
+
+
+class ImplDesign(Base):
+    """The one implementation design artifact directly above a task.
+
+    ``completeness`` is a structured, code-produced audit result.  It is not a
+    model-provided score: callers should inspect ``passed`` and each check's
+    concrete reason before allowing a cheap executor to run.
+    """
+
+    __tablename__ = "impl_design"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    task_id = Column(
+        String(20), ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False, unique=True, index=True,
+    )
+    summary = Column(Text, nullable=False, default="")
+    files = Column(IMPL_DESIGN_JSON, nullable=False, default=list)
+    changes = Column(IMPL_DESIGN_JSON, nullable=False, default=list)
+    data_changes = Column(IMPL_DESIGN_JSON, nullable=False, default=list)
+    test_plan = Column(IMPL_DESIGN_JSON, nullable=False, default=list)
+    risks = Column(IMPL_DESIGN_JSON, nullable=False, default=list)
+    non_goals = Column(IMPL_DESIGN_JSON, nullable=False, default=list)
+    derived_from_sha = Column(String(64), nullable=True)
+    authored_by = Column(String(100), nullable=False, default="unknown")
+    completeness = Column(IMPL_DESIGN_JSON, nullable=True)
+    reviewed_by = Column(String(100), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    task = relationship("Task", back_populates="impl_design")
 
 
 @event.listens_for(GateRecord, "before_update")

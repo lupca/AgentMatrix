@@ -16,6 +16,7 @@ from app.services.embedding import EmbeddingError, embed_text
 from app.services.command_router_handlers import (
     AdminHandlersMixin,
     ContextHandlersMixin,
+    ImplDesignHandlersMixin,
     QueryHandlersMixin,
     SpecHandlersMixin,
     TaskHandlersMixin,
@@ -45,6 +46,7 @@ class CommandRouter(
     TaskHandlersMixin,
     QueryHandlersMixin,
     ContextHandlersMixin,
+    ImplDesignHandlersMixin,
     AdminHandlersMixin,
     SpecHandlersMixin,
 ):
@@ -329,6 +331,12 @@ class CommandRouter(
             if not project:
                 return {'error': 'project is required'}
             command_args = project
+        elif canonical_name == 'impl_design':
+            task_id = str(args.get('task_id', '')).strip()
+            if not task_id:
+                return {'error': 'task_id is required'}
+            action = str(args.get('action', 'get')).strip().lower()
+            command_args = json.dumps({**args, 'action': action, 'task_id': task_id}, ensure_ascii=False)
         else:
             return {'error': f'Unknown tool: {tool_name}'}
 
