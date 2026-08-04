@@ -386,7 +386,12 @@ def make_tool_handler(
             result = await CommandRouter(db).execute_tool(spec.name, scoped_kwargs, session_id)
             if (
                 runtime_version is not None
-                and spec.name in {"get_status", "land_task"}
+                and spec.name in {
+                    "get_status",
+                    "land_task",
+                    "dispatch_task",
+                    "approve_gate",
+                }
                 and not result.get("error")
             ):
                 warning = runtime_version.stale_warning()
