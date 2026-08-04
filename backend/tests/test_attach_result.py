@@ -54,41 +54,51 @@ def test_attach_result_tool_spec():
     assert "task_id" in spec.parameters["properties"]
     assert "commit" in spec.parameters["properties"]
     assert "option" in spec.parameters["properties"]
+    assert spec.parameters["properties"]["option"]["enum"] == ["request_review"]
+    assert spec.required_role == "executor"
 
 
-def test_attach_result_option_done(db_session, service):
+def test_attach_result_option_done_is_rejected(db_session, service):
     orch_service, repo_root, commit = service
-    task = Task(id="TASK-100", project="proj", title="Test task", status="todo")
+    task = Task(
+        id="TASK-100", project="proj", title="Test task",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task)
     db_session.commit()
 
-    res = orch_service.attach_result(task_id="TASK-100", commit=commit, option="done")
-    assert res.applied is True
-    assert res.task.status == "done"
-    # CTV2-1337: result_ref is normalised to '<base>..<head>', not a bare hash.
-    assert res.task.result_ref.endswith(commit[:12])
-    assert ".." in res.task.result_ref
-    assert res.task.final_result_ref == res.task.result_ref
-    assert res.task.verdict == "pass"
-    assert res.task.final_verdict == "pass"
+    with pytest.raises(OrchestrationError, match="cannot mark a task done"):
+        orch_service.attach_result(task_id="TASK-100", commit=commit, option="done")
 
-    # Ledger check
-    records = db_session.query(GateRecord).filter(GateRecord.task_id == "TASK-100").all()
-    assert len(records) == 1
-    assert records[0].gate_type == "attach_result"
-    assert records[0].status == "approved"
-    assert records[0].output_ref.endswith(commit[:12])
+    db_session.refresh(task)
+    assert task.status == "dispatched"
+    assert db_session.query(GateRecord).filter_by(task_id=task.id).count() == 0
 
-    # Audit log check
-    audit = db_session.query(AuditLog).filter(AuditLog.task_id == "TASK-100").first()
-    assert audit is not None
-    assert audit.action == "transition:attach_result:approved"
-    assert audit.details["status"] == "done"
+
+def test_attach_result_from_in_review_is_rejected(db_session, service):
+    orch_service, _repo_root, commit = service
+    task = Task(
+        id="TASK-1363", project="proj", title="Exploit regression",
+        status="in-review", executor="@executor", reviewer="@reviewer",
+        result_ref="old-base..old-head",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    with pytest.raises(TransitionConflictError, match="expected status 'dispatched'"):
+        orch_service.attach_result(task_id=task.id, commit=commit)
+
+    db_session.refresh(task)
+    assert task.status == "in-review"
+    assert task.final_verdict is None
 
 
 def test_attach_result_option_request_review(db_session, service):
     orch_service, repo_root, commit = service
-    task = Task(id="TASK-101", project="proj", title="Review task", status="todo")
+    task = Task(
+        id="TASK-101", project="proj", title="Review task",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task)
     db_session.commit()
 
@@ -113,21 +123,28 @@ def test_attach_result_option_request_review(db_session, service):
     assert audit.details["status"] == "awaiting-review"
 
 
-def test_attach_result_wakes_dependents(db_session, service):
+def test_attach_result_does_not_wake_dependents_before_review(db_session, service):
     orch_service, repo_root, commit = service
-    t1 = Task(id="TASK-102", project="proj", title="Parent", status="todo")
+    t1 = Task(
+        id="TASK-102", project="proj", title="Parent",
+        status="dispatched", executor="@executor",
+    )
     t2 = Task(id="TASK-103", project="proj", title="Child", status="todo")
     dep = TaskDependency(task_id="TASK-103", depends_on_task_id="TASK-102")
     db_session.add_all([t1, t2, dep])
     db_session.commit()
 
-    res = orch_service.attach_result(task_id="TASK-102", commit=commit, option="done")
-    assert res.task.status == "done"
+    res = orch_service.attach_result(task_id="TASK-102", commit=commit)
+    assert res.task.status == "awaiting-review"
+    assert [t.id for t in orch_service.unmet_dependencies("TASK-103")] == ["TASK-102"]
 
 
 def test_attach_result_command_router_execute_tool(db_session, service):
     orch_service, repo_root, commit = service
-    task = Task(id="TASK-104", project="proj", title="Router task", status="todo")
+    task = Task(
+        id="TASK-104", project="proj", title="Router task",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task)
     db_session.commit()
 
@@ -137,18 +154,21 @@ def test_attach_result_command_router_execute_tool(db_session, service):
     out = asyncio.run(
         router.execute_tool(
             "attach_result",
-            {"task_id": "TASK-104", "commit": commit, "option": "done"},
+            {"task_id": "TASK-104", "commit": commit},
             "session-1",
         )
     )
     assert out["action"] == "result_attached"
-    assert out["status"] == "done"
+    assert out["status"] == "awaiting-review"
     assert out["commit"].endswith(commit[:12])
 
 
 def test_attach_result_slash_command(db_session, service):
     orch_service, repo_root, commit = service
-    task = Task(id="TASK-105", project="proj", title="Slash task", status="todo")
+    task = Task(
+        id="TASK-105", project="proj", title="Slash task",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task)
     db_session.commit()
 
@@ -178,7 +198,10 @@ def test_attach_result_validation_errors(db_session, service):
         orch_service.attach_result(task_id="NONEXISTENT", commit=commit)
 
     # Invalid option error
-    task2 = Task(id="TASK-107", project="proj", title="Task 107", status="todo")
+    task2 = Task(
+        id="TASK-107", project="proj", title="Task 107",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task2)
     db_session.commit()
     with pytest.raises(OrchestrationError):
@@ -191,15 +214,18 @@ def test_attach_result_validation_errors(db_session, service):
 
 def test_attach_result_idempotency(db_session, service):
     orch_service, repo_root, commit = service
-    task = Task(id="TASK-108", project="proj", title="Idempotent task", status="todo")
+    task = Task(
+        id="TASK-108", project="proj", title="Idempotent task",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task)
     db_session.commit()
 
     res1 = orch_service.attach_result(
-        task_id="TASK-108", commit=commit, option="done", idempotency_key="key-108"
+        task_id="TASK-108", commit=commit, idempotency_key="key-108"
     )
     res2 = orch_service.attach_result(
-        task_id="TASK-108", commit=commit, option="done", idempotency_key="key-108"
+        task_id="TASK-108", commit=commit, idempotency_key="key-108"
     )
 
     assert res1.gate_record.id == res2.gate_record.id
@@ -229,11 +255,14 @@ def test_attach_result_stores_base_head_range(db_session, service):
     orch_service, repo_root, _root = service
     head = _second_commit(repo_root)
 
-    task = Task(id="TASK-1337", project="proj", title="Range task", status="todo")
+    task = Task(
+        id="TASK-1337", project="proj", title="Range task",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task)
     db_session.commit()
 
-    orch_service.attach_result(task_id="TASK-1337", commit=head, option="done")
+    orch_service.attach_result(task_id="TASK-1337", commit=head)
 
     db_session.refresh(task)
     assert ".." in task.result_ref, f"expected a range, got {task.result_ref!r}"
@@ -246,12 +275,15 @@ def test_attach_result_accepts_explicit_range(db_session, service):
     orch_service, repo_root, root = service
     head = _second_commit(repo_root)
 
-    task = Task(id="TASK-1337B", project="proj", title="Explicit range", status="todo")
+    task = Task(
+        id="TASK-1337B", project="proj", title="Explicit range",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task)
     db_session.commit()
 
     orch_service.attach_result(
-        task_id="TASK-1337B", commit=f"{root}..{head}", option="done"
+        task_id="TASK-1337B", commit=f"{root}..{head}"
     )
 
     db_session.refresh(task)
@@ -264,11 +296,14 @@ def test_attach_result_root_commit_uses_empty_tree_base(db_session, service):
     """A root commit has no parent; the range must still be well formed."""
     orch_service, repo_root, root = service
 
-    task = Task(id="TASK-1337C", project="proj", title="Root commit", status="todo")
+    task = Task(
+        id="TASK-1337C", project="proj", title="Root commit",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task)
     db_session.commit()
 
-    orch_service.attach_result(task_id="TASK-1337C", commit=root, option="done")
+    orch_service.attach_result(task_id="TASK-1337C", commit=root)
 
     db_session.refresh(task)
     assert ".." in task.result_ref
@@ -280,9 +315,12 @@ def test_attach_result_root_commit_uses_empty_tree_base(db_session, service):
 def test_attach_result_rejects_malformed_range(db_session, service):
     orch_service, repo_root, root = service
 
-    task = Task(id="TASK-1337D", project="proj", title="Bad range", status="todo")
+    task = Task(
+        id="TASK-1337D", project="proj", title="Bad range",
+        status="dispatched", executor="@executor",
+    )
     db_session.add(task)
     db_session.commit()
 
     with pytest.raises(OrchestrationError):
-        orch_service.attach_result(task_id="TASK-1337D", commit=f"{root}..", option="done")
+        orch_service.attach_result(task_id="TASK-1337D", commit=f"{root}..")

@@ -150,6 +150,79 @@ class TaskStateMachine:
         task.status = new_status
         task.version = expected_version + 1
 
+    @staticmethod
+    def _record_is_pass_verdict(record: GateRecord) -> bool:
+        """Return whether an immutable ledger row proves an approved pass."""
+        output = record.output_payload or {}
+        return (
+            record.gate_type == "verdict"
+            and record.status == "approved"
+            and (record.output_ref == "pass" or output.get("verdict") == "pass")
+        )
+
+    def require_approved_pass_verdict(
+        self,
+        task: Task,
+        *,
+        approval_record: GateRecord | None = None,
+    ) -> GateRecord:
+        """Enforce the single service-level invariant for completion/landing.
+
+        ``approval_record`` supports the normal atomic transition: the new
+        append-only verdict row is still pending in this transaction when the
+        task projection moves to ``done``.  ``cas_status`` flushes that row
+        before issuing its UPDATE, so the deferred PostgreSQL constraint sees
+        the same proof at commit time.
+        """
+        candidates: list[GateRecord] = []
+        if approval_record is not None:
+            candidates.append(approval_record)
+        candidates.extend(
+            self.db.query(GateRecord)
+            .filter(
+                GateRecord.task_id == task.id,
+                GateRecord.gate_type == "verdict",
+                GateRecord.status == "approved",
+            )
+            .order_by(GateRecord.id.desc())
+            .all()
+        )
+        approved = next(
+            (
+                record
+                for record in candidates
+                if record.task_id == task.id and self._record_is_pass_verdict(record)
+            ),
+            None,
+        )
+        if approved is None or (task.verdict or task.final_verdict) != "pass":
+            raise PrerequisiteError(
+                f"Task {task.id} has no approved pass verdict; completion and "
+                "landing require an independently reviewed result."
+            )
+        self.validator.require_independent(task.executor, task.reviewer)
+        if not task.result_ref or not task.result_ref.strip():
+            raise PrerequisiteError("result_ref is required for completion")
+        return approved
+
+    def transition_to_done(
+        self,
+        task: Task,
+        *,
+        approval_record: GateRecord | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        """Project a passing verdict to ``done`` through one guarded path."""
+        self.require_approved_pass_verdict(task, approval_record=approval_record)
+        if task.status != "done":
+            self.cas_status(task, "done")
+        task.completed_at = now or datetime.now(timezone.utc)
+        task.final_result_ref = task.result_ref
+        task.final_verdict = "pass"
+        task.awaiting_approval = False
+        task.approval_prompt = None
+        task.error = None
+
     def ledger_record(
         self,
         *,
@@ -558,6 +631,7 @@ class TaskStateMachine:
         payload: dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        approval_record: GateRecord | None = None,
     ) -> tuple[AgentRun | None, str | None]:
         self.validator.assert_status(task, str(payload["expected_status"]))
         now = datetime.now(timezone.utc)
@@ -667,6 +741,12 @@ class TaskStateMachine:
             task.awaiting_approval = False
             task.approval_prompt = None
             if verdict == "pass":
+                # Landing is an external side effect.  Prove the immutable
+                # approved verdict before touching git, not merely before the
+                # final task projection update.
+                self.require_approved_pass_verdict(
+                    task, approval_record=approval_record
+                )
                 landing = self.land_verdict_result(task)
                 if not landing.ok:
                     task.awaiting_approval = True
@@ -682,10 +762,6 @@ class TaskStateMachine:
                     )
                     self._update_verdict_agent_success_rates(task, verdict)
                     return None, verdict
-                self.cas_status(task, "done")
-                task.completed_at = now
-                task.final_result_ref = task.result_ref
-                task.final_verdict = verdict
                 if landing.landed_ref:
                     task.landed_ref = landing.landed_ref
                     self._deferred_landing_event = (
@@ -695,6 +771,9 @@ class TaskStateMachine:
                             "result_ref": task.result_ref,
                         },
                     )
+                self.transition_to_done(
+                    task, approval_record=approval_record, now=now
+                )
             else:
                 self.cas_status(task, "changes-requested")
                 task.completed_at = None
@@ -830,20 +909,39 @@ class TaskStateMachine:
             self.notify_gate_pending(task, record)
             return TransitionResult(task, record, False)
 
+        record: GateRecord | None = None
+        if gate_type == "verdict":
+            verdict = str(request_payload["verdict"])
+            record = self.ledger_record(
+                task=task,
+                gate_type=gate_type,
+                status="approved",
+                actor=actor,
+                idempotency_key=idempotency_key,
+                input_hash=input_hash,
+                payload=request_payload,
+                output_ref=verdict,
+                output_payload={"verdict": verdict},
+            )
         run, output_ref = self.apply_gate(
-            task, gate_type, request_payload, idempotency_key=idempotency_key
-        )
-        record = self.ledger_record(
-            task=task,
-            gate_type=gate_type,
-            status="approved",
-            actor=actor,
+            task,
+            gate_type,
+            request_payload,
             idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=request_payload,
-            output_ref=output_ref,
-            output_payload=self.gate_output(task, gate_type),
+            approval_record=record,
         )
+        if record is None:
+            record = self.ledger_record(
+                task=task,
+                gate_type=gate_type,
+                status="approved",
+                actor=actor,
+                idempotency_key=idempotency_key,
+                input_hash=input_hash,
+                payload=request_payload,
+                output_ref=output_ref,
+                output_payload=self.gate_output(task, gate_type),
+            )
         self._sync_after_transition(task)
         self.audit(task, record)
         self.db.commit()
@@ -1160,28 +1258,54 @@ class TaskStateMachine:
 
         run: AgentRun | None = None
         output_ref: str | None = None
+        record: GateRecord | None = None
         self._deferred_landing_event = None
         if effective_decision == "approved":
+            if pending.gate_type == "verdict":
+                verdict = str((pending.input_payload or {})["verdict"])
+                record = self.ledger_record(
+                    task=task,
+                    gate_type=pending.gate_type,
+                    status=effective_decision,
+                    actor=actor,
+                    idempotency_key=idempotency_key,
+                    input_hash=input_hash,
+                    payload=decision_payload,
+                    output_ref=verdict,
+                    output_payload={"verdict": verdict},
+                    error_message=reason,
+                    parent_id=pending.id,
+                )
             run, output_ref = self.apply_gate(
                 task,
                 pending.gate_type,
                 pending.input_payload or {},
                 idempotency_key=pending.idempotency_key,
+                approval_record=record,
             )
+        elif pending.gate_type == "verdict":
+            self.validator.assert_status(task, "in-review")
+            self.cas_status(task, "awaiting-review")
+            task.current_gate = "review_order"
+            task.verdict = None
+            task.completed_at = None
+            task.awaiting_approval = False
+            task.approval_prompt = None
 
-        record = self.ledger_record(
-            task=task,
-            gate_type=pending.gate_type,
-            status=effective_decision,
-            actor=actor,
-            idempotency_key=idempotency_key,
-            input_hash=input_hash,
-            payload=decision_payload,
-            output_ref=output_ref,
-            output_payload=self.gate_output(task, pending.gate_type),
-            error_message=reason,
-            parent_id=pending.id,
-        )
+        if record is None:
+            record = self.ledger_record(
+                task=task,
+                gate_type=pending.gate_type,
+                status=effective_decision,
+                actor=actor,
+                idempotency_key=idempotency_key,
+                input_hash=input_hash,
+                payload=decision_payload,
+                output_ref=output_ref,
+                output_payload=self.gate_output(task, pending.gate_type),
+                error_message=reason,
+                parent_id=pending.id,
+            )
         self._sync_after_transition(task)
         self.audit(task, record, reason=reason)
         landing_event = getattr(self, "_deferred_landing_event", None)
@@ -1707,7 +1831,7 @@ class TaskStateMachine:
             "run_id": run_id,
             "note": "read-only task: no diff to review, auto-pass recorded by system",
         }
-        self.ledger_record(
+        verdict_record = self.ledger_record(
             task=task,
             gate_type="verdict",
             status="approved",
@@ -1722,13 +1846,7 @@ class TaskStateMachine:
         task.verdict = "pass"
         if not task.reviewer:
             task.reviewer = "@system-no-commit"
-        self.cas_status(task, "done")
-        task.completed_at = now
-        task.final_result_ref = task.result_ref
-        task.final_verdict = "pass"
-        task.awaiting_approval = False
-        task.approval_prompt = None
-        task.error = None
+        self.transition_to_done(task, approval_record=verdict_record, now=now)
         self._sync_after_transition(task)
         emit_task_event(
             task_id=task.id,
@@ -1741,11 +1859,7 @@ class TaskStateMachine:
 
     def land_task(self, *, task_id: str, actor: str) -> dict:
         task = self.validator.task(task_id)
-        if (task.verdict or task.final_verdict) != "pass":
-            raise PrerequisiteError(
-                f"Task {task_id} has no pass verdict; landing only applies "
-                "to reviewed results."
-            )
+        approval_record = self.require_approved_pass_verdict(task)
         landing = self.land_verdict_result(task)
         if not landing.ok:
             task.awaiting_approval = True
@@ -1760,10 +1874,7 @@ class TaskStateMachine:
 
         now = datetime.now(timezone.utc)
         if task.status != "done":
-            self.cas_status(task, "done")
-            task.completed_at = now
-            task.final_result_ref = task.result_ref
-            task.final_verdict = "pass"
+            self.transition_to_done(task, approval_record=approval_record, now=now)
         task.awaiting_approval = False
         task.approval_prompt = None
         task.error = None
@@ -1862,18 +1973,28 @@ class TaskStateMachine:
         *,
         task_id: str,
         commit: str,
-        option: str = "done",
+        option: str = "request_review",
         actor: str = "system",
         idempotency_key: str | None = None,
     ) -> TransitionResult:
         task = self.validator.task(task_id)
 
-        if task.status in {"cancelled"}:
-            raise TransitionConflictError(f"Cannot attach result to task in '{task.status}' status")
+        opt = (option or "request_review").strip().lower().replace("-", "_")
+        if opt == "done":
+            raise PrerequisiteError(
+                "attach_result cannot mark a task done; submit the result for "
+                "independent review with option 'request_review'"
+            )
+        if opt != "request_review":
+            raise OrchestrationError(
+                f"Invalid option '{option}': must be 'request_review'"
+            )
 
-        opt = (option or "done").strip().lower().replace("-", "_")
-        if opt not in {"done", "request_review"}:
-            raise OrchestrationError(f"Invalid option '{option}': must be 'done' or 'request_review'")
+        # An immediate replay may arrive after the first call already moved
+        # dispatched -> awaiting-review.  Every other source state, especially
+        # in-review, is rejected before any repository probing.
+        if task.status not in {"dispatched", "awaiting-review"}:
+            self.validator.assert_status(task, "dispatched")
 
         commit_ref = (commit or "").strip()
         if not commit_ref:
@@ -1907,32 +2028,16 @@ class TaskStateMachine:
         if existing is not None:
             return self.result_for_record(task, existing)
 
+        self.validator.assert_status(task, "dispatched")
+
         now = datetime.now(timezone.utc)
-        if opt == "done":
-            task.result_ref = commit_ref
-            task.final_result_ref = commit_ref
-            if not task.executor:
-                task.executor = actor if actor else "@coordinator"
-            if not task.reviewer:
-                exec_p = TaskValidator.principal(task.executor)
-                task.reviewer = "@system:verifier" if exec_p != "@system:verifier" else "@system:reviewer"
-            task.verdict = "pass"
-            task.final_verdict = "pass"
-            task.current_gate = "done"
-            task.completed_at = now
-            task.error = None
-            task.awaiting_approval = False
-            task.approval_prompt = None
-            self.cas_status(task, "done")
-            target_status = "done"
-        else:
-            task.result_ref = commit_ref
-            task.current_gate = "review_order"
-            task.error = None
-            task.awaiting_approval = False
-            task.approval_prompt = None
-            self.cas_status(task, "awaiting-review")
-            target_status = "awaiting-review"
+        task.result_ref = commit_ref
+        task.current_gate = "review_order"
+        task.error = None
+        task.awaiting_approval = False
+        task.approval_prompt = None
+        self.cas_status(task, "awaiting-review")
+        target_status = "awaiting-review"
 
         task.updated_at = now
 
@@ -1957,9 +2062,6 @@ class TaskStateMachine:
             payload={"commit": commit_ref, "option": opt, "status": target_status},
             db=self.db,
         )
-
-        if opt == "done":
-            self.wake_dependents(task.id)
 
         self.db.commit()
         self.db.refresh(task)
