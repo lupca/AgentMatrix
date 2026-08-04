@@ -272,11 +272,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="attach_result",
             description=(
-                "Attach an existing commit to a task when coordinator already made the changes. "
-                "Use this when code is already committed and you want to record it in a task "
-                "WITHOUT dispatching an agent to redo the work. "
-                "Options: 'done' marks task complete immediately; 'request_review' moves to "
-                "awaiting-review so a reviewer agent can verify the changes."
+                "Submit an executor's existing commit for a dispatched task. "
+                "The task always moves to awaiting-review so an independent reviewer can "
+                "verify the changes; this tool can never mark a task done."
             ),
             parameters={
                 "type": "object",
@@ -288,11 +286,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                     },
                     "option": {
                         "type": "string",
-                        "enum": ["done", "request_review"],
-                        "default": "done",
+                        "enum": ["request_review"],
+                        "default": "request_review",
                         "description": (
-                            "Whether to mark task as done directly or move to "
-                            "awaiting-review for review dispatch"
+                            "Submit the result to awaiting-review for review dispatch"
                         ),
                     },
                 },
@@ -304,6 +301,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             entity="tasks",
             slash_alias="/attach-result",
             group="task_lifecycle",
+            required_role="executor",
         ),
         ToolSpec(
             name="approve_gate",

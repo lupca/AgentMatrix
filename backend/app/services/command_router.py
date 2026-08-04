@@ -198,7 +198,7 @@ class CommandRouter(
             command_args = json.dumps({
                 'task_id': task_id,
                 'commit': commit,
-                'option': str(args.get('option', 'done')).strip(),
+                'option': str(args.get('option', 'request_review')).strip(),
             }, ensure_ascii=False)
         elif canonical_name == 'request_review':
             task_id = str(args.get('task_id', '')).strip()

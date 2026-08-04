@@ -565,14 +565,14 @@ class TaskHandlersMixin:
         if payload and isinstance(payload, dict):
             task_id = str(payload.get('task_id', '')).strip()
             commit = str(payload.get('commit') or payload.get('result_ref') or '').strip()
-            option = str(payload.get('option', 'done')).strip()
+            option = str(payload.get('option', 'request_review')).strip()
         else:
             parts = args.strip().split(maxsplit=2)
             if not parts:
                 return {'error': 'Usage: /attach-result <task_id> <commit> [option]'}
             task_id = parts[0]
             commit = parts[1] if len(parts) > 1 else ''
-            option = parts[2] if len(parts) > 2 else 'done'
+            option = parts[2] if len(parts) > 2 else 'request_review'
 
         if not task_id or not commit:
             return {'error': 'task_id and commit are required'}

@@ -510,7 +510,73 @@ def test_verdict_changes_auto_updates_executor_and_reviewer_success_rate(service
     assert reviewer.success_rate == pytest.approx(0.45)
 
 
+def test_rejected_verdict_gate_returns_to_reviewable_state(service, db_session):
+    task = _add_task(
+        db_session,
+        "VERDICT-GATE-REJECTED",
+        mode="supervised",
+        status="in-review",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="base-sha..head-sha",
+    )
+    _add_terminal_review_run(db_session, task)
+    pending = service.request_verdict(
+        task_id=task.id,
+        verdict="changes",
+        ac_results=[{"passed": False}],
+        actor="@reviewer",
+        idempotency_key="verdict-to-reject",
+    )
+
+    result = service.decide_gate(
+        gate_record_id=pending.gate_record.id,
+        decision="rejected",
+        actor="@supervisor",
+        idempotency_key="reject-verdict-gate",
+    )
+
+    assert result.task.status == "awaiting-review"
+    assert result.task.current_gate == "review_order"
+    assert result.task.awaiting_approval is False
+    assert result.task.verdict is None
+    assert result.gate_record.parent_id == pending.gate_record.id
+
+    from app.mcp_native import _next_step
+
+    assert _next_step({"task": {"status": result.task.status}}) == (
+        "Gọi request_review để bắt đầu review độc lập."
+    )
+
+    # The resulting state has a legal next transition instead of being stuck.
+    next_review = service.request_review(
+        task_id=task.id,
+        reviewer="@reviewer",
+        actor="@operator",
+        idempotency_key="review-after-rejected-verdict",
+    )
+    assert next_review.gate_record.gate_type == "review_order"
+    assert next_review.gate_record.status == "pending"
+
+
+def test_landing_rejects_forged_task_pass_without_approved_verdict(service, db_session):
+    task = _add_task(
+        db_session,
+        "FORGED-PASS",
+        status="in-review",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="base-sha..head-sha",
+        verdict="pass",
+    )
+
+    with pytest.raises(PrerequisiteError, match="no approved pass verdict"):
+        service.land_task(task_id=task.id, actor="@executor")
+
+    db_session.refresh(task)
+    assert task.status == "in-review"
+
+
 def test_update_agent_success_rate_handles_missing_agent(service, db_session):
     res = update_agent_success_rate(db_session, "non_existent_agent", 1.0)
     assert res is None
-

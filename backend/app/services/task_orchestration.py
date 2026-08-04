@@ -321,7 +321,7 @@ class TaskOrchestrationService:
         *,
         task_id: str,
         commit: str,
-        option: str = "done",
+        option: str = "request_review",
         actor: str = "system",
         idempotency_key: str | None = None,
     ) -> TransitionResult:

@@ -249,6 +249,64 @@ async def test_executor_get_status_without_task_id_uses_token_scope(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_executor_token_cannot_use_any_tool_path_to_make_own_task_done(
+    monkeypatch,
+):
+    """CTV2-1363: exercise every client-facing completion path with the
+    executor's own task-scoped token.  attach_result reaches the FSM and is
+    rejected from in-review; verdict approval and landing remain coordinator
+    only at the MCP boundary.
+    """
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="p1", name="P", repo_root="/tmp"))
+    seed.add(Task(
+        id="task-1",
+        title="Own result",
+        project="p1",
+        status="in-review",
+        executor="@executor",
+        reviewer="@reviewer",
+        result_ref="base..head",
+    ))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    token = issue_token("test-secret", role="executor", task_id="task-1")
+    server = build_server(default_token=token)
+
+    attempts = (
+        ("attach_result", {"task_id": "task-1", "commit": "new-base..new-head"}),
+        ("land_task", {"task_id": "task-1"}),
+        ("record_verdict", {"task_id": "task-1", "verdict": "pass"}),
+        ("approve_gate", {"task_id": "task-1", "decision": "approved"}),
+    )
+    async with Client(server) as client:
+        responses = {}
+        for tool_name, arguments in attempts:
+            result = await client.call_tool(tool_name, arguments)
+            responses[tool_name] = json.loads(result.content[0].text)
+
+    assert responses["attach_result"]["ok"] is False
+    assert responses["attach_result"]["error"]["code"] == "task_transition_conflict"
+    for tool_name in ("land_task", "record_verdict", "approve_gate"):
+        assert responses[tool_name]["ok"] is False
+        assert responses[tool_name]["error"]["code"] == "forbidden"
+
+    verify = session_factory()
+    task = verify.get(Task, "task-1")
+    assert task.status == "in-review"
+    assert task.final_verdict is None
+    verify.close()
+
+
+@pytest.mark.asyncio
 async def test_land_task_result_warns_that_landed_code_needs_restart(
     monkeypatch, tmp_path
 ):

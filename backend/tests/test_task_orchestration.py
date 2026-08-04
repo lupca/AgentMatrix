@@ -210,8 +210,23 @@ def test_terminal_failure_rejects_all_pending_gates_and_clears_flag(
 
 def test_terminal_done_rejects_pending_gate(orchestration, db_session):
     task = _task(db_session, "GATE-STALE-DONE", mode="bypass")
+    db_session.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex"))
+    task.status = "in-review"
+    task.executor = "@executor"
+    task.reviewer = "@reviewer"
+    task.result_ref = "base..head"
     task.awaiting_approval = True
-    db_session.add(
+    db_session.add_all([
+        AgentRun(
+            id="stale-done-review-run",
+            task_id=task.id,
+            agent_id="@reviewer",
+            cli="codex",
+            command="codex exec /code-review",
+            kind="review",
+            agent_role="reviewer",
+            status="success",
+        ),
         GateRecord(
             task_id=task.id,
             gate_type="review_order",
@@ -221,16 +236,16 @@ def test_terminal_done_rejects_pending_gate(orchestration, db_session):
             idempotency_key="done-terminal-pending",
             input_hash="done-terminal",
             input_payload={},
-        )
-    )
+        ),
+    ])
     db_session.commit()
 
-    orchestration.attach_result(
+    orchestration.request_verdict(
         task_id=task.id,
-        commit="done-commit",
-        option="done",
-        actor="@executor",
-        idempotency_key="done-terminal-attach",
+        verdict="pass",
+        ac_results=[{"passed": True}],
+        actor="@reviewer",
+        idempotency_key="done-terminal-verdict",
     )
 
     decision = (
