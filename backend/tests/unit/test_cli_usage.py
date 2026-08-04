@@ -233,6 +233,83 @@ def test_parse_cli_token_usage_malformed_output_is_silent():
     assert parse_cli_token_usage("claude", "not json") is None
 
 
+def test_parse_cli_token_usage_extracts_last_usage_from_json_array():
+    array_line = json.dumps(
+        [
+            {"type": "system", "message": "init"},
+            {"type": "assistant", "message": "working"},
+            {
+                "type": "result",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 10,
+                },
+                "total_cost_usd": 0.05,
+            },
+        ]
+    )
+    usage = parse_cli_token_usage("claude", array_line)
+    assert usage == {
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cached_tokens": 10,
+        "cost_usd": 0.05,
+    }
+
+
+def test_parse_cli_token_usage_extracts_usage_from_array_after_banner_garbage():
+    stdout = "some banner output\n" + json.dumps(
+        [
+            {"type": "system"},
+            {
+                "type": "result",
+                "usage": {
+                    "input_tokens": 200,
+                    "output_tokens": 80,
+                    "cache_read_tokens": 40,
+                },
+            },
+        ]
+    )
+    usage = parse_cli_token_usage("agy", stdout)
+    assert usage == {
+        "input_tokens": 200,
+        "output_tokens": 80,
+        "cached_tokens": 40,
+    }
+
+
+def test_parse_cli_token_usage_jsonl_unchanged():
+    jsonl = "\n".join(
+        [
+            json.dumps({"type": "system", "message": "init"}),
+            json.dumps(
+                {
+                    "type": "result",
+                    "usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 10,
+                        "cache_read_input_tokens": 0,
+                    },
+                    "total_cost_usd": 0.01,
+                }
+            ),
+        ]
+    )
+    usage = parse_cli_token_usage("claude", jsonl)
+    assert usage == {
+        "input_tokens": 5,
+        "output_tokens": 10,
+        "cached_tokens": 0,
+        "cost_usd": 0.01,
+    }
+
+
+def test_parse_cli_token_usage_empty_array_returns_none():
+    assert parse_cli_token_usage("claude", "[]") is None
+
+
 def test_extract_explicit_result_ref_from_json_result_field():
     output = json.dumps({"type": "result", "result": "done\nRESULT_REF: abc123"})
 
