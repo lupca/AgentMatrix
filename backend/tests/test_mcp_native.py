@@ -16,7 +16,14 @@ import app.mcp_native as mcp_native
 from app.core.runtime_version import RuntimeVersionMonitor
 from app.db.base import Base
 from app.db.models import Agent, InboxItem, Project, Task
-from app.mcp_native import authenticate_token, build_server, envelope, issue_token
+from app.mcp_native import (
+    _task_scope_arguments,
+    _task_scope_ok,
+    authenticate_token,
+    build_server,
+    envelope,
+    issue_token,
+)
 from app.services.task_orchestration import TaskOrchestrationService
 from app.services.tool_registry import get_mcp_tool_specs
 
@@ -69,6 +76,27 @@ def test_role_token_round_trip_and_task_scope_claim():
 
 def test_unsigned_or_legacy_token_is_rejected():
     assert authenticate_token("legacy", secret="secret") is None
+
+
+def test_executor_task_scope_is_driven_by_tool_schema():
+    claims = mcp_native.TokenClaims(role="executor", task_id="task-1")
+    specs = {spec.name: spec for spec in get_mcp_tool_specs()}
+
+    # Tools without a task_id field are scoped by the token/session and must
+    # not require a fabricated argument.
+    graph_args = _task_scope_arguments(claims, specs["get_impact_radius"], {"file": "a.py"})
+    assert graph_args == {"file": "a.py"}
+    assert _task_scope_ok(claims, specs["get_impact_radius"], graph_args)
+
+    # An optional task_id is inferred from the executor token when omitted.
+    status_args = _task_scope_arguments(claims, specs["get_status"], {})
+    assert status_args == {"task_id": "task-1"}
+    assert _task_scope_ok(claims, specs["get_status"], status_args)
+
+    # Explicitly naming another task remains forbidden.
+    assert not _task_scope_ok(
+        claims, specs["get_status"], {"task_id": "task-2"}
+    )
 
 
 def test_native_envelope_structures_transition_error_and_hint():
@@ -155,6 +183,67 @@ async def test_tool_call_end_to_end_through_mcp_client(monkeypatch):
     assert body["ok"] is True, body
     assert body["data"]["task"]["id"] == "T-1"
     assert "runtime_warning" not in body["data"]
+
+
+@pytest.mark.asyncio
+async def test_executor_can_call_graph_tools_without_task_id_argument(monkeypatch):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="p1", name="P", repo_root="/tmp"))
+    seed.add(Task(id="task-1", title="One", project="p1", status="dispatched"))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    execute_tool = AsyncMock(return_value={"status": "success"})
+    monkeypatch.setattr(mcp_native.CommandRouter, "execute_tool", execute_tool)
+
+    token = issue_token("test-secret", role="executor", task_id="task-1")
+    server = build_server(default_token=token)
+    async with Client(server) as client:
+        for name, args in (
+            ("get_minimal_context", {"query": "dispatch"}),
+            ("get_impact_radius", {"file": "app/main.py"}),
+        ):
+            result = await client.call_tool(name, args)
+            body = json.loads(result.content[0].text)
+            assert body["ok"] is True, body
+
+    assert [call.args[1] for call in execute_tool.await_args_list] == [
+        {"query": "dispatch"},
+        {"file": "app/main.py"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_executor_get_status_without_task_id_uses_token_scope(monkeypatch):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="p1", name="P", repo_root="/tmp"))
+    seed.add(Task(id="task-1", title="One", project="p1", status="dispatched"))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+
+    token = issue_token("test-secret", role="executor", task_id="task-1")
+    server = build_server(default_token=token)
+    async with Client(server) as client:
+        result = await client.call_tool("get_status", {})
+        body = json.loads(result.content[0].text)
+
+    assert body["ok"] is True, body
+    assert body["data"]["task"]["id"] == "task-1"
 
 
 @pytest.mark.asyncio

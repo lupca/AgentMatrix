@@ -173,9 +173,48 @@ def _claims_from_request(default_token: str = "") -> TokenClaims | None:
     )
 
 
-def _task_scope_ok(claims: TokenClaims, arguments: Mapping[str, Any]) -> bool:
+def _task_scope_arguments(
+    claims: TokenClaims,
+    spec: ToolSpec,
+    arguments: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Apply the executor's task scope to arguments where the schema supports it.
+
+    A task-scoped executor must not be forced to repeat its scope for tools
+    whose schema has no ``task_id`` field.  For schemas with an optional
+    ``task_id``, omission means the task carried by the token.
+    """
+
+    scoped = dict(arguments)
+    if claims.role != "executor":
+        return scoped
+
+    properties = spec.parameters.get("properties", {})
+    if not isinstance(properties, Mapping) or "task_id" not in properties:
+        return scoped
+
+    required = spec.parameters.get("required", ())
+    if (
+        "task_id" not in required
+        and not scoped.get("task_id")
+        and claims.task_id
+    ):
+        scoped["task_id"] = claims.task_id
+    return scoped
+
+
+def _task_scope_ok(
+    claims: TokenClaims,
+    spec: ToolSpec,
+    arguments: Mapping[str, Any],
+) -> bool:
     if claims.role != "executor":
         return True
+
+    properties = spec.parameters.get("properties", {})
+    if not isinstance(properties, Mapping) or "task_id" not in properties:
+        return True
+
     requested = arguments.get("task_id")
     return bool(claims.task_id and requested and str(requested) == claims.task_id)
 
@@ -338,12 +377,13 @@ def make_tool_handler(
             return {"ok": False, "data": None, "error": {"code": "unauthorized", "message": "Invalid or missing MCP token"}}
         if spec.required_role == "coordinator" and claims.role != "coordinator":
             return {"ok": False, "data": None, "error": {"code": "forbidden", "message": "This tool requires a coordinator token"}}
-        if not _task_scope_ok(claims, kwargs):
+        scoped_kwargs = _task_scope_arguments(claims, spec, kwargs)
+        if not _task_scope_ok(claims, spec, scoped_kwargs):
             return {"ok": False, "data": None, "error": {"code": "task_scope_violation", "message": "Executor token is scoped to a different task"}}
         db = SessionLocal()
         try:
             session_id = _ensure_session(db, claims)
-            result = await CommandRouter(db).execute_tool(spec.name, kwargs, session_id)
+            result = await CommandRouter(db).execute_tool(spec.name, scoped_kwargs, session_id)
             if (
                 runtime_version is not None
                 and spec.name in {"get_status", "land_task"}
