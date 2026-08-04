@@ -49,6 +49,41 @@ escalation và trả `spec_plan_generated`.
 dispatch nếu còn câu hỏi. Mỗi lần generate ghi metric `spec_plan` gồm clarity và
 số câu hỏi.
 
+### Plan critic: hai bước nối qua DB, không qua biến trong bộ nhớ (CTV2-1378)
+
+Bên trong `generate_spec_plan` KHÔNG còn hai `await` dính liền trong một giao
+dịch DB. Từ bên ngoài tool contract không đổi (vẫn planner → critic → trả về
+một lần), nhưng nội bộ đi qua DB làm điểm nối:
+
+1. **Bước plan**: `spec_plan_generator.generate_spec_plan()` chạy LLM, rồi
+   `TaskStateMachine.write_spec_plan()` ghi `acceptance_criteria/constraints/
+   evidence/plan/files/tests/risk/flows/spec_clarity/open_questions/planner`
+   vào task, append GateRecord `spec_plan`, và **commit ngay** — plan đã bền
+   vững trên DB, `plan_critic_status` còn NULL.
+2. **Bước critic**: `spec_plan_generator.spec_plan_result_from_task(task)`
+   đọc lại plan vừa ghi (từ cột DB, không phải object trong bộ nhớ) để dựng
+   lại `SpecPlanResult`, rồi `criticize_spec_plan()` chạy critic độc lập, và
+   `TaskStateMachine.record_plan_critic_verdict()` ghi `plan_critic/
+   plan_critic_status/plan_critic_findings` + append đúng một GateRecord
+   `plan_critic` mỗi lần gọi (four-eyes qua `require_independent(task.planner,
+   critic)` đọc từ DB, không tin tham số gọi vào).
+
+Nếu bước critic lỗi (`PlanCriticError`/`ConfigurationError`), `generate_spec_plan`
+trả `{'error': ..., 'plan_persisted': True, 'next': 'critique_spec_plan'}` —
+**plan vẫn nằm nguyên trên task**, không mất, không phải chạy lại planner.
+
+**Tool mới: `critique_spec_plan {task_id, critic_id?}`** — chạy lại riêng bước
+critic trên plan đang có sẵn trên task, không bao giờ gọi planner. Dùng để
+retry sau khi critic lỗi, hoặc chạy thêm vòng critique sau một verdict reject.
+Mỗi lần gọi (kể cả gọi lại nhiều lần) append thêm một GateRecord `plan_critic`
+mới — vòng critique luôn đếm được qua
+`SELECT count(*) FROM gate_records WHERE gate_type='plan_critic' AND task_id=...`,
+không có trần cứng số vòng (chỉ brake token/cost hiện có mới chặn).
+
+Không có transaction dài xuyên suốt hai lệnh gọi LLM nữa — mỗi bước commit
+riêng, nên một critic bị treo/timeout không còn giữ khoá DB xuyên suốt lượt
+planner + critic như trước.
+
 **Landing (CTV2-238): done = code ĐÃ ở main.** Khi verdict gate approve với
 pass, HỆ THỐNG (git subprocess thuần trong `services/landing.py` — không LLM,
 không coordinator) merge `--no-ff` head của result_ref vào branch đang

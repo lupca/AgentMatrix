@@ -142,3 +142,11 @@ Chi tiết từng vấn đề ở dạng task file tại `~/projects/control-tow
 2. `pytest backend/tests -q` xanh 100%, chạy bằng venv chuẩn duy nhất.
 3. Máy mới: clone → 5 bước Quickstart → coordinator điều phối được một task end-to-end.
 4. `grep -ri fastapi backend/app docs/README* CLAUDE.md` = 0 (trừ archive).
+
+## Ghi chú CTV2-1378 (2026-08-05)
+
+Đã tách `generate_spec_plan` nội bộ thành plan→DB→critic (xem `docs/spec/03-gates-and-autonomy.md`).
+Đường inline cũ (hai `await` LLM trong cùng một giao dịch) đã bị bỏ hẳn — không
+còn giữ lại song song. Việc CÒN LẠI, chưa làm ở đây: đưa cả hai bước (plan +
+critic) qua Dramatiq worker để có pid/retry/hủy như AgentRun thật — theo dõi ở
+CTV2-1380.

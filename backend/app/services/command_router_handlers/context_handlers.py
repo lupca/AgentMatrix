@@ -335,16 +335,7 @@ class ContextHandlersMixin:
             result, flows = await spec_plan_generator.generate_spec_plan(
                 task, repo_root, agent, project_context=project_context, db=self.db
             )
-            critic_result, critic_tokens = await spec_plan_generator.criticize_spec_plan(
-                task,
-                result,
-                repo_root,
-                agent,
-                critic_agent,
-                project_context=project_context,
-                db=self.db,
-            )
-        except (SpecPlanGenerationError, PlanCriticError, ConfigurationError) as exc:
+        except (SpecPlanGenerationError, ConfigurationError) as exc:
             self.db.commit()
             return {'error': str(exc)}
 
@@ -357,24 +348,13 @@ class ContextHandlersMixin:
             result_count=len(result.open_questions),
             payload={'spec_clarity': result.spec_clarity, 'task_id': task_id},
         )
-        record_metric_fn(
-            tool='plan_critic',
-            source='spec_plan_generator',
-            ok=True,
-            task_id=task_id,
-            result_count=len(critic_result.findings),
-            payload={
-                'verdict': critic_result.verdict,
-                'critic': critic_agent.id,
-                'planner': agent.id,
-                'tokens_used': critic_tokens,
-                'token_budget': spec_plan_generator.PLAN_CRITIC_TOKEN_BUDGET,
-                'diff_provided': False,
-            },
-        )
 
         service = TaskOrchestrationService(self.db)
 
+        # Plan is written and committed BEFORE the critic runs — a critic
+        # failure below costs only the critic (~40-90s), not this planner
+        # call. The critic reads the plan back from DB rather than the
+        # in-memory `result`, so this step is the durable hand-off point.
         try:
             updated = service.write_spec_plan(
                 task_id=task_id,
@@ -393,11 +373,58 @@ class ContextHandlersMixin:
                 spec_clarity=result.spec_clarity,
                 open_questions=result.open_questions,
                 planner=agent.id,
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        task = self.db.get(Task, task_id)
+        self.db.refresh(task)
+
+        try:
+            plan_from_db = spec_plan_generator.spec_plan_result_from_task(task)
+            critic_result, critic_tokens = await spec_plan_generator.criticize_spec_plan(
+                task,
+                plan_from_db,
+                repo_root,
+                agent,
+                critic_agent,
+                project_context=project_context,
+                db=self.db,
+            )
+        except (PlanCriticError, ConfigurationError) as exc:
+            self.db.commit()
+            return {
+                'error': str(exc),
+                'task_id': task_id,
+                'plan_persisted': True,
+                'next': 'critique_spec_plan',
+            }
+
+        record_metric_fn(
+            tool='plan_critic',
+            source='spec_plan_generator',
+            ok=True,
+            task_id=task_id,
+            result_count=len(critic_result.findings),
+            payload={
+                'verdict': critic_result.verdict,
+                'critic': critic_agent.id,
+                'planner': agent.id,
+                'tokens_used': critic_tokens,
+                'token_budget': spec_plan_generator.PLAN_CRITIC_TOKEN_BUDGET,
+                'diff_provided': False,
+            },
+        )
+
+        try:
+            updated = service.record_plan_critic_verdict(
+                task_id=task_id,
+                actor=f"chat:{session_id or 'anonymous'}",
                 critic=critic_agent.id,
-                critic_verdict=critic_result.verdict,
-                critic_findings=[item.model_dump(mode='json') for item in critic_result.findings],
-                critic_summary=critic_result.summary,
-                critic_tokens=critic_tokens,
+                verdict=critic_result.verdict,
+                findings=[item.model_dump(mode='json') for item in critic_result.findings],
+                summary=critic_result.summary,
+                tokens=critic_tokens,
             )
         except OrchestrationError as exc:
             return {'error': str(exc)}
@@ -431,6 +458,128 @@ class ContextHandlersMixin:
             'plan_critic': updated.plan_critic,
             'plan_critic_status': updated.plan_critic_status,
             'plan_critic_findings': updated.plan_critic_findings,
+        }
+
+    async def _handle_critique_spec_plan(self, args: str, session_id: str) -> dict:
+        """Run the plan critic alone against whatever plan is already on the
+        task. Never calls the planner — a re-critique round after a rejected
+        verdict, or after a critic-only failure, costs only this step."""
+
+        from app.services.task_orchestration import TaskOrchestrationService, OrchestrationError
+
+        try:
+            payload = json.loads(args) if args.strip() else {}
+        except json.JSONDecodeError:
+            return {'error': 'critique_spec_plan expects a JSON object'}
+
+        task_id = str(payload.get('task_id', '')).strip()
+        if not task_id:
+            return {'error': 'task_id is required'}
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return {'error': f'Task {task_id} not found'}
+        if not task.planner:
+            return {'error': f'Task {task_id} has no plan to critique yet — run generate_spec_plan first'}
+
+        critic_id = str(payload.get('critic_id', '') or '').strip()
+        if critic_id:
+            critic_agent = self.db.get(Agent, critic_id)
+            if critic_agent is None:
+                return {'error': f'Critic agent {critic_id} not found'}
+            critic_type = getattr(
+                getattr(critic_agent, "agent_type", None), "value", None
+            ) or getattr(critic_agent, "agent_type", "")
+            if str(critic_agent.id).strip().casefold() == str(task.planner).strip().casefold():
+                return {'error': 'Plan critic must differ from the planner (four-eyes).'}
+            if str(critic_type).strip().lower() == 'api':
+                return {'error': 'Plan criticism requires a CLI agent'}
+        else:
+            critic_agent = None
+            suggestions = AgentSuggester(self.db).suggest(
+                task, role="reviewer", top_n=10, exclude_agent_id=task.planner
+            )
+            for suggestion in suggestions:
+                candidate = self.db.get(Agent, suggestion.agent_id)
+                candidate_type = getattr(getattr(candidate, "agent_type", None), "value", None) or getattr(
+                    candidate, "agent_type", ""
+                )
+                if candidate is not None and str(candidate_type).lower() != "api":
+                    critic_agent = candidate
+                    break
+            if critic_agent is None:
+                return {'error': 'No independent CLI plan critic is available'}
+
+        planner_agent = self.db.get(Agent, task.planner)
+        if planner_agent is None:
+            return {'error': f'Planner agent {task.planner} referenced by task {task_id} no longer exists'}
+
+        project = self.db.get(Project, task.project) if task.project else None
+        repo_root = os.path.abspath(project.repo_root) if project and project.repo_root else None
+        context_parts: list[str] = []
+        if project is not None and (project.context_md or '').strip():
+            context_parts.append(project.context_md.strip())
+        if project is not None:
+            from app.services.context_generator import get_matching_rules
+
+            for rule in get_matching_rules(self.db, project.id, task.files or None):
+                context_parts.append(f"## Rule: {rule.name}\n{rule.content}")
+        project_context = "\n\n".join(context_parts) or None
+
+        try:
+            plan_from_db = spec_plan_generator.spec_plan_result_from_task(task)
+            critic_result, critic_tokens = await spec_plan_generator.criticize_spec_plan(
+                task,
+                plan_from_db,
+                repo_root,
+                planner_agent,
+                critic_agent,
+                project_context=project_context,
+                db=self.db,
+            )
+        except (PlanCriticError, ConfigurationError) as exc:
+            self.db.commit()
+            return {'error': str(exc)}
+
+        record_metric_fn = _get_record_tool_metric()
+        record_metric_fn(
+            tool='plan_critic',
+            source='spec_plan_generator',
+            ok=True,
+            task_id=task_id,
+            result_count=len(critic_result.findings),
+            payload={
+                'verdict': critic_result.verdict,
+                'critic': critic_agent.id,
+                'planner': task.planner,
+                'tokens_used': critic_tokens,
+                'token_budget': spec_plan_generator.PLAN_CRITIC_TOKEN_BUDGET,
+                'diff_provided': False,
+            },
+        )
+
+        service = TaskOrchestrationService(self.db)
+        try:
+            updated = service.record_plan_critic_verdict(
+                task_id=task_id,
+                actor=f"chat:{session_id or 'anonymous'}",
+                critic=critic_agent.id,
+                verdict=critic_result.verdict,
+                findings=[item.model_dump(mode='json') for item in critic_result.findings],
+                summary=critic_result.summary,
+                tokens=critic_tokens,
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        return {
+            'action': 'spec_plan_critic_rejected' if updated.plan_critic_status == 'reject' else 'spec_plan_critiqued',
+            'task_id': task_id,
+            'planner': updated.planner,
+            'plan_critic': updated.plan_critic,
+            'plan_critic_status': updated.plan_critic_status,
+            'plan_critic_findings': updated.plan_critic_findings,
+            'awaiting_approval': bool(updated.awaiting_approval),
+            'approval_prompt': updated.approval_prompt,
         }
 
     async def _handle_compact_context(self, args: str, session_id: str) -> dict:

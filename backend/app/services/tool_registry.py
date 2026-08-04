@@ -531,9 +531,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             description=(
                 "Run the research-first spec/plan gate for a 'todo' task with "
                 "a CLI agent inside the project repo, then run an independent, "
-                "focused plan critic before dispatch. The critic has a 50k token "
+                "focused plan critic before dispatch. The critic has a 150k token "
                 "budget, receives no diff, and may reject only with reproducible "
-                "evidence. Persists the extended plan contract and critic verdict."
+                "evidence. Persists the extended plan contract and critic verdict. "
+                "If the critic step fails after the plan is written, the plan stays "
+                "on the task — retry with critique_spec_plan instead of re-running this."
             ),
             parameters={
                 "type": "object",
@@ -561,6 +563,35 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             permission="write",
             entity="tasks",
             slash_alias="/spec-plan",
+            group="task_lifecycle",
+        ),
+        ToolSpec(
+            name="critique_spec_plan",
+            description=(
+                "Run the independent plan critic alone against the plan already "
+                "stored on a task — never calls the planner. Use this to retry a "
+                "critic that failed or was rejected without burning another planner "
+                "call; each run appends a new plan_critic gate record."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "critic_id": {
+                        "type": "string",
+                        "description": (
+                            "Independent CLI agent to criticize the plan; auto-suggested "
+                            "if omitted."
+                        ),
+                    },
+                },
+                "required": ["task_id"],
+            },
+            handler="critique_spec_plan",
+            tier="deferred",
+            permission="write",
+            entity="tasks",
+            slash_alias="/critique-plan",
             group="task_lifecycle",
         ),
         ToolSpec(

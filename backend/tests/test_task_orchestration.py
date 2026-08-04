@@ -1712,6 +1712,133 @@ def test_write_spec_plan_requires_todo_status(orchestration, db_session):
         )
 
 
+def test_write_spec_plan_without_critic_leaves_verdict_null(orchestration, db_session):
+    """CTV2-1378: write_spec_plan without critic args persists the plan and
+    appends only the spec_plan gate record -- plan_critic_status stays NULL
+    until a separate record_plan_critic_verdict call happens."""
+    task = Task(
+        id="SPEC-SPLIT-001",
+        project="project",
+        title="Needs a spec",
+        mode="bypass",
+        acceptance_criteria=[],
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    updated = orchestration.write_spec_plan(
+        task_id=task.id,
+        actor="@coordinator",
+        acceptance_criteria=["Endpoint returns 200"],
+        constraints=["Do not add a migration"],
+        evidence=[{
+            "fact": "Relevant module exists",
+            "source_type": "file",
+            "source": "backend/app/example.py:1",
+            "result": "module exists",
+        }],
+        prior_art=[],
+        ruled_out=[],
+        limits=None,
+        planner="@planner",
+        plan="1. Add route. 2. Add tests.",
+        files=["backend/app/api/foo.py"],
+        tests=["backend/tests/test_foo.py"],
+        risk="low",
+        flows=["checkout"],
+        spec_clarity="high",
+        open_questions=[],
+    )
+
+    assert updated.plan == "1. Add route. 2. Add tests."
+    assert updated.planner == "@planner"
+    assert updated.plan_critic_status is None
+    assert updated.plan_critic is None
+
+    spec_plan_records = (
+        db_session.query(GateRecord)
+        .filter(GateRecord.task_id == task.id, GateRecord.gate_type == "spec_plan")
+        .all()
+    )
+    assert len(spec_plan_records) == 1
+    critic_records = (
+        db_session.query(GateRecord)
+        .filter(GateRecord.task_id == task.id, GateRecord.gate_type == "plan_critic")
+        .all()
+    )
+    assert len(critic_records) == 0
+
+
+def test_record_plan_critic_verdict_appends_gate_record_and_rejects_same_agent(
+    orchestration, db_session
+):
+    task = Task(
+        id="SPEC-SPLIT-002",
+        project="project",
+        title="Needs a spec",
+        mode="bypass",
+        acceptance_criteria=["AC"],
+        evidence=[{
+            "fact": "x", "source_type": "file", "source": "f.py:1", "result": "y",
+        }],
+        plan="do it",
+        risk="low",
+        spec_clarity="high",
+        open_questions=[],
+        planner="@planner",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    with pytest.raises(PrerequisiteError, match="Reviewer must differ from executor"):
+        orchestration.record_plan_critic_verdict(
+            task_id=task.id,
+            actor="@coordinator",
+            critic="@planner",
+            verdict="accept",
+            findings=[],
+            summary="ok",
+            tokens=100,
+        )
+
+    updated = orchestration.record_plan_critic_verdict(
+        task_id=task.id,
+        actor="@coordinator",
+        critic="@critic",
+        verdict="accept",
+        findings=[],
+        summary="Verified",
+        tokens=100,
+    )
+    assert updated.plan_critic_status == "accept"
+    assert updated.plan_critic == "@critic"
+
+    records = (
+        db_session.query(GateRecord)
+        .filter(GateRecord.task_id == task.id, GateRecord.gate_type == "plan_critic")
+        .all()
+    )
+    assert len(records) == 1
+
+    # A re-critique round appends a SECOND record; it never rewrites the first.
+    orchestration.record_plan_critic_verdict(
+        task_id=task.id,
+        actor="@coordinator",
+        critic="@critic-2",
+        verdict="accept",
+        findings=[],
+        summary="Verified again",
+        tokens=50,
+    )
+    records = (
+        db_session.query(GateRecord)
+        .filter(GateRecord.task_id == task.id, GateRecord.gate_type == "plan_critic")
+        .order_by(GateRecord.id)
+        .all()
+    )
+    assert len(records) == 2
+
+
 # ---------------------------------------------------------------------------
 # task_dependencies: add_dependency, cycle rejection, wake_dependents (CTV2-094)
 # ---------------------------------------------------------------------------
