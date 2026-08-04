@@ -145,14 +145,19 @@ Task + ledger, nên không còn Task `in-review`/`dispatched` không có đườ
 
 ## Settings (SETTINGS_WHITELIST, entity_admin.py)
 
-`autonomy`, `auto_max_risk`, `auto_max_rounds`, `autonomy_enabled`,
+`autonomy` (nút thật cho mode: `supervised`/`auto`/`plan-only`),
+`auto_max_risk`, `auto_max_rounds`, `autonomy_enabled`,
 `max_cost_usd_per_task`, `max_tokens_per_task` (default 20,000,000),
 `max_concurrent_runs` (default 2),
 `run_timeout_seconds` (900), `max_active_seconds_per_run`,
 `max_tool_calls_per_run`, `max_no_progress_seconds` (default 300; đang set 2400),
 `sql_timeout_seconds`, `sql_row_cap`, `context_snapshot_top_n`,
-`default_coordinator_model`, `default_mode` (CHẾT — đừng dùng).
+`default_coordinator_model`.
 Ghi qua `update_settings` → admin gate.
+
+`default_mode` đã bị gỡ khỏi whitelist (CTV2-222): không ghi được nữa; các
+row Setting cũ còn trong DB chỉ để đọc lịch sử, không phải nguồn policy.
+Mode thật do `autonomy` (+ `auto_max_risk` so với `task.risk`) quyết định.
 
 ## Nhắc nợ human (server-side)
 

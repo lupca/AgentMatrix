@@ -110,11 +110,11 @@ def test_session_invalid_context_level_value_constraint(db_session):
 def test_setting_key_is_primary_key_and_value_is_json(db_session):
     from app.db.models import Setting
 
-    db_session.add(Setting(key="default_mode", value="supervised", description="desc"))
+    db_session.add(Setting(key="context_snapshot_top_n", value=20, description="desc"))
     db_session.commit()
 
-    setting = db_session.get(Setting, "default_mode")
-    assert setting.value == "supervised"
+    setting = db_session.get(Setting, "context_snapshot_top_n")
+    assert setting.value == 20
     assert setting.updated_at is not None
 
 
@@ -124,11 +124,11 @@ def test_admin_gate_record_accepts_settings_entity(db_session):
     record = AdminGateRecord(
         entity="settings",
         action="update",
-        entity_id="default_mode",
+        entity_id="context_snapshot_top_n",
         status="approved",
         actor="system",
         mode="bypass",
-        input_payload={"value": "supervised"},
+        input_payload={"value": 20},
     )
     db_session.add(record)
     db_session.commit()
