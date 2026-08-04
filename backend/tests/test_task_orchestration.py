@@ -587,6 +587,42 @@ def test_cost_cap_exceeded_stops_task_and_escalates(orchestration, db_session):
     assert audit.task_id == task.id
 
 
+def test_cli_subscription_cost_does_not_trip_usd_brake_but_tokens_do(
+    orchestration, db_session
+):
+    task = _task(db_session, "GATE-BRAKE-TOKENS", mode="bypass")
+    db_session.add(Setting(key="max_cost_usd_per_task", value="1.0"))
+    db_session.add(Setting(key="max_tokens_per_task", value="10"))
+    db_session.add(
+        LLMUsage(
+            task_id=task.id,
+            model="claude-sonnet-5",
+            provider="claude",
+            operation="cli",
+            input_tokens=2,
+            cached_tokens=5,
+            output_tokens=4,
+            cost_usd="100.0",
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(BrakeViolationError):
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="dispatch-over-token-budget",
+        )
+
+    audit = (
+        db_session.query(AuditLog)
+        .filter(AuditLog.action == "brake:token_limit")
+        .one()
+    )
+    assert audit.task_id == task.id
+
+
 def test_dependency_pending_brake_queues_dispatch_instead_of_raising(
     orchestration, db_session
 ):

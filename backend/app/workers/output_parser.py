@@ -258,19 +258,24 @@ def parse_cli_token_usage(cli: str, stdout: str) -> dict[str, Any] | None:
             "cached_tokens": _nonnegative_int(cached_tokens),
         }
 
+        # Claude's top-level total_cost_usd has the same invocation/session
+        # scope as the top-level usage object.  Do not overwrite it with the
+        # first modelUsage entry: a session can use multiple models.
         if vendor == "claude" and data.get("total_cost_usd") is not None:
             cost_usd = _nonnegative_float(data["total_cost_usd"])
             if cost_usd is not None:
                 result["cost_usd"] = cost_usd
-        model_usage = data.get("modelUsage")
-        if isinstance(model_usage, dict):
-            for model_data in model_usage.values():
-                if not isinstance(model_data, dict) or model_data.get("costUSD") is None:
-                    continue
-                cost_usd = _nonnegative_float(model_data["costUSD"])
-                if cost_usd is not None:
-                    result["cost_usd"] = cost_usd
-                break
+        if "cost_usd" not in result:
+            model_usage = data.get("modelUsage")
+            if isinstance(model_usage, dict):
+                model_costs = [
+                    _nonnegative_float(model_data["costUSD"])
+                    for model_data in model_usage.values()
+                    if isinstance(model_data, dict) and model_data.get("costUSD") is not None
+                ]
+                model_costs = [cost for cost in model_costs if cost is not None]
+                if model_costs:
+                    result["cost_usd"] = sum(model_costs)
         return result
     return None
 

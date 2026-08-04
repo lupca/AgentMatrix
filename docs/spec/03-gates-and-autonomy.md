@@ -119,7 +119,8 @@ changes-requested → status `failed` + escalation "human replan".
 ## Brakes (`check_brakes`, task_orchestration ~1580)
 
 Thứ tự kiểm tra: dependencies pending → `autonomy_enabled=false` STOP →
-cost ≥ `max_cost_usd_per_task` STOP → agent tồn tại/available → account health →
+authoritative API cost ≥ `max_cost_usd_per_task` STOP → token total ≥
+`max_tokens_per_task` STOP → agent tồn tại/available → account health →
 per-run: `max_active_seconds_per_run`, `max_tool_calls_per_run`,
 `max_no_progress_seconds` → `max_concurrent_runs` (QUEUE).
 
@@ -134,7 +135,8 @@ khác.
 ## Settings (SETTINGS_WHITELIST, entity_admin.py)
 
 `autonomy`, `auto_max_risk`, `auto_max_rounds`, `autonomy_enabled`,
-`max_cost_usd_per_task`, `max_concurrent_runs` (default 2),
+`max_cost_usd_per_task`, `max_tokens_per_task` (default 20,000,000),
+`max_concurrent_runs` (default 2),
 `run_timeout_seconds` (900), `max_active_seconds_per_run`,
 `max_tool_calls_per_run`, `max_no_progress_seconds` (default 300; đang set 2400),
 `sql_timeout_seconds`, `sql_row_cap`, `context_snapshot_top_n`,

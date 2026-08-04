@@ -67,25 +67,30 @@ class AdminHandlersMixin:
             if agent_id:
                 resources = resources.filter(AgentRun.agent_id == agent_id)
         resource_rows = resources.all()
-        measured_calls = len(usage)
+        authoritative_usage = [row for row in usage if row.operation != "cli"]
+        cli_usage = [row for row in usage if row.operation == "cli"]
+        cli_run_ids = {row.agent_run_id for row in cli_usage if row.agent_run_id}
         has_usage = exists().where(LLMUsage.agent_run_id == AgentRun.id)
         unmeasured_cli_runs = cli_runs.filter(~has_usage).count()
-        unpriced_cli_usage = [
-            row for row in usage if str(row.provider or "").lower() in {"qwen", "agy"}
-        ]
+        unpriced_cli_usage = cli_usage
         known_cost_usd = sum(
             float(row.cost_usd or 0)
-            for row in usage
-            if row not in unpriced_cli_usage
+            for row in authoritative_usage
         )
-        if measured_calls and unmeasured_cli_runs:
+        if authoritative_usage and unmeasured_cli_runs:
             cost_status = 'partial'
             cost_note = (
                 'Some usage is measured, but at least one CLI run has no parsed token usage.'
             )
-        elif measured_calls:
+        elif authoritative_usage:
             cost_status = 'measured'
-            cost_note = 'Token usage was parsed from CLI JSON output.'
+            cost_note = 'Authoritative API token usage and USD cost were recorded.'
+        elif cli_usage:
+            cost_status = 'unmeasured'
+            cost_note = (
+                'CLI token usage was parsed, but CLI cost_usd is a vendor-reported '
+                'estimate and is not an authoritative subscription charge.'
+            )
         elif unmeasured_cli_runs:
             cost_status = 'unmeasured'
             cost_note = (
@@ -96,13 +101,17 @@ class AdminHandlersMixin:
             cost_note = 'No recorded API usage or completed CLI run is available for this scope.'
         if unpriced_cli_usage:
             cost_note += (
-                ' Qwen/Agy expose measured tokens but no authoritative USD cost; '
-                'cost_usd excludes those runs.'
+                ' CLI usage is excluded from cost_usd and the max_cost_usd_per_task '
+                'brake; use the token brake for subscription runs.'
             )
         cost_value = known_cost_usd
         if unpriced_cli_usage and cost_value == 0:
             cost_value = None
-        run_cost_value = sum(float(row.estimated_cost_usd or 0) for row in resource_rows)
+        run_cost_value = sum(
+            float(row.estimated_cost_usd or 0)
+            for row in resource_rows
+            if row.agent_run_id not in cli_run_ids
+        )
         if unpriced_cli_usage and run_cost_value == 0 and known_cost_usd == 0:
             run_cost_value = None
         return {
@@ -114,9 +123,7 @@ class AdminHandlersMixin:
             'cached_tokens': sum(row.cached_tokens or 0 for row in usage),
             'cost_usd': round(cost_value, 8) if cost_value is not None else None,
             'cost_status': cost_status,
-            'cost_scope': (
-                'recorded_usage' if measured_calls else 'recorded_api_usage_only'
-            ),
+            'cost_scope': 'recorded_api_usage_only',
             'unmeasured_cli_runs': unmeasured_cli_runs,
             'cost_note': cost_note,
             'runs': len(resource_rows),

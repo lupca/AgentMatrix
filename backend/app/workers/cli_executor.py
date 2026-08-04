@@ -266,7 +266,12 @@ def _record_run_resource_usage(db: Session, run: AgentRun) -> None:
     usage.files_written = files_written
     usage.active_seconds = active_seconds
     usage.rate_limit_events = rate_limit_events
-    usage.estimated_cost_usd = sum((item.cost_usd or 0) for item in usages)
+    # CLI subscription costUSD is a vendor-reported estimate, not an
+    # authoritative bill.  Keep it in LLMUsage for observability, but never
+    # expose it as the run's authoritative estimated cost.
+    usage.estimated_cost_usd = sum(
+        (item.cost_usd or 0) for item in usages if item.operation != "cli"
+    )
 
 
 def _record_cli_usage(db: Session, run: AgentRun, cli: str, stdout: str) -> None:
