@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     # runtime; these values are the safe process-start defaults.
     AUTONOMY_ENABLED: bool = True
     MAX_COST_USD_PER_TASK: float = 10.0
+    MAX_TOKENS_PER_TASK: int = 20_000_000
     MAX_CONCURRENT_RUNS: int = 10
     RUN_TIMEOUT_SECONDS: int = 900
     MAX_ACTIVE_SECONDS_PER_RUN: int = 3600

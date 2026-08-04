@@ -44,19 +44,48 @@
 
 ## Phạm vi đo chi phí LLM
 
-- `llm_usage` chỉ ghi token/cost khi provider API trả usage có thẩm quyền. Với
-  session task-scoped, mỗi bản ghi mang `task_id`; turn xử lý một run cụ thể còn
-  mang `agent_run_id`. Brake `max_cost_usd_per_task` vì vậy chỉ phản ánh phần
-  chi phí API đã ghi nhận.
-- Agent CLI executor (`claude`, `agy`, `codex`, `qwen`) hiện chạy bằng
-  subscription và command stdout hiện tại không cung cấp usage/cost có thẩm
-  quyền. Không parse ước lượng từ độ dài text và không sinh `LLMUsage` giả cho
-  các run này. `RunResourceUsage.estimated_cost_usd = 0` trong trường hợp đó có
-  nghĩa là **không đo được**, không có nghĩa run miễn phí.
+- `LLMUsage` của API ghi token/cost do provider API trả về. Với session
+  task-scoped, mỗi bản ghi mang `task_id`; turn xử lý một run cụ thể còn mang
+  `agent_run_id`.
+- CLI Claude chạy bằng subscription vẫn trả một JSON result object. Đã đọc raw
+  output thật của run `7832f2f0-1ecb-4523-aefe-2600acbc0da4` qua MCP:
+  `vendor_raw_events` có đúng **1 object** (`seq=0`, 4372 bytes), không phải
+  một object cho mỗi turn. Top-level keys là `is_error`, `duration_api_ms`,
+  `num_turns`, `stop_reason`, `session_id`, `total_cost_usd`, `usage`,
+  `modelUsage`, `permission_denials`, `terminal_reason`, `fast_mode_state`,
+  `fast_mode_disabled_reason`, `subtype`, `api_error_status`, `result`,
+  `ttft_ms`, `ttft_stream_ms`, `time_to_request_ms`, `type`, `duration_ms`,
+  `uuid`. `usage` chứa `input_tokens=224`, `output_tokens=69332`,
+  `cache_read_input_tokens=13659112`, `cache_creation_input_tokens=172344`,
+  cùng `server_tool_use`, `service_tier`, `cache_creation`, `inference_geo`,
+  `iterations` và `speed`. `modelUsage` có hai entries: Haiku với
+  `costUSD=0.00354` và Sonnet với `costUSD=6.1724496`; top-level
+  `total_cost_usd=6.1759896` bằng tổng hai entry đó.
+- `parse_cli_token_usage` lấy token từ top-level `usage`, tức tổng của một lần
+  gọi CLI/session. Cost Claude ưu tiên top-level `total_cost_usd`, cùng phạm vi
+  với token; chỉ khi trường đó vắng mới cộng toàn bộ `modelUsage.*.costUSD`.
+  Trước đây parser lấy entry model đầu tiên, nên run trên bị ghi token của cả
+  session nhưng cost Haiku riêng lẻ `0.00354`. `LLMUsage` vẫn là một row cho
+  mỗi `AgentRun`, và `_record_run_resource_usage` cộng các row khi có nhiều
+  row.
+- Dưới subscription, `total_cost_usd`/`modelUsage.*.costUSD` là **vendor-reported
+  USD usage telemetry** do CLI tính theo model; output không chứng minh đó là
+  tiền đã trừ, tiền hoá đơn, hay phần còn lại của gói. Nó cũng không phải tổng
+  chi phí tài khoản/tháng và không có dữ liệu về trạng thái/bậc gói. Vì vậy
+  `LLMUsage.cost_usd` của `operation=cli` không được gọi là tiền thực và không
+  được dùng làm ngưỡng an toàn.
+- `max_cost_usd_per_task` chỉ cộng `LLMUsage` không phải CLI (chi phí API có
+  thẩm quyền). CLI subscription dùng brake `max_tokens_per_task`, mặc định
+  20,000,000 và cấu hình được qua `update_settings`; tổng token là
+  `input_tokens + cached_tokens + output_tokens`. `RunResourceUsage` và
+  `get_stats.cost_usd` cũng loại cost CLI khỏi số USD authoritative, nhưng vẫn
+  giữ token CLI để quan sát. Đây là chủ ý fail-safe: cost CLI không tạo cảm
+  giác an toàn giả.
 - `get_stats.cost_scope` là `recorded_api_usage_only` và `cost_status` phân biệt:
-  `measured` (có usage API, kể cả cost thật bằng 0), `partial` (có usage API và
-  có CLI run chưa đo), `unmeasured` (chỉ có CLI run), `no_data` (không có dữ
-  liệu). `unmeasured_cli_runs` cho biết số run nằm ngoài coverage của cost.
+  `measured` (API usage/cost authoritative), `partial` (có API usage và có CLI
+  run chưa parse), `unmeasured` (chỉ có CLI token hoặc CLI chưa có cost đáng
+  tin), `no_data` (không có dữ liệu). `unmeasured_cli_runs` cho biết số run nằm
+  ngoài coverage token.
 
 ## Coordinator workspace
 

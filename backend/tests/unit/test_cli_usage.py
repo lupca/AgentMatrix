@@ -5,7 +5,7 @@ import pytest
 from app.db.models import Agent, AgentRun, LLMUsage, Project, RunResourceUsage, Task
 from app.services.command_router import CommandRouter
 from app.services.task_validators import TaskValidator
-from app.workers.cli_executor import _record_cli_usage
+from app.workers.cli_executor import _record_cli_usage, _record_run_resource_usage
 from app.workers.output_parser import _extract_explicit_result_ref, parse_cli_token_usage
 
 
@@ -20,6 +20,31 @@ CLAUDE_OUTPUT = json.dumps(
         },
         "total_cost_usd": 0.139,
         "duration_ms": 2469,
+    }
+)
+
+CLAUDE_MULTI_MODEL_OUTPUT = json.dumps(
+    {
+        "is_error": False,
+        "duration_api_ms": 909970,
+        "num_turns": 118,
+        "stop_reason": "end_turn",
+        "total_cost_usd": 6.175989600000001,
+        "usage": {
+            "input_tokens": 224,
+            "cache_creation_input_tokens": 172344,
+            "cache_read_input_tokens": 13659112,
+            "output_tokens": 69332,
+            "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+            "service_tier": "standard",
+        },
+        "modelUsage": {
+            "claude-haiku-4-5-20251001": {"costUSD": 0.0035399999999999997},
+            "claude-sonnet-5": {"costUSD": 6.172449600000001},
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "result": "completed",
     }
 )
 
@@ -92,6 +117,17 @@ def test_parse_cli_token_usage_accepts_jsonl_result_as_last_object():
     assert parse_cli_token_usage("claude", output)["cost_usd"] == 0.139
 
 
+def test_parse_claude_cost_has_same_session_scope_as_total_usage():
+    usage = parse_cli_token_usage("claude", CLAUDE_MULTI_MODEL_OUTPUT)
+
+    assert usage == {
+        "input_tokens": 224,
+        "output_tokens": 69332,
+        "cached_tokens": 13659112,
+        "cost_usd": pytest.approx(6.175989600000001),
+    }
+
+
 @pytest.mark.parametrize("cli", ["codex", "unknown"])
 def test_parse_cli_token_usage_fails_closed_for_unsupported_cli(cli):
     assert parse_cli_token_usage(cli, CLAUDE_OUTPUT) is None
@@ -138,7 +174,12 @@ def test_record_cli_usage_attributes_run_and_task(db_session):
     assert usage.output_tokens == 14
     assert usage.cached_tokens == 15273
     assert float(usage.cost_usd) == pytest.approx(0.139)
-    assert float(TaskValidator(db_session)._task_cost(task)) == pytest.approx(0.139)
+    # Claude subscription costUSD is retained as vendor telemetry, but is not
+    # an authoritative USD amount and cannot trip the USD safety brake.
+    assert float(TaskValidator(db_session)._task_cost(task)) == pytest.approx(0)
+    _record_run_resource_usage(db_session, run)
+    resource_usage = db_session.query(RunResourceUsage).one()
+    assert float(resource_usage.estimated_cost_usd) == pytest.approx(0)
 
 
 @pytest.mark.asyncio
@@ -178,8 +219,9 @@ async def test_get_stats_does_not_present_unpriced_cli_tokens_as_free(db_session
         "get_stats", {"task_id": task.id}, "usage-session"
     )
 
-    assert stats["cost_status"] == "measured"
+    assert stats["cost_status"] == "unmeasured"
     assert stats["input_tokens"] == 49714
     assert stats["output_tokens"] == 165
     assert stats["cost_usd"] is None
-    assert "no authoritative USD cost" in stats["cost_note"]
+    assert "not an authoritative subscription charge" in stats["cost_note"]
+    assert stats["cost_scope"] == "recorded_api_usage_only"

@@ -158,6 +158,11 @@ class TaskValidator:
         return max(Decimal("0"), val)
 
     @property
+    def max_tokens_per_task(self) -> int:
+        val = self._setting("max_tokens_per_task", settings.MAX_TOKENS_PER_TASK, int)
+        return max(0, val)
+
+    @property
     def max_concurrent_runs(self) -> int:
         return max(1, self._setting("max_concurrent_runs", settings.MAX_CONCURRENT_RUNS, int))
 
@@ -188,6 +193,7 @@ class TaskValidator:
     ) -> BrakeDecision:
         """Evaluate brakes in a stable order and return debugging context."""
         cost = self._task_cost(task)
+        tokens = self._task_tokens(task)
         active_query = self.db.query(AgentRun.id).filter(AgentRun.status.in_(["queued", "running"]))
         if run_id:
             active_query = active_query.filter(AgentRun.id != run_id)
@@ -199,6 +205,8 @@ class TaskValidator:
             "max_concurrent": self.max_concurrent_runs,
             "task_cost": str(cost),
             "cost_limit": str(self.max_cost_usd_per_task),
+            "task_tokens": tokens,
+            "token_limit": self.max_tokens_per_task,
             "agent_id": agent_id,
             "max_active_seconds_per_run": self.max_active_seconds_per_run,
             "max_tool_calls_per_run": self.max_tool_calls_per_run,
@@ -219,6 +227,9 @@ class TaskValidator:
         elif cost >= self.max_cost_usd_per_task:
             reason = f"Task cost limit reached: ${cost:.8f} >= ${self.max_cost_usd_per_task:.8f}"
             decision = BrakeDecision(False, reason, "cost_limit", cost_usd=cost, observations=observations)
+        elif tokens >= self.max_tokens_per_task:
+            reason = f"Task token limit reached: {tokens:,} >= {self.max_tokens_per_task:,} tokens"
+            decision = BrakeDecision(False, reason, "token_limit", cost_usd=cost, observations=observations)
         else:
             agent = self.db.get(Agent, agent_id) if agent_id else None
             if agent_id and agent is None:
@@ -261,7 +272,7 @@ class TaskValidator:
         return decision
 
     def _record_brake(self, task: Task, decision: BrakeDecision) -> None:
-        if decision.code in {"autonomy_disabled", "cost_limit"}:
+        if decision.code in {"autonomy_disabled", "cost_limit", "token_limit"}:
             from app.services.task_state_machine import TaskStateMachine
             TaskStateMachine(self.db).cas_status(task, "failed")
             task.error = decision.reason
@@ -313,13 +324,14 @@ class TaskValidator:
                         "reason": decision.reason,
                         "cost_usd": str(decision.cost_usd),
                         "max_cost_usd_per_task": str(self.max_cost_usd_per_task),
+                        "max_tokens_per_task": self.max_tokens_per_task,
                         "max_concurrent_runs": self.max_concurrent_runs,
                         "decision": self._json_safe(asdict(decision)),
                     },
                 )
             )
         self.db.commit()
-        if decision.code in {"autonomy_disabled", "cost_limit"}:
+        if decision.code in {"autonomy_disabled", "cost_limit", "token_limit"}:
             from app.services.task_state_machine import TaskStateMachine
             TaskStateMachine(self.db).wake_dependents(task.id)
 
@@ -337,13 +349,30 @@ class TaskValidator:
         value = (
             self.db.query(func.coalesce(func.sum(LLMUsage.cost_usd), 0))
             .outerjoin(AgentRun, LLMUsage.agent_run_id == AgentRun.id)
-            .filter(or_(LLMUsage.task_id == task.id, AgentRun.task_id == task.id))
+            .filter(
+                or_(LLMUsage.task_id == task.id, AgentRun.task_id == task.id),
+                LLMUsage.operation != "cli",
+            )
             .scalar()
         )
         try:
             return Decimal(str(value or 0))
         except (InvalidOperation, ValueError):
             return Decimal("0")
+
+    def _task_tokens(self, task: Task) -> int:
+        rows = (
+            self.db.query(LLMUsage.input_tokens, LLMUsage.cached_tokens, LLMUsage.output_tokens)
+            .outerjoin(AgentRun, LLMUsage.agent_run_id == AgentRun.id)
+            .filter(or_(LLMUsage.task_id == task.id, AgentRun.task_id == task.id))
+            .all()
+        )
+        return sum(
+            max(0, int(input_tokens or 0))
+            + max(0, int(cached_tokens or 0))
+            + max(0, int(output_tokens or 0))
+            for input_tokens, cached_tokens, output_tokens in rows
+        )
 
     def _setting(self, key: str, default: Any, converter: Any) -> Any:
         row = self.db.get(Setting, key)

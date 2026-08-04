@@ -46,7 +46,8 @@ AutonomyPolicy(per project hoặc global Setting):
 
 check_brakes():
   - autonomy_enabled=false → STOP
-  - task_cost ≥ max_cost_usd_per_task → STOP
+  - authoritative API task_cost ≥ max_cost_usd_per_task → STOP
+  - task_tokens ≥ max_tokens_per_task → STOP
   - active_runs ≥ max_concurrent_runs → QUEUE
 ```
 

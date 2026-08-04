@@ -103,6 +103,10 @@ class TaskOrchestrationService:
         return self.validator.max_cost_usd_per_task
 
     @property
+    def max_tokens_per_task(self) -> int:
+        return self.validator.max_tokens_per_task
+
+    @property
     def max_concurrent_runs(self) -> int:
         return self.validator.max_concurrent_runs
 
