@@ -647,6 +647,27 @@ def _review_read_only_git_env() -> tuple[dict[str, str], str]:
     return env, wrapper_dir
 
 
+def _process_env_for_cli(
+    cli: str | None,
+    mcp_env: dict[str, str] | None,
+    *,
+    is_review_run: bool,
+) -> tuple[dict[str, str] | None, str | None]:
+    """Build the child environment, including qwen's stdout-warning guard."""
+    review_git_dir: str | None = None
+    if is_review_run:
+        process_env, review_git_dir = _review_read_only_git_env()
+        if mcp_env:
+            process_env.update(mcp_env)
+    else:
+        process_env = dict(mcp_env or {})
+
+    if (cli or "").strip().lower() == "qwen":
+        process_env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
+
+    return process_env or None, review_git_dir
+
+
 def _update_task_status(
     db: Session,
     task_id: str,
@@ -942,12 +963,9 @@ def execute_agent_run(
             except Exception:
                 logger.exception("Failed to emit mcp_attach_failed for run %s", run_id)
 
-        if is_review_run:
-            process_env, review_git_dir = _review_read_only_git_env()
-            if mcp_env:
-                process_env.update(mcp_env)
-        else:
-            process_env = mcp_env or None
+        process_env, review_git_dir = _process_env_for_cli(
+            run.cli, mcp_env, is_review_run=is_review_run
+        )
 
         for output in process_manager.run_with_streaming(
             exec_command, exec_cwd, env=process_env
