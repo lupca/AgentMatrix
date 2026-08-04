@@ -40,7 +40,7 @@ Trong một phiên duy nhất tôi đã khẳng định ba điều nghe rất h�
 | "`tasks.priority` chỉ cần kiểm chứng là xếp hàng đúng" | **Không có hàng đợi nào cả** — `check_brakes` trả `queue=True, retry_after=30s` tức là *retry*; priority chỉ dùng chọn agent |
 | "Thêm group vào `DEFERRED_GROUPS` để tiết kiệm context MCP" | `get_mcp_tool_specs()` phơi **toàn bộ** tool qua MCP; docstring nói thẳng cơ chế deferred **không áp dụng** cho MCP |
 | "Agent CLI chạy subscription nên không báo token/cost" | `--output-format json` cho ra **đầy đủ** token, và claude còn cho luôn `total_cost_usd`. Đo thật: `claude -p "say ok" --output-format json` → `cost_usd: 0.1366` |
-| "`cost_usd` lệch 1450 lần so với bảng giá ⇒ sai" | Tôi lấy **bảng giá API trả-theo-token** làm thước đo, trong khi tài khoản dùng **gói thuê bao** — cách tính khác, và đổi theo thời điểm. Kết luận "sai bao nhiêu lần" là vô nghĩa khi chưa biết con số đó *mang ý nghĩa gì*. CTV2-1352 |
+| "`cost_usd` lệch 1450 lần so với bảng giá ⇒ sai" | **Kết luận đúng, lập luận sai, và điều đó vẫn đáng rút kinh nghiệm** — xem mục 1.0 |
 
 Nguyên nhân chung: **suy từ tài liệu/tên gọi/mô hình kinh doanh thay vì đo**.
 Tên hàm nghe như đang làm việc X không có nghĩa nó làm việc X; "subscription"
@@ -50,16 +50,35 @@ Cái thứ tư đau nhất: tôi phát hiện nó **sau khi** đã commit chính
 ví dụ đầu. Viết ra bài học không miễn nhiễm cho mình khỏi chính bài học đó —
 phải *chạy lệnh*, mỗi lần.
 
-Cái thứ năm tinh vi hơn và đáng nhớ nhất: tôi **có** đo (token, cost đều là số
-thật lấy từ hệ thống), nhưng **diễn giải bằng sai mô hình** — lấy bảng giá API
-áp lên một tài khoản dùng gói thuê bao, rồi tuyên bố "sai 1450 lần". Bài học mở
-rộng: **đo xong chưa đủ, còn phải biết con số mình vừa đo MANG Ý NGHĨA GÌ.**
-Trước khi so sánh hai số, hỏi: chúng có cùng đơn vị, cùng phạm vi, cùng cách
-tính không? Ở đây câu trả lời là không, và tôi đã bỏ qua câu hỏi đó.
+Cái thứ năm tinh vi nhất, và kết cục của nó mới là bài học thật.
+
+Tôi thấy `cost_usd = 0.00354`, áp **bảng giá API trả-theo-token** lên, ước ~$5.14,
+rồi tuyên bố "sai 1450 lần". lupca chỉ ra: tài khoản dùng **gói thuê bao**, cách
+tính khác — nên tôi **rút lại** lời khẳng định vì không biện minh được thước đo.
+
+Hôm sau CTV2-1352 đọc raw output thật và tìm ra sự thật: `modelUsage` có **hai**
+entry — Haiku `$0.00354` và Sonnet `$6.17` — còn `total_cost_usd` là `$6.176`.
+Parser lấy **entry đầu tiên** rồi **ghi đè** lên `total_cost_usd`. Chi phí thật
+là **$6.18**, không phải $0.0035.
+
+Nghĩa là: **kết luận của tôi đúng, ước lượng $5.14 cũng gần đúng ($6.18) — nhưng
+lập luận thì không đứng vững tại thời điểm đó.** Rút lại vẫn là hành xử ĐÚNG, vì:
+
+> **Đúng nhờ may không phải là đúng nhờ bằng chứng.** Giữ một khẳng định mình
+> chưa biện minh được, chỉ vì linh cảm nó đúng, là thói quen sẽ phản mình ở lần
+> sau — lần mà linh cảm sai.
+
+Bài học kép, cả hai đều phải nhớ:
+1. **Đo xong chưa đủ, phải biết con số đó MANG Ý NGHĨA GÌ** (cùng đơn vị? cùng
+   phạm vi? cùng cách tính?). Ở đây `cost_usd` và `usage` hoá ra khác phạm vi.
+2. **Rút lại khẳng định thiếu cơ sở là đúng, kể cả khi sau đó nó thành đúng.**
+   Việc cần làm không phải "giữ ý kiến" mà là **đi tìm bằng chứng** — đúng như
+   CTV2-1352 đã làm: đọc raw output thay vì cãi nhau về bảng giá.
 
 > Mẹo tự kiểm rẻ tiền: tìm **bất nhất nội tại** thay vì so với chuẩn ngoài.
 > "Task 17 phút rẻ hơn lệnh `say ok` 38 lần" là bằng chứng vững, vì cả hai đo
-> bằng cùng công cụ, cùng tài khoản — không cần biết bảng giá nào cả.
+> bằng cùng công cụ, cùng tài khoản — không cần biết bảng giá nào cả. Đây chính
+> là mẩu bằng chứng duy nhất của tôi đã đứng vững, và nó là mẩu chỉ đúng hướng.
 
 Quy tắc: trước khi nói "hệ thống làm Y", chạy đúng một truy vấn hoặc một lệnh
 chứng minh nó. Rẻ hơn nhiều so với xây cả một tầng lên trên giả định sai.
