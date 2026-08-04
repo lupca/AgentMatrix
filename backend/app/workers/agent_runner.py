@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -28,16 +27,13 @@ from app.db.models import (
     AuditLog,
     LLMUsage,
     RunResourceUsage,
-    Session as SessionModel,
     Task,
     TaskDependency,
-    TaskEvent,
     VendorRawEvent,
 )
 from app.schemas.task import ReviewResult
 from app.services.agent_matcher import AgentMatcher
 from app.services.command_builder import _is_review_task, review_result_path
-from app.services.coordinator import CoordinatorService
 from app.services.process_manager import (
     ProcessManager,
     ProcessResult,
@@ -46,14 +42,14 @@ from app.services.process_manager import (
     WorktreeUnsupportedError,
 )
 from app.services.review_criteria import merged_review_criteria
-from app.services.task_event_service import TaskEventService, emit_task_event
+from app.services.task_event_service import emit_task_event
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.services.tool_metrics import record_tool_metric
 from app.workers import redis_broker
 from app.workers.cli_executor import (
     WORKTREE_ENABLED, AgentExecutionError, _build_execution_result_ref, _cleanup_mcp_config,
-    _cleanup_stale_process, _current_attempt, _decision_status_message, _emit_decision_event,
-    _enqueue_coordinator_wake, _git_ref, _has_committed_diff, _has_uncommitted_changes,
+    _cleanup_stale_process, _current_attempt, _emit_decision_event,
+    _git_ref, _has_committed_diff, _has_uncommitted_changes,
     _is_ancestor, _nudge_driver, _parse_result_ref, _prepare_review_artifact,
     _record_run_resource_usage, _record_unexpected_failure, _review_read_only_git_env,
     _run_base_ref, _submit_review_verdict, _throttled_cancel_check, _update_task_status,
@@ -84,69 +80,10 @@ __all__ = [
     "_throttled_cancel_check", "_update_task_status", "_use_worktree", "_vendor_event",
     "advance_task", "execute_agent_run", "load_review_result", "normalize_cli_event",
     "parse_cli_output", "parse_vendor_event", "publish_line", "publish_status",
-    "run_agent", "run_agent_dead_letter", "subprocess", "wake_coordinator",
+    "run_agent", "run_agent_dead_letter", "subprocess",
 ]
 
 AUTO_MAX_ROUNDS = max(1, int(os.getenv("AUTO_MAX_ROUNDS", "3")))
-
-
-@dramatiq.actor(
-    broker=redis_broker,
-    max_retries=0,
-    time_limit=900_000,
-)
-def wake_coordinator(event_id: int) -> str:
-    """Claim one decision event and wake exactly one coordinator session."""
-    db: Session = SessionLocal()
-    try:
-        event = db.get(TaskEvent, event_id)
-        if event is None:
-            return "not_found"
-        if event.kind != "decision":
-            return "ignored_info"
-
-        task = db.get(Task, event.task_id)
-        session = None
-        if task is not None and task.session_id:
-            session = (
-                db.query(SessionModel)
-                .filter(
-                    SessionModel.id == task.session_id,
-                    SessionModel.status == "active",
-                )
-                .first()
-            )
-        if session is None:
-            session = (
-                db.query(SessionModel)
-                .filter(
-                    SessionModel.context_level == "global",
-                    SessionModel.status == "active",
-                )
-                .order_by(
-                    SessionModel.last_activity_at.desc(),
-                    SessionModel.id.desc(),
-                )
-                .first()
-            )
-        if session is None:
-            return "parked"
-
-        if not TaskEventService(db).claim_event(event.id, session.id):
-            return "already_claimed"
-
-        message = _decision_status_message(event)
-        asyncio.run(
-            CoordinatorService(db).run_turn_programmatic(
-                session,
-                message,
-                source_event_id=event.id,
-                agent_run_id=(event.payload or {}).get("run_id"),
-            )
-        )
-        return "completed"
-    finally:
-        db.close()
 
 
 @dramatiq.actor(
@@ -262,7 +199,6 @@ def advance_task(task_id: str, trigger: str) -> str:
             return "skipped_locked"
 
         status_before = task.status
-        was_awaiting_approval = bool(task.awaiting_approval)
         service = TaskOrchestrationService(db)
         if task.awaiting_approval:
             outcome = "gate_pending"
@@ -290,20 +226,6 @@ def advance_task(task_id: str, trigger: str) -> str:
             )
         )
         db.commit()
-        if outcome == "gate_pending" and not was_awaiting_approval:
-            gate_event = (
-                db.query(TaskEvent)
-                .filter(
-                    TaskEvent.task_id == task_id,
-                    TaskEvent.kind == "decision",
-                    TaskEvent.event_type == "gate_pending",
-                    TaskEvent.claimed_by_session_id.is_(None),
-                )
-                .order_by(TaskEvent.id.desc())
-                .first()
-            )
-            if gate_event is not None:
-                _enqueue_coordinator_wake(gate_event.id)
         if status_before != "failed" and task.status == "failed":
             service.wake_dependents(task_id)
         logger.info(
