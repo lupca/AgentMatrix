@@ -104,7 +104,22 @@ def _begin_llm_run(
         idempotency_key=f"planner:{task.id}:{kind}:{uuid.uuid4().hex[:16]}",
     )
     db.add(run)
-    db.flush()
+    # COMMIT, not flush. The caller is about to await an LLM call that measures
+    # 130-350s, and a flushed-but-uncommitted INSERT holds row locks for that
+    # entire window.
+    #
+    # Observed twice on 2026-08-04 (pg_stat_activity during the outage):
+    #   55772  idle in transaction  653s  INSERT INTO agent_runs ...   <- holds
+    #   55591  blocked by {55772}   312s  SELECT tasks ...             <- waits
+    # The waiter is a synchronous psycopg2 call running on the event loop, so
+    # one blocked query stops the whole MCP server accepting connections: the
+    # listening socket stays open, Recv-Q climbs (17, then 18), and every tool
+    # call hangs with no error and no traceback. Recovery needed a restart.
+    #
+    # Committing here releases the locks in milliseconds. The row is meant to
+    # outlive the call anyway — a run that later fails must stay queryable, and
+    # _finish_llm_run commits its terminal state separately.
+    db.commit()
     return run
 
 
@@ -146,7 +161,10 @@ def _finish_llm_run(
     run.error_message = error
     run.exit_code = 1 if error else 0
     run.completed_at = datetime.now(timezone.utc)
-    db.flush()
+    # Commit for the same reason as _begin_llm_run: the planner path runs a
+    # second LLM call (the critic) right after this one, so a transaction left
+    # open here would hold locks across that call too.
+    db.commit()
 
 
 class SpecPlanGenerationError(RuntimeError):
