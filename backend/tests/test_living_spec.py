@@ -104,11 +104,16 @@ def test_spec_write_batch_relations_get_cluster_and_filters(db_session):
                 "kind": "constraint", "title": "No direct DB", "body": "Use tools only",
             },
             {"op": "relation", "from_id": "spec-a", "to_id": "spec-b", "kind": "depends_on"},
+            {
+                "op": "anchor", "spec_item_id": "spec-b", "repo": "/tmp/spec-project",
+                "path": "backend/app/mcp.py", "symbol": "MCPServer",
+                "relation": "constrains", "anchor_sha": "a" * 64,
+            },
         ],
     }, "session-1"))
 
     assert result["action"] == "spec_written"
-    assert result["count"] == 3
+    assert result["count"] == 4
     assert {item["id"] for item in result["items"]} == {"spec-a", "spec-b"}
     assert result["relations"] == [{"from_id": "spec-a", "to_id": "spec-b", "kind": "depends_on"}]
 
@@ -116,6 +121,9 @@ def test_spec_write_batch_relations_get_cluster_and_filters(db_session):
     assert {item["id"] for item in fetched["items"]} == {"spec-a", "spec-b"}
     assert fetched["relations"] == result["relations"]
     assert fetched["items"][0]["relations"] == result["relations"]
+    assert fetched["anchors"] == result["anchors"]
+    anchored = next(item for item in fetched["items"] if item["id"] == "spec-b")
+    assert anchored["anchors"] == result["anchors"]
 
     filtered = asyncio.run(router.execute_tool(
         "spec_get", {"filter": {"project_id": "spec-project", "kind": "decision"}}, "session-1"

@@ -33,6 +33,7 @@ from app.services.agent_run_classification import classify_termination
 from app.services.landing import LandingResult, head_of, land_result
 from app.services.outbox import record_commit_event, record_run_requested
 from app.services.review_criteria import merged_review_criteria
+from app.services.spec_anchor import link_task_to_changed_specs
 from app.services.task_event_service import emit_task_event
 from app.services.task_validators import (
     BrakeViolationError,
@@ -547,6 +548,22 @@ class TaskStateMachine:
             f"Merge {task.id}: {task.title} (verdict pass, reviewer {task.reviewer})",
         )
 
+    def link_landed_task_specs(self, task: Task, landing: LandingResult) -> None:
+        """Backfill derived spec history for either landing entry point."""
+        if not landing.landed_ref or not task.project:
+            return
+        project = self.db.get(Project, task.project)
+        repo_root = getattr(project, "repo_root", None)
+        if not repo_root:
+            return
+        commit_ref = task.result_ref if head_of(task.result_ref) else landing.landed_ref
+        link_task_to_changed_specs(
+            self.db,
+            task,
+            os.path.abspath(repo_root),
+            commit_ref,
+        )
+
     def terminal_review_run(self, task_id: str) -> AgentRun | None:
         return (
             self.db.query(AgentRun)
@@ -795,6 +812,7 @@ class TaskStateMachine:
                     return None, verdict
                 if landing.landed_ref:
                     task.landed_ref = landing.landed_ref
+                    self.link_landed_task_specs(task, landing)
                     self._deferred_landing_event = (
                         "landed",
                         {
@@ -2058,6 +2076,7 @@ class TaskStateMachine:
         self._sync_after_transition(task)
         if landing.landed_ref:
             task.landed_ref = landing.landed_ref
+            self.link_landed_task_specs(task, landing)
             emit_task_event(
                 task_id=task.id,
                 event_type="landed",

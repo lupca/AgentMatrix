@@ -291,6 +291,17 @@ def test_prompt_includes_description_context_and_quality_bars():
     assert '"constraints"' in prompt
     assert '"evidence"' in prompt
     assert "exact command plus its observed output" in prompt
+    assert '`spec_get({"filter":{"project_id":"p1"}})`' in prompt
+    assert "load_tools" not in prompt
+    priorities = [
+        prompt.index("1. Negative boundaries"),
+        prompt.index("2. Existing system"),
+        prompt.index("3. Code location"),
+        prompt.index("4. Delivery history"),
+    ]
+    assert priorities == sorted(priorities)
+    assert "prior_art PHẢI dẫn `spec_item:<id>`" in prompt
+    assert "constraints PHẢI nêu ranh giới đó" in prompt
 
 
 def test_high_risk_plan_requires_enforced_limits():
@@ -330,7 +341,12 @@ async def test_plan_critic_is_independent_focused_and_budgeted():
     assert tokens < PLAN_CRITIC_TOKEN_BUDGET
     prompt = complete.call_args.args[1][0]["content"]
     assert "MUST NOT run git diff" in prompt
-    assert "spec_item/spec_task_link" in prompt
+    assert "MUST first call the MCP tool" in prompt
+    assert '`spec_get({"filter":{"project_id":"proj"}})`' in prompt
+    assert "load_tools" not in prompt
+    assert "before evaluating prior_art" in prompt
+    assert "concrete spec_item id" in prompt
+    assert "you may query spec_item/spec_task_link" not in prompt
     assert complete.call_args.kwargs["max_tokens"] <= 4096
 
 

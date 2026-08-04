@@ -29,8 +29,13 @@ nguyên commit range để coordinator giao reviewer khác ngay.
 
 `generate_spec_plan` là research-first gate: chỉ nhận agent CLI và spawn agent
 với `cwd=Project.repo_root`. Prompt bắt agent đọc read-only README/docs/entry
-points rồi lần source liên quan trước khi lập plan. API-backed agent bị từ chối
-vì không thể đọc repository.
+points rồi lần source liên quan trước khi lập plan. Planner đồng thời phải gọi
+MCP native `spec_get(filter.project_id=task.project)` trực tiếp trước khi kết
+luận `prior_art`/`constraints`, theo thứ tự: `conflicts_with` +
+constraint, requirement/design, anchor file/symbol, rồi task link. Critic cũng
+phải tra kho spec trước khi đánh giá `prior_art`; câu trả lời chỉ dựa vào code
+không thay thế được bước này. API-backed agent bị từ chối vì không thể đọc
+repository.
 
 Output strict schema v1.1 bắt buộc có `spec_clarity` (`high|medium|low`) và
 `open_questions` (list, rỗng khi không còn câu hỏi). Nếu còn câu hỏi hoặc clarity
@@ -50,7 +55,9 @@ không coordinator) merge `--no-ff` head của result_ref vào branch đang
 checkout ở repo_root, ghi merge commit vào `task.landed_ref`, xóa các branch
 `ct-run/*` đã merge:
 - Merge sạch (hoặc head đã là ancestor — idempotent) → `done` + `landed_ref`
-  + event `landed`.
+  + event `landed`; diff file của range được đối chiếu `spec_anchor.path` và
+  tự ghi cạnh `spec_task_link(modifies, confidence=derived)` cho các spec cùng
+  project. Retry/backfill không tạo cạnh trùng.
 - Conflict / cây tracked bẩn / detached HEAD → task KHÔNG done: escalation
   `awaiting_approval` với lỗi git + event `landing_failed`; sửa repo xong gọi
   tool `land_task {task_id}` để thử lại (tool này cũng backfill được task done

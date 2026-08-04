@@ -17,7 +17,7 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 |---|---|
 | `create_task` | CHỈ nhận `title`, `project`, `depends_on`. Muốn plan/AC/priority/tags → `update_task` sau. Id tự sinh từ counter. |
 | `update_task` | Patch cho: `raw_input` (replace semantics), `acceptance_criteria`, `plan`, `priority`, `tags`; dependency edits giữ nguyên. Dùng `raw_input` để ghi câu trả lời human trước khi regenerate spec. KHÔNG nhận files/tests/risk/mode. |
-| `generate_spec_plan` | `{task_id, agent_id?, critic_id?}` — planner và critic đều là CLI độc lập. Planner xuất strict v2.0 gồm acceptance, constraints, evidence có nguồn tái lập, prior_art, ruled_out và limits; critic chạy ngay sau đó với trần 50k, không nhận diff, chỉ được reject bằng dẫn chứng. Critic reject → `spec_plan_critic_rejected`; accept nhưng còn câu hỏi/clarity != high → `spec_questions_pending`; đủ rõ → `spec_plan_generated`. |
+| `generate_spec_plan` | `{task_id, agent_id?, critic_id?}` — planner và critic đều là CLI độc lập. Planner bắt buộc tra `spec_get` qua MCP trước khi kết luận prior_art/constraints, ưu tiên conflict+constraint → requirement/design → anchor → task link, rồi xuất strict v2.0 gồm acceptance, constraints, evidence có nguồn tái lập, prior_art, ruled_out và limits. Critic bắt buộc tra spec trước khi chấm prior_art, chạy với trần 50k, không nhận diff, chỉ được reject bằng dẫn chứng. Critic reject → `spec_plan_critic_rejected`; accept nhưng còn câu hỏi/clarity != high → `spec_questions_pending`; đủ rõ → `spec_plan_generated`. |
 | `dispatch_task` | `{task_id, agent_id?}` — đòi status todo + có ít nhất một mục trong `acceptance_criteria ++ constraints` (hoặc legacy_no_ac), chặn khi còn open_questions hoặc plan generated chưa có critic accept hiện hành. Supervised → gate pending. |
 | `request_review` | Chỉ khi awaiting-review VÀ chưa có gate review_order mở (driver thường tạo sẵn — approve cái đó thay vì gọi tool này). Reviewer chỉ định được giữ nguyên; nếu không tồn tại/disabled/trùng executor thì fail kèm 2–3 gợi ý hợp lệ, không âm thầm thay. |
 | `record_verdict` | CHỈ reviewer của review run thành công mới được gọi; coordinator không tự verdict hộ. |
@@ -34,6 +34,7 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 | `save_project_context` | Executor-callable. Args: `task_id` (BẮT BUỘC — scope), `project_id`, `context_md` (≤150 dòng), `rules` (≤5, name/globs/content; globs = list of strings; name unique, ≤100 ký tự). Từ chối cross-project: task phải thuộc project_id. Thay TRỌN BỘ rules cũ. |
 | `get_minimal_context`, `get_impact_radius` | Proxy sang code-review-graph. Cần session scope project/task. MỌI call graph ghi 1 row `tool_metrics` (ok/fail/cache-hit, duration, result_count, bytes_out) — fail vẫn fallback [] không chặn task, nhưng giờ đo được (CTV2-239). |
 | `manage_knowledge` | CRUD knowledge_items qua admin gate. |
+| `spec_get` | MCP native expose trực tiếp; đọc theo ids/filter/task_id và trả item + relation + `spec_anchor` + `spec_task_link` ở cả top-level/per-item. |
 | `compact_context` | Nén context session. |
 
 ## Admin & truy vấn

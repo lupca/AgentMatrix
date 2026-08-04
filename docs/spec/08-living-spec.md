@@ -160,9 +160,12 @@ nhất vì nó âm thầm.
 
 `spec_task_link` là cạnh nhiều-nhiều nối hai nửa project spec và task plan. Một
 spec có thể được nhiều task hiện thực hoặc sửa qua thời gian; một task cũng có
-thể chạm nhiều spec. Cạnh được ghi **thủ công** qua op `"task_link"` của
-`spec_write`; CTV2-1367 không tự gợi ý liên kết và không tự phát hiện xung đột.
-Task land cũng chưa tự đánh dấu spec liên kết là stale trong thay đổi này.
+thể chạm nhiều spec. Cạnh có thể được ghi **thủ công** qua op `"task_link"` của
+`spec_write`; khi task land, hệ còn tự đối chiếu file trong reviewed diff với
+`spec_anchor.path` cùng project/repo để ghi cạnh `modifies` có
+`confidence=derived`, `created_by=system:landing`. Cơ chế này idempotent và
+không dùng LLM; nó ghi lịch sử task-spec, còn việc đánh dấu stale vẫn do commit
+invalidation so hash của symbol.
 Chọn `spec_write` thay vì nhét danh sách vào `impl_design` vì `impl_design` là
 bản hiện tại có thể được ghi lại, trong khi cạnh spec-task là lịch sử độc lập
 cần tồn tại qua nhiều plan. `spec_get(task_id=...)` đọc từ task ra spec;
@@ -432,7 +435,7 @@ còn lọc lúc liệt kê chỉ là tối ưu context.
 
 ```
 spec_search(project, query, kinds?)     → tìm trùng/xung đột TRƯỚC khi tạo task           [chưa làm]
-spec_get(ids[] | task_id | anchor)      → đọc spec_item + quan hệ spec/task                [đã làm — chưa trả neo]
+spec_get(ids[] | task_id | filter)      → đọc item + relation + anchor + task link         [đã làm]
 spec_write(ops[])                       → tạo/sửa/supersede + neo code/task theo lô         [đã làm]
 spec_stale(project)                     → cái gì đang lỗi thời và vì sao                   [đã làm]
 impl_design(action, task_id, ...)       → soạn/đọc/chấm bản thiết kế thực thi              [đã làm]

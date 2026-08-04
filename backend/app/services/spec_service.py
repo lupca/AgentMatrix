@@ -122,6 +122,7 @@ def _item_snapshot(
     item: SpecItem,
     relations: list[dict[str, str]] | None = None,
     task_links: list[dict[str, Any]] | None = None,
+    anchors: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": item.id, "project_id": item.project_id, "kind": item.kind,
@@ -136,6 +137,7 @@ def _item_snapshot(
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         "relations": relations or [],
         "task_links": task_links or [],
+        "anchors": anchors or [],
     }
 
 
@@ -395,7 +397,7 @@ def get_specs(
     if not seed_ids:
         return {
             "action": "spec_fetched", "count": 0, "items": [],
-            "relations": [], "task_links": [],
+            "relations": [], "anchors": [], "task_links": [],
         }
 
     # An id query returns the connected active cluster, not just isolated
@@ -438,6 +440,16 @@ def get_specs(
         key=lambda relation: (relation.from_id, relation.to_id, relation.kind),
     )
     relation_data = [_relation_snapshot(relation) for relation in relations]
+    anchors = (
+        db.query(SpecAnchor)
+        .filter(SpecAnchor.spec_item_id.in_(item_ids))
+        .order_by(
+            SpecAnchor.spec_item_id.asc(), SpecAnchor.path.asc(),
+            SpecAnchor.symbol.asc(), SpecAnchor.relation.asc(),
+        )
+        .all()
+    )
+    anchor_data = [_anchor_snapshot(anchor) for anchor in anchors]
     task_link_query = db.query(SpecTaskLink).filter(
         SpecTaskLink.spec_item_id.in_(item_ids)
     )
@@ -448,19 +460,31 @@ def get_specs(
     ).all()
     task_link_data = [_task_link_snapshot(link) for link in task_links]
     by_item: dict[str, list[dict[str, str]]] = {item_id: [] for item_id in item_ids}
+    anchors_by_item: dict[str, list[dict[str, str]]] = {
+        item_id: [] for item_id in item_ids
+    }
     links_by_item: dict[str, list[dict[str, Any]]] = {item_id: [] for item_id in item_ids}
     for relation in relation_data:
         by_item[relation["from_id"]].append(relation)
         if relation["to_id"] != relation["from_id"]:
             by_item[relation["to_id"]].append(relation)
+    for anchor in anchor_data:
+        anchors_by_item[anchor["spec_item_id"]].append(anchor)
     for link in task_link_data:
         links_by_item[link["spec_item_id"]].append(link)
     return {
         "action": "spec_fetched", "count": len(items),
         "items": [
-            _item_snapshot(item, by_item[item.id], links_by_item[item.id]) for item in items
+            _item_snapshot(
+                item,
+                by_item[item.id],
+                links_by_item[item.id],
+                anchors_by_item[item.id],
+            )
+            for item in items
         ],
         "relations": relation_data,
+        "anchors": anchor_data,
         "task_links": task_link_data,
     }
 

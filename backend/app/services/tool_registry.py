@@ -1002,7 +1002,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             name="spec_get",
             description=(
                 "Read active living specs by ids, filter, or linked task_id. Returns "
-                "spec relations and manual task links in both top-level and per-item views."
+                "spec relations, code anchors, and task links in both top-level "
+                "and per-item views."
             ),
             parameters={
                 "type": "object",
