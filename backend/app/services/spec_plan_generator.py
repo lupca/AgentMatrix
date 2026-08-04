@@ -504,6 +504,39 @@ async def generate_spec_plan(
     return result, flows
 
 
+def spec_plan_result_from_task(task: Task) -> SpecPlanResult:
+    """Rebuild the v2.0 planner contract from the persisted task row.
+
+    Lets the critic step read the plan back from the DB instead of the
+    caller threading the in-memory ``SpecPlanResult`` across two LLM calls.
+    Raises ``PlanCriticError`` if the stored row cannot satisfy the strict
+    contract (e.g. the plan was never written, or evidence is empty).
+    """
+
+    try:
+        return SpecPlanResult.model_validate(
+            {
+                "schema_version": SPEC_PLAN_RESULT_SCHEMA_VERSION,
+                "acceptance_criteria": task.acceptance_criteria or [],
+                "constraints": task.constraints or [],
+                "evidence": task.evidence or [],
+                "prior_art": task.prior_art or [],
+                "ruled_out": task.ruled_out or [],
+                "limits": task.limits,
+                "plan": task.plan or "",
+                "files": task.files or [],
+                "tests": task.tests or [],
+                "risk": task.risk,
+                "spec_clarity": task.spec_clarity,
+                "open_questions": task.open_questions or [],
+            }
+        )
+    except ValidationError as exc:
+        raise PlanCriticError(
+            f"Task {task.id} does not hold a usable plan to critique: {exc}"
+        ) from exc
+
+
 def _estimate_tokens(text: str) -> int:
     """Conservative provider-independent token estimate for the hard critic cap."""
 

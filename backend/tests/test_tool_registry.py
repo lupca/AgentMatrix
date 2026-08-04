@@ -26,7 +26,7 @@ def db_session():
 
 
 def test_registry_has_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 33
+    assert len(TOOL_REGISTRY) == 34
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
@@ -46,6 +46,7 @@ def test_registry_has_tools_with_unique_names():
         'suggest_agents',
         'request_review',
         'generate_spec_plan',
+        'critique_spec_plan',
         'compact_context',
         'manage_project',
         'manage_agent',
@@ -124,6 +125,7 @@ def test_get_group_tool_definitions_returns_deferred_tools_by_group():
         'update_task',
         'request_review',
         'generate_spec_plan',
+        'critique_spec_plan',
         'save_project_context',
         'land_task',
     }

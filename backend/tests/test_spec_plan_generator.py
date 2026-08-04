@@ -14,6 +14,7 @@ from app.services.spec_plan_generator import (
     SpecPlanGenerationError,
     criticize_spec_plan,
     generate_spec_plan,
+    spec_plan_result_from_task,
 )
 
 
@@ -605,3 +606,46 @@ def test_build_prompt_truncates_oversized_task_plan():
     prompt = _build_prompt(task, [])
     assert "truncated to fit 25KB cap" in prompt
     assert len(prompt) < len(oversized) + 5_000
+
+
+def test_spec_plan_result_from_task_round_trips_a_written_plan():
+    task = Task(
+        id="SPEC-RT-1",
+        project="proj",
+        title="Build the widget",
+        acceptance_criteria=["Endpoint returns 200"],
+        constraints=["Do not add a migration"],
+        evidence=[{
+            "fact": "Relevant module exists",
+            "source_type": "file",
+            "source": "backend/app/example.py:1",
+            "result": "module exists",
+        }],
+        prior_art=["Prior task did X"],
+        ruled_out=[{"approach": "Rewrite everything", "reason": "too risky"}],
+        limits=None,
+        plan="1. Add route. 2. Add tests.",
+        files=["backend/app/api/foo.py"],
+        tests=["backend/tests/test_foo.py"],
+        risk="low",
+        spec_clarity="high",
+        open_questions=[],
+    )
+
+    result = spec_plan_result_from_task(task)
+
+    assert result.schema_version == SPEC_PLAN_RESULT_SCHEMA_VERSION
+    assert result.acceptance_criteria == ["Endpoint returns 200"]
+    assert result.constraints == ["Do not add a migration"]
+    assert result.evidence[0].fact == "Relevant module exists"
+    assert result.plan == "1. Add route. 2. Add tests."
+    assert result.files == ["backend/app/api/foo.py"]
+    assert result.risk == "low"
+    assert result.spec_clarity == "high"
+
+
+def test_spec_plan_result_from_task_errors_clearly_on_unusable_row():
+    task = Task(id="SPEC-RT-2", project="proj", title="No plan written yet")
+
+    with pytest.raises(PlanCriticError):
+        spec_plan_result_from_task(task)

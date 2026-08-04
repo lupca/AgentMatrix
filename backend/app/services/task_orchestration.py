@@ -369,11 +369,11 @@ class TaskOrchestrationService:
         spec_clarity: str,
         open_questions: list[str],
         planner: str,
-        critic: str,
-        critic_verdict: str,
-        critic_findings: list[dict[str, Any]],
-        critic_summary: str,
-        critic_tokens: int,
+        critic: str | None = None,
+        critic_verdict: str | None = None,
+        critic_findings: list[dict[str, Any]] | None = None,
+        critic_summary: str | None = None,
+        critic_tokens: int | None = None,
     ) -> Task:
         return self.state_machine.write_spec_plan(
             task_id=task_id,
@@ -397,6 +397,27 @@ class TaskOrchestrationService:
             critic_findings=critic_findings,
             critic_summary=critic_summary,
             critic_tokens=critic_tokens,
+        )
+
+    def record_plan_critic_verdict(
+        self,
+        *,
+        task_id: str,
+        actor: str,
+        critic: str,
+        verdict: str,
+        findings: list[dict[str, Any]],
+        summary: str,
+        tokens: int,
+    ) -> Task:
+        return self.state_machine.record_plan_critic_verdict(
+            task_id=task_id,
+            actor=actor,
+            critic=critic,
+            verdict=verdict,
+            findings=findings,
+            summary=summary,
+            tokens=tokens,
         )
 
     def reopen_for_replan(

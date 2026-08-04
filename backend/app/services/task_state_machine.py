@@ -1788,11 +1788,11 @@ class TaskStateMachine:
         spec_clarity: str,
         open_questions: list[str],
         planner: str,
-        critic: str,
-        critic_verdict: str,
-        critic_findings: list[dict[str, Any]],
-        critic_summary: str,
-        critic_tokens: int,
+        critic: str | None = None,
+        critic_verdict: str | None = None,
+        critic_findings: list[dict[str, Any]] | None = None,
+        critic_summary: str | None = None,
+        critic_tokens: int | None = None,
     ) -> Task:
         task = self.validator.task(task_id)
         if not actor or not actor.strip():
@@ -1808,16 +1808,6 @@ class TaskStateMachine:
             raise PrerequisiteError("evidence must not be empty")
         if risk == "high" and not limits:
             raise PrerequisiteError("limits are required when risk is high")
-        if critic_verdict not in {"accept", "reject"}:
-            raise PrerequisiteError("critic_verdict must be accept or reject")
-        if critic_verdict == "reject" and not critic_findings:
-            raise PrerequisiteError("critic rejection requires evidenced findings")
-        for finding in critic_findings:
-            if not isinstance(finding, dict) or not finding.get("evidence"):
-                raise PrerequisiteError(
-                    "every critic rejection finding requires reproducible evidence"
-                )
-        self.validator.require_independent(planner, critic)
 
         task.acceptance_criteria = acceptance_criteria
         task.constraints = constraints
@@ -1826,9 +1816,9 @@ class TaskStateMachine:
         task.ruled_out = ruled_out
         task.limits = limits
         task.planner = planner
-        task.plan_critic = critic
-        task.plan_critic_status = critic_verdict
-        task.plan_critic_findings = critic_findings
+        task.plan_critic = None
+        task.plan_critic_status = None
+        task.plan_critic_findings = []
         task.plan = plan
         task.files = files
         task.tests = tests
@@ -1839,13 +1829,7 @@ class TaskStateMachine:
             task.mode = self.validator.mode_for_task(task, risk=risk)
         task.flows = flows
         task.current_gate = "plan"
-        if critic_verdict == "reject":
-            task.awaiting_approval = True
-            task.approval_prompt = (
-                f"Plan critic {critic} rejected this plan: {critic_summary}. "
-                "Correct the evidenced findings and run generate_spec_plan again."
-            )
-        elif open_questions or spec_clarity != "high":
+        if open_questions or spec_clarity != "high":
             questions = "\n".join(
                 f"{index}) {question}" for index, question in enumerate(open_questions, 1)
             )
@@ -1890,42 +1874,6 @@ class TaskStateMachine:
             executor=planner,
         )
         self.audit(task, record)
-        critic_payload = {
-            "planner": planner,
-            "critic": critic,
-            "verdict": critic_verdict,
-            "findings": critic_findings,
-            "summary": critic_summary,
-            # Read the real budget instead of restating it. This was hardcoded
-            # 50_000 and silently went stale the moment PLAN_CRITIC_TOKEN_BUDGET
-            # was raised to 150_000 — and because GateRecord is append-only, a
-            # wrong number here is written permanently into the ledger and
-            # cannot be corrected later. Imported locally: spec_plan_generator
-            # does not import this module, but keeping it lazy avoids creating
-            # that edge for future changes.
-            "token_budget": _plan_critic_token_budget(),
-            "tokens_used": critic_tokens,
-            "diff_provided": False,
-        }
-        critic_record = self.ledger_record(
-            task=task,
-            gate_type="plan_critic",
-            status="approved" if critic_verdict == "accept" else "rejected",
-            actor=critic,
-            idempotency_key=str(uuid.uuid4()),
-            input_hash=TaskValidator.input_hash(critic_payload),
-            payload=critic_payload,
-            output_payload={
-                "verdict": critic_verdict,
-                "findings": critic_findings,
-                "summary": critic_summary,
-                "tokens_used": critic_tokens,
-            },
-            error_message=critic_summary if critic_verdict == "reject" else None,
-            executor=planner,
-            reviewer=critic,
-        )
-        self.audit(task, critic_record)
         self.db.add(
             AuditLog(
                 task_id=task.id,
@@ -1940,9 +1888,114 @@ class TaskStateMachine:
                     "risk": risk,
                     "spec_clarity": spec_clarity,
                     "open_question_count": len(open_questions),
+                },
+            )
+        )
+        self.db.commit()
+        self.db.refresh(task)
+
+        if critic is not None or critic_verdict is not None:
+            return self.record_plan_critic_verdict(
+                task_id=task_id,
+                actor=actor,
+                critic=critic,
+                verdict=critic_verdict,
+                findings=critic_findings or [],
+                summary=critic_summary or "",
+                tokens=critic_tokens or 0,
+            )
+        return task
+
+    def record_plan_critic_verdict(
+        self,
+        *,
+        task_id: str,
+        actor: str,
+        critic: str,
+        verdict: str,
+        findings: list[dict[str, Any]],
+        summary: str,
+        tokens: int,
+    ) -> Task:
+        """Run the critic step against whatever plan is currently on the task.
+
+        Reads ``task.planner`` from the DB rather than accepting it as a
+        parameter, so the caller cannot silently attribute a verdict to the
+        wrong planner. Appends exactly one ``plan_critic`` GateRecord per
+        call — re-critiquing (e.g. after a rejected round) appends another,
+        it never rewrites the previous one.
+        """
+
+        task = self.validator.task(task_id)
+        if not actor or not actor.strip():
+            raise PrerequisiteError("actor is required")
+        if verdict not in {"accept", "reject"}:
+            raise PrerequisiteError("critic_verdict must be accept or reject")
+        if verdict == "reject" and not findings:
+            raise PrerequisiteError("critic rejection requires evidenced findings")
+        for finding in findings:
+            if not isinstance(finding, dict) or not finding.get("evidence"):
+                raise PrerequisiteError(
+                    "every critic rejection finding requires reproducible evidence"
+                )
+        self.validator.require_independent(task.planner, critic)
+
+        task.plan_critic = critic
+        task.plan_critic_status = verdict
+        task.plan_critic_findings = findings
+        if verdict == "reject":
+            task.awaiting_approval = True
+            task.approval_prompt = (
+                f"Plan critic {critic} rejected this plan: {summary}. "
+                "Correct the evidenced findings and run generate_spec_plan again."
+            )
+        task.updated_at = datetime.now(timezone.utc)
+        self.cas_status(task, task.status)
+        critic_payload = {
+            "planner": task.planner,
+            "critic": critic,
+            "verdict": verdict,
+            "findings": findings,
+            "summary": summary,
+            # Read the real budget instead of restating it. This was hardcoded
+            # 50_000 and silently went stale the moment PLAN_CRITIC_TOKEN_BUDGET
+            # was raised to 150_000 — and because GateRecord is append-only, a
+            # wrong number here is written permanently into the ledger and
+            # cannot be corrected later. Imported locally: spec_plan_generator
+            # does not import this module, but keeping it lazy avoids creating
+            # that edge for future changes.
+            "token_budget": _plan_critic_token_budget(),
+            "tokens_used": tokens,
+            "diff_provided": False,
+        }
+        critic_record = self.ledger_record(
+            task=task,
+            gate_type="plan_critic",
+            status="approved" if verdict == "accept" else "rejected",
+            actor=critic,
+            idempotency_key=str(uuid.uuid4()),
+            input_hash=TaskValidator.input_hash(critic_payload),
+            payload=critic_payload,
+            output_payload={
+                "verdict": verdict,
+                "findings": findings,
+                "summary": summary,
+                "tokens_used": tokens,
+            },
+            error_message=summary if verdict == "reject" else None,
+            executor=task.planner,
+            reviewer=critic,
+        )
+        self.audit(task, critic_record)
+        self.db.add(
+            AuditLog(
+                task_id=task.id,
+                action="plan_critic_recorded",
+                actor=actor,
+                details={
                     "critic": critic,
-                    "critic_verdict": critic_verdict,
-                    "critic_tokens": critic_tokens,
+                    "critic_verdict": verdict,
+                    "critic_tokens": tokens,
                 },
             )
         )

@@ -1957,6 +1957,209 @@ async def test_generate_spec_plan_missing_task_returns_error(db_session):
 
 
 @pytest.mark.asyncio
+async def test_generate_spec_plan_success_response_keys_unchanged(db_session):
+    """The external contract of generate_spec_plan (byte-identical result
+    keys) must not change even though the internals now go plan -> DB ->
+    critic instead of one in-memory hop."""
+    from app.db.models import Agent, Project, Task
+    from app.schemas.task import PlanCriticResult, SpecPlanResult
+
+    db_session.add(Project(id="proj-keys", name="Keys Project", repo_root="/tmp"))
+    db_session.add(
+        Agent(id="@keys-agent", name="Keys Agent", role="coordinator", cli="claude", capabilities=["coordinator"])
+    )
+    db_session.add(
+        Agent(id="@keys-critic", name="Keys Critic", role="reviewer", cli="codex", capabilities=["review"])
+    )
+    db_session.add(
+        Task(id="TASK-KEYS", project="proj-keys", title="Needs a spec", status="todo", acceptance_criteria=[])
+    )
+    db_session.commit()
+
+    fake_result = SpecPlanResult(
+        schema_version="2.0",
+        acceptance_criteria=["Does the thing"],
+        constraints=[],
+        evidence=[{
+            "fact": "Thing module is absent", "source_type": "command",
+            "source": "test ! -e backend/app/thing.py", "result": "exit 0",
+        }],
+        prior_art=[],
+        ruled_out=[],
+        limits=None,
+        plan="Do the thing.",
+        files=["backend/app/thing.py"],
+        tests=["backend/tests/test_thing.py"],
+        risk="low",
+        spec_clarity="high",
+        open_questions=[],
+    )
+
+    with patch(
+        "app.services.spec_plan_generator.generate_spec_plan",
+        new=AsyncMock(return_value=(fake_result, ["thing-flow"])),
+    ), patch(
+        "app.services.spec_plan_generator.criticize_spec_plan",
+        new=AsyncMock(return_value=(
+            PlanCriticResult(schema_version="1.0", verdict="accept", findings=[], summary="Verified"),
+            1234,
+        )),
+    ):
+        result = await CommandRouter(db_session).execute(
+            "generate_spec_plan", "TASK-KEYS @keys-agent @keys-critic", "session-1"
+        )
+
+    assert set(result.keys()) == {
+        "action", "task_id", "acceptance_criteria", "constraints", "evidence",
+        "prior_art", "ruled_out", "limits", "plan", "files", "tests", "risk",
+        "flows", "repo_root", "spec_clarity", "open_questions",
+        "awaiting_approval", "approval_prompt", "planner", "plan_critic",
+        "plan_critic_status", "plan_critic_findings",
+    }
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_critic_failure_persists_plan(db_session):
+    """CTV2-1378: a critic failure must not discard the plan the planner
+    just finished. Plan/evidence/planner stay on the task, only the critic
+    verdict is missing (plan_critic_status stays NULL) and a retry can go
+    through critique_spec_plan instead of re-running the whole planner."""
+    from app.db.models import Agent, Project, Task
+    from app.schemas.task import SpecPlanResult
+    from app.services.spec_plan_generator import PlanCriticError
+
+    db_session.add(Project(id="proj-critic-fail", name="Critic Fail Project", repo_root="/tmp"))
+    db_session.add(
+        Agent(id="@cf-agent", name="CF Agent", role="coordinator", cli="claude", capabilities=["coordinator"])
+    )
+    db_session.add(
+        Agent(id="@cf-critic", name="CF Critic", role="reviewer", cli="codex", capabilities=["review"])
+    )
+    db_session.add(
+        Task(id="TASK-CRITIC-FAIL", project="proj-critic-fail", title="Needs a spec", status="todo", acceptance_criteria=[])
+    )
+    db_session.commit()
+
+    fake_result = SpecPlanResult(
+        schema_version="2.0",
+        acceptance_criteria=["Does the thing"],
+        constraints=["Do not add a migration"],
+        evidence=[{
+            "fact": "Thing module is absent", "source_type": "command",
+            "source": "test ! -e backend/app/thing.py", "result": "exit 0",
+        }],
+        prior_art=[],
+        ruled_out=[],
+        limits=None,
+        plan="Do the thing.",
+        files=["backend/app/thing.py"],
+        tests=["backend/tests/test_thing.py"],
+        risk="low",
+        spec_clarity="high",
+        open_questions=[],
+    )
+
+    with patch(
+        "app.services.spec_plan_generator.generate_spec_plan",
+        new=AsyncMock(return_value=(fake_result, ["thing-flow"])),
+    ), patch(
+        "app.services.spec_plan_generator.criticize_spec_plan",
+        new=AsyncMock(side_effect=PlanCriticError("critic agent unreachable")),
+    ):
+        result = await CommandRouter(db_session).execute(
+            "generate_spec_plan", "TASK-CRITIC-FAIL @cf-agent @cf-critic", "session-1"
+        )
+
+    assert "error" in result
+    assert result.get("plan_persisted") is True
+
+    task = db_session.get(Task, "TASK-CRITIC-FAIL")
+    assert task.plan == "Do the thing."
+    assert task.evidence
+    assert task.acceptance_criteria == ["Does the thing"]
+    assert task.constraints == ["Do not add a migration"]
+    assert task.planner == "@cf-agent"
+    assert task.plan_critic_status is None
+
+
+@pytest.mark.asyncio
+async def test_critique_spec_plan_standalone_flips_verdict_without_planner(db_session):
+    """critique_spec_plan alone must never call generate_spec_plan (patched
+    to raise loudly if it is), and it flips a NULL verdict to accept."""
+    from app.db.models import Agent, Project, Task
+    from app.schemas.task import PlanCriticResult
+
+    db_session.add(Project(id="proj-critique", name="Critique Project", repo_root="/tmp"))
+    db_session.add(
+        Agent(id="@cq-planner", name="CQ Planner", role="coordinator", cli="claude", capabilities=["coordinator"])
+    )
+    db_session.add(
+        Agent(id="@cq-critic", name="CQ Critic", role="reviewer", cli="codex", capabilities=["review"])
+    )
+    db_session.add(
+        Task(
+            id="TASK-CRITIQUE",
+            project="proj-critique",
+            title="Already planned",
+            status="todo",
+            acceptance_criteria=["Does the thing"],
+            constraints=[],
+            evidence=[{
+                "fact": "Thing module is absent", "source_type": "command",
+                "source": "test ! -e backend/app/thing.py", "result": "exit 0",
+            }],
+            prior_art=[],
+            ruled_out=[],
+            plan="Do the thing.",
+            files=["backend/app/thing.py"],
+            tests=["backend/tests/test_thing.py"],
+            risk="low",
+            spec_clarity="high",
+            open_questions=[],
+            planner="@cq-planner",
+            plan_critic_status=None,
+        )
+    )
+    db_session.commit()
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("critique_spec_plan must not invoke generate_spec_plan")
+
+    with patch(
+        "app.services.spec_plan_generator.generate_spec_plan",
+        new=AsyncMock(side_effect=_fail_if_called),
+    ), patch(
+        "app.services.spec_plan_generator.criticize_spec_plan",
+        new=AsyncMock(return_value=(
+            PlanCriticResult(schema_version="1.0", verdict="accept", findings=[], summary="Verified"),
+            777,
+        )),
+    ):
+        result = await CommandRouter(db_session).execute_tool(
+            "critique_spec_plan",
+            {"task_id": "TASK-CRITIQUE", "critic_id": "@cq-critic"},
+            "session-critique",
+        )
+
+    assert result["action"] == "spec_plan_critiqued"
+    assert result["plan_critic_status"] == "accept"
+    assert result["plan_critic"] == "@cq-critic"
+
+    task = db_session.get(Task, "TASK-CRITIQUE")
+    assert task.plan_critic_status == "accept"
+    assert task.plan_critic == "@cq-critic"
+
+    from app.db.models import GateRecord
+
+    records = (
+        db_session.query(GateRecord)
+        .filter(GateRecord.task_id == "TASK-CRITIQUE", GateRecord.gate_type == "plan_critic")
+        .all()
+    )
+    assert len(records) == 1
+
+
+@pytest.mark.asyncio
 async def test_record_verdict_loads_from_review_file(db_session, tmp_path):
     """Test record_verdict loading ac_results from review file."""
     import json
