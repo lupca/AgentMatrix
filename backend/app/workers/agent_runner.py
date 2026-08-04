@@ -45,6 +45,7 @@ from app.services.process_manager import (
     WorktreeManager,
     WorktreeUnsupportedError,
 )
+from app.services.review_criteria import merged_review_criteria
 from app.services.task_event_service import TaskEventService, emit_task_event
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.services.tool_metrics import record_tool_metric
@@ -369,13 +370,20 @@ def _advance_task_step(
 
 
 def _advance_todo(db: Session, service: TaskOrchestrationService, task: Task) -> str:
-    if not (task.acceptance_criteria or []) and not task.legacy_no_ac:
+    if not merged_review_criteria(task.acceptance_criteria, task.constraints) and not task.legacy_no_ac:
         _escalate(
             db,
             task,
-            "todo task has no acceptance_criteria; refusing to dispatch (fail-closed)",
+            "todo task has no acceptance criteria or constraints; refusing to dispatch (fail-closed)",
         )
         return "escalated_missing_ac"
+    if task.planner and task.plan_critic_status != "accept":
+        _escalate(
+            db,
+            task,
+            "generated plan has no current independent critic acceptance; refusing to dispatch",
+        )
+        return "escalated_critic_rejected"
 
     brake = service.check_brakes(task, for_spawn=False, audit=True)
     if not brake.allowed:
@@ -520,6 +528,9 @@ def _advance_changes_requested(
 ) -> str:
     round_ = service.changes_round_count(task.id)
     max_rounds = service.resolve_autonomy(task.project).auto_max_rounds
+    plan_limit = (task.limits or {}).get("max_execution_rounds")
+    if isinstance(plan_limit, int) and plan_limit > 0:
+        max_rounds = min(max_rounds, plan_limit)
     if round_ >= max_rounds:
         _escalate(
             db,

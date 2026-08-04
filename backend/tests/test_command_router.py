@@ -155,6 +155,43 @@ async def test_get_stats_distinguishes_measured_zero_from_unmeasured_cli_cost(db
 
 
 @pytest.mark.asyncio
+async def test_get_stats_reports_plan_critic_return_rate_and_extra_rounds(db_session):
+    from app.db.models import GateRecord, Project, Task, TaskRound
+
+    project = Project(id="critic-stats", name="Critic Stats")
+    before = Task(id="CRITIC-BEFORE", project=project.id, title="Historical task")
+    after = Task(id="CRITIC-AFTER", project=project.id, title="Critic task")
+    db_session.add_all([project, before, after])
+    db_session.flush()
+    db_session.add_all([
+        TaskRound(task_id=before.id, round_no=1, status="done"),
+        TaskRound(task_id=before.id, round_no=2, status="done"),
+        TaskRound(task_id=after.id, round_no=1, status="done"),
+        GateRecord(
+            task_id=after.id, gate_type="plan_critic", status="rejected",
+            actor="@critic", mode="bypass", idempotency_key="critic-reject",
+            input_hash="a" * 64,
+        ),
+        GateRecord(
+            task_id=after.id, gate_type="plan_critic", status="approved",
+            actor="@critic", mode="bypass", idempotency_key="critic-accept",
+            input_hash="b" * 64,
+        ),
+    ])
+    db_session.commit()
+
+    report = (await CommandRouter(db_session).execute_tool(
+        "get_stats", {}, "stats-session"
+    ))["plan_critic"]
+
+    assert report["plans_criticized"] == 2
+    assert report["plans_returned"] == 1
+    assert report["return_rate"] == 0.5
+    assert report["before_critic"]["extra_rounds"] == 1
+    assert report["after_critic"]["extra_rounds"] == 0
+
+
+@pytest.mark.asyncio
 async def test_create_task_uses_explicit_project_and_prefix(db_session):
     """CTV2-092 AC: no more hardcoded project='default'; explicit --project
     is used, and the ID is derived from Project.task_prefix + a counter."""
@@ -1554,6 +1591,15 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
         )
     )
     db_session.add(
+        Agent(
+            id="@plan-critic",
+            name="Plan Critic",
+            role="reviewer",
+            cli="codex",
+            capabilities=["review"],
+        )
+    )
+    db_session.add(
         Task(
             id="TASK-SPEC",
             project="proj-spec",
@@ -1569,8 +1615,16 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     db_session.commit()
 
     fake_result = SpecPlanResult(
-        schema_version="1.1",
+        schema_version="2.0",
         acceptance_criteria=["Does the thing"],
+        constraints=["Do not add a migration"],
+        evidence=[{
+            "fact": "Thing module is absent", "source_type": "command",
+            "source": "test ! -e backend/app/thing.py", "result": "exit 0",
+        }],
+        prior_art=[],
+        ruled_out=[],
+        limits=None,
         plan="Do the thing.",
         files=["backend/app/thing.py"],
         tests=["backend/tests/test_thing.py"],
@@ -1582,9 +1636,17 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     with patch(
         "app.services.spec_plan_generator.generate_spec_plan",
         new=AsyncMock(return_value=(fake_result, ["thing-flow"])),
+    ), patch(
+        "app.services.spec_plan_generator.criticize_spec_plan",
+        new=AsyncMock(return_value=(
+            __import__("app.schemas.task", fromlist=["PlanCriticResult"]).PlanCriticResult(
+                schema_version="1.0", verdict="accept", findings=[], summary="Verified"
+            ),
+            1234,
+        )),
     ), patch("app.services.tool_metrics.record_tool_metric") as mock_metric:
         result = await CommandRouter(db_session).execute(
-            "generate_spec_plan", "TASK-SPEC @spec-agent", "session-1"
+            "generate_spec_plan", "TASK-SPEC @spec-agent @plan-critic", "session-1"
         )
 
     assert result["action"] == "spec_plan_generated"
@@ -1598,7 +1660,7 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     assert task.spec_clarity == "high"
     assert task.awaiting_approval is False
     assert task.approval_prompt is None
-    mock_metric.assert_called_once_with(
+    mock_metric.assert_any_call(
         tool="spec_plan",
         source="spec_plan_generator",
         ok=True,
@@ -1606,6 +1668,7 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
         result_count=0,
         payload={"spec_clarity": "high", "task_id": "TASK-SPEC"},
     )
+    assert mock_metric.call_count == 2
 
 
 @pytest.mark.asyncio
@@ -1624,6 +1687,15 @@ async def test_generate_spec_plan_returns_questions_and_escalates(db_session):
         )
     )
     db_session.add(
+        Agent(
+            id="@question-critic",
+            name="Question Critic",
+            role="reviewer",
+            cli="claude",
+            capabilities=["review"],
+        )
+    )
+    db_session.add(
         Task(
             id="TASK-QUESTIONS",
             project="proj-questions",
@@ -1635,8 +1707,16 @@ async def test_generate_spec_plan_returns_questions_and_escalates(db_session):
     db_session.commit()
 
     fake_result = SpecPlanResult(
-        schema_version="1.1",
+        schema_version="2.0",
         acceptance_criteria=["Authentication behavior is covered by tests"],
+        constraints=[],
+        evidence=[{
+            "fact": "Auth module exists", "source_type": "file",
+            "source": "backend/app/auth.py:1", "result": "auth module",
+        }],
+        prior_art=[],
+        ruled_out=[],
+        limits=None,
         plan="Confirm auth convention, then implement.",
         files=["backend/app/auth.py"],
         tests=["backend/tests/test_auth.py"],
@@ -1651,10 +1731,22 @@ async def test_generate_spec_plan_returns_questions_and_escalates(db_session):
     with patch(
         "app.services.spec_plan_generator.generate_spec_plan",
         new=AsyncMock(return_value=(fake_result, [])),
+    ), patch(
+        "app.services.spec_plan_generator.criticize_spec_plan",
+        new=AsyncMock(return_value=(
+            __import__("app.schemas.task", fromlist=["PlanCriticResult"]).PlanCriticResult(
+                schema_version="1.0", verdict="accept", findings=[], summary="Verified"
+            ),
+            900,
+        )),
     ):
         result = await CommandRouter(db_session).execute_tool(
             "generate_spec_plan",
-            {"task_id": "TASK-QUESTIONS", "agent_id": "@question-planner"},
+            {
+                "task_id": "TASK-QUESTIONS",
+                "agent_id": "@question-planner",
+                "critic_id": "@question-critic",
+            },
             "session-questions",
         )
 
@@ -1714,8 +1806,16 @@ async def test_generate_spec_plan_auto_suggests_agent_when_not_provided(db_sessi
     db_session.commit()
 
     fake_result = SpecPlanResult(
-        schema_version="1.1",
+        schema_version="2.0",
         acceptance_criteria=["Does the thing"],
+        constraints=[],
+        evidence=[{
+            "fact": "Task input inspected", "source_type": "query",
+            "source": "get task TASK-SPEC-AUTO", "result": "task exists",
+        }],
+        prior_art=[],
+        ruled_out=[],
+        limits=None,
         plan="Do the thing.",
         files=[],
         tests=[],
@@ -1727,7 +1827,15 @@ async def test_generate_spec_plan_auto_suggests_agent_when_not_provided(db_sessi
     with patch(
         "app.services.spec_plan_generator.generate_spec_plan",
         new=AsyncMock(return_value=(fake_result, [])),
-    ) as mock_generate:
+    ) as mock_generate, patch(
+        "app.services.spec_plan_generator.criticize_spec_plan",
+        new=AsyncMock(return_value=(
+            __import__("app.schemas.task", fromlist=["PlanCriticResult"]).PlanCriticResult(
+                schema_version="1.0", verdict="accept", findings=[], summary="Verified"
+            ),
+            800,
+        )),
+    ):
         result = await CommandRouter(db_session).execute(
             "generate_spec_plan", "TASK-SPEC-AUTO", "session-1"
         )

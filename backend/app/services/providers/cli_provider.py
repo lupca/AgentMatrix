@@ -44,7 +44,9 @@ class CLIProvider:
         temperature: float = 0.7,
         tools: list[dict[str, Any]] | None = None,
     ) -> ProviderResponse:
-        del max_tokens, temperature, tools
+        del temperature, tools
+        if max_tokens <= 0:
+            raise ValueError("max_tokens must be greater than zero")
         route = route_model(model, provider)
         selected_cli = cli or route.cli
         prompt = self.format_prompt(messages)
@@ -62,14 +64,26 @@ class CLIProvider:
 
         async def chunks() -> AsyncIterator[str]:
             output_tokens = 0
+            # Subscription CLIs do not expose a portable max-token flag. Keep
+            # LLMService's contract meaningful by bounding forwarded output;
+            # breaking the async iterator closes CLIDispatcher.spawn, whose
+            # finally block terminates the underlying process.
+            remaining_chars = max_tokens * 4
             spawn_kwargs: dict[str, Any] = {"effort": effort}
             if cwd is not None:
                 spawn_kwargs["cwd"] = cwd
             async for chunk in self.dispatcher.spawn(
                 selected_cli, model, prompt, **spawn_kwargs
             ):
-                output_tokens += _estimate_tokens(chunk)
-                yield chunk
+                if remaining_chars <= 0:
+                    break
+                bounded = chunk[:remaining_chars]
+                remaining_chars -= len(bounded)
+                output_tokens += _estimate_tokens(bounded)
+                if bounded:
+                    yield bounded
+                if len(bounded) < len(chunk) or remaining_chars <= 0:
+                    break
             response.usage = UsageCounts(
                 input_tokens=response.usage.input_tokens,
                 output_tokens=max(0, output_tokens - 1),

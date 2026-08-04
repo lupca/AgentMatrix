@@ -42,6 +42,7 @@ from app.services.process_manager import (
     WorktreeManager,
     WorktreeUnsupportedError,
 )
+from app.services.review_criteria import merged_review_criteria
 from app.services.outbox import record_commit_event
 from app.services.task_event_service import emit_task_event
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
@@ -682,18 +683,11 @@ def _record_review_result_load_failure(
     return ProcessStatus.FAILED.value
 
 
-def _normalize_acceptance_criteria(ac: list | str | None) -> list[str]:
-    """Convert acceptance_criteria to a list, handling string format."""
-    if ac is None:
-        return []
-    if isinstance(ac, list):
-        return ac
-    # String format: "AC1: ...\nAC2: ..." - split by newline
-    return [line.strip() for line in ac.split("\n") if line.strip()]
-
-
 def _prepare_review_artifact(
-    repo_root: str, task_id: str, acceptance_criteria: list | str | None = None
+    repo_root: str,
+    task_id: str,
+    acceptance_criteria: list | str | None = None,
+    constraints: list | str | None = None,
 ) -> None:
     path = review_result_path(repo_root, task_id)
     directory = os.path.dirname(path)
@@ -708,7 +702,7 @@ def _prepare_review_artifact(
         pass
 
     # Generate template with correct AC count for reviewer to fill
-    ac_list = _normalize_acceptance_criteria(acceptance_criteria)
+    ac_list = merged_review_criteria(acceptance_criteria, constraints)
     if ac_list:
         template = {
             "schema_version": "1.0",
@@ -990,7 +984,9 @@ def execute_agent_run(
             is_review_run or _is_review_task(task)
         )
         if is_review_task:
-            _prepare_review_artifact(repo_root, task_id, task.acceptance_criteria)
+            _prepare_review_artifact(
+                repo_root, task_id, task.acceptance_criteria, task.constraints
+            )
         base_ref = _run_base_ref(run.result_ref) or _parse_result_ref(repo_root)
         if base_ref is None:
             run.status = "failed"
@@ -1290,6 +1286,7 @@ def execute_agent_run(
                         repo_root,
                         task_id,
                         task.acceptance_criteria or [],
+                        task.constraints or [],
                     )
                 except ReviewResultLoadError as exc:
                     effective_status = _record_review_result_load_failure(
@@ -1307,6 +1304,7 @@ def execute_agent_run(
                     repo_root,
                     task_id,
                     task.acceptance_criteria or [],
+                    task.constraints or [],
                 )
                 run.result_ref = os.path.relpath(
                     review_result_path(repo_root, review_result.task_id), repo_root

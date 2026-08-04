@@ -30,6 +30,7 @@ from app.db.models import (
     Task,
     TaskDependency,
 )
+from app.services.review_criteria import merged_review_criteria
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +220,18 @@ class TaskValidator:
         """Evaluate brakes in a stable order and return debugging context."""
         cost = self._task_cost(task)
         tokens = self._task_tokens(task)
+        plan_limits = task.limits if isinstance(task.limits, dict) else {}
+        token_limit = self.max_tokens_per_task
+        plan_token_limit = plan_limits.get("max_tokens")
+        if isinstance(plan_token_limit, int) and plan_token_limit > 0:
+            token_limit = min(token_limit, plan_token_limit)
+        cost_limit = self.max_cost_usd_per_task
+        plan_cost_limit = plan_limits.get("max_cost_usd")
+        if plan_cost_limit is not None:
+            try:
+                cost_limit = min(cost_limit, max(Decimal("0"), Decimal(str(plan_cost_limit))))
+            except (ValueError, TypeError):
+                pass
         active_query = self.db.query(AgentRun.id).filter(AgentRun.status.in_(["queued", "running"]))
         if run_id:
             active_query = active_query.filter(AgentRun.id != run_id)
@@ -229,9 +242,9 @@ class TaskValidator:
             "active_runs": active,
             "max_concurrent": self.max_concurrent_runs,
             "task_cost": str(cost),
-            "cost_limit": str(self.max_cost_usd_per_task),
+            "cost_limit": str(cost_limit),
             "task_tokens": tokens,
-            "token_limit": self.max_tokens_per_task,
+            "token_limit": token_limit,
             "agent_id": agent_id,
             "max_active_seconds_per_run": self.max_active_seconds_per_run,
             "max_tool_calls_per_run": self.max_tool_calls_per_run,
@@ -249,11 +262,11 @@ class TaskValidator:
             decision = BrakeDecision(False, f"Waiting for dependencies: {dep_ids_str}", "dependency_pending", queue=True, observations=observations)
         elif not self.autonomy_enabled:
             decision = BrakeDecision(False, "Autonomy is disabled", "autonomy_disabled", observations=observations)
-        elif cost >= self.max_cost_usd_per_task:
-            reason = f"Task cost limit reached: ${cost:.8f} >= ${self.max_cost_usd_per_task:.8f}"
+        elif cost >= cost_limit:
+            reason = f"Task cost limit reached: ${cost:.8f} >= ${cost_limit:.8f}"
             decision = BrakeDecision(False, reason, "cost_limit", cost_usd=cost, observations=observations)
-        elif tokens >= self.max_tokens_per_task:
-            reason = f"Task token limit reached: {tokens:,} >= {self.max_tokens_per_task:,} tokens"
+        elif tokens >= token_limit:
+            reason = f"Task token limit reached: {tokens:,} >= {token_limit:,} tokens"
             decision = BrakeDecision(False, reason, "token_limit", cost_usd=cost, observations=observations)
         else:
             agent = self.db.get(Agent, agent_id) if agent_id else None
@@ -452,10 +465,13 @@ class TaskValidator:
         if not task.result_ref or not task.result_ref.strip():
             raise PrerequisiteError("result_ref is required for verdict")
         evaluations = self.evaluation_results(ac_results)
-        required_count = len(task.acceptance_criteria or [])
-        if len(evaluations) < required_count:
+        required_count = len(
+            merged_review_criteria(task.acceptance_criteria, task.constraints)
+        )
+        if len(evaluations) != required_count:
             raise PrerequisiteError(
-                "Acceptance-criteria evaluation results are incomplete"
+                "Review-criteria evaluations are incomplete or extra: count must match "
+                "acceptance_criteria + constraints"
             )
         if verdict == "pass" and not all(evaluations):
             raise PrerequisiteError(

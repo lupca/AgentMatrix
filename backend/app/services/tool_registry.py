@@ -146,6 +146,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             name="get_stats",
             description=(
                 "Return recorded API/CLI token usage, authoritative API USD cost, and run statistics. "
+                "Also reports plan-critic return rate and extra execution rounds in "
+                "the historical before/after cohorts. "
                 "CLI subscription cost_usd is vendor telemetry, not an authoritative charge; "
                 "use token totals for the CLI brake. "
                 "Use task_id or agent_id to narrow the report."
@@ -528,9 +530,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             name="generate_spec_plan",
             description=(
                 "Run the research-first spec/plan gate for a 'todo' task with "
-                "a CLI agent inside the project repo. Persists spec_clarity "
-                "and open_questions; dispatch remains blocked until clarity "
-                "is high and all questions are answered."
+                "a CLI agent inside the project repo, then run an independent, "
+                "focused plan critic before dispatch. The critic has a 50k token "
+                "budget, receives no diff, and may reject only with reproducible "
+                "evidence. Persists the extended plan contract and critic verdict."
             ),
             parameters={
                 "type": "object",
@@ -541,6 +544,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "description": (
                             "Agent to generate the spec/plan; auto-suggested "
                             "if omitted."
+                        ),
+                    },
+                    "critic_id": {
+                        "type": "string",
+                        "description": (
+                            "Independent CLI agent to criticize the plan; auto-suggested "
+                            "if omitted. Requires agent_id when explicitly provided."
                         ),
                     },
                 },

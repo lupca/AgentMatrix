@@ -32,8 +32,17 @@ Cột đáng chú ý:
   trigger DB `trg_tasks_done_verdict` đòi verdict='pass' khi done.
 - `awaiting_approval` + `approval_prompt`: cờ escalation/gate chờ human.
 - `spec_clarity` (`high|medium|low`, nullable cho task legacy) + `open_questions`
-  (JSON, nullable): kết quả SpecPlanResult v1.1. Danh sách còn phần tử chặn
-  execute-dispatch cho tới khi coordinator cập nhật `raw_input` và regenerate.
+  (JSON, nullable): câu hỏi còn phần tử chặn execute-dispatch cho tới khi
+  coordinator cập nhật `raw_input` và regenerate.
+- `constraints`, `evidence`, `prior_art`, `ruled_out`, `limits`: hợp đồng
+  SpecPlanResult v2.0. Evidence bắt buộc nguồn tái lập được; limits bắt buộc
+  cho risk cao và trực tiếp thu hẹp safety brake token/chi phí/vòng.
+- `planner`, `plan_critic`, `plan_critic_status`, `plan_critic_findings`: kết
+  quả four-eyes cho plan. DB cấm planner trùng critic. Plan do generator sinh
+  chỉ được dispatch khi critic hiện hành đã accept.
+- Hợp đồng code review là danh sách phẳng
+  `acceptance_criteria ++ constraints`; template, parser và verdict validator
+  đều dùng đúng số phần tử sau phép ghép này.
 - `archived_at`: soft-delete toàn cục (ArchivableMixin) — mọi query mặt tiền
   phải lọc `archived_at IS NULL` (pending_approvals đã từng quên — đã sửa).
 - `legacy_no_ac`: task import cũ, miễn yêu cầu acceptance_criteria khi dispatch.

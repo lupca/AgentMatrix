@@ -14,6 +14,7 @@ from app.services import entity_admin
 from app.services.admin_gate import AdminGateService, AdminOrchestrationError
 from app.services.agent_suggester import AgentSuggester
 from app.services.crypto import encrypt_api_key
+from app.services.plan_critic_analytics import plan_critic_report
 from app.services.tool_registry import (
     DEFERRED_GROUPS,
     dump_registry,
@@ -154,6 +155,7 @@ class AdminHandlersMixin:
             'run_cost_usd': round(run_cost_value, 8)
             if run_cost_value is not None
             else None,
+            'plan_critic': plan_critic_report(self.db, task_id=task_id),
         }
 
     async def _handle_suggest_agents(self, args: str, session_id: str) -> dict:

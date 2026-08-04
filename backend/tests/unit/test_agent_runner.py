@@ -966,6 +966,17 @@ def test_load_review_result_accepts_valid_fixture(tmp_path):
     assert [item.verdict for item in result.ac_results] == ["pass", "pass"]
 
 
+def test_load_review_result_counts_acceptance_plus_constraints(tmp_path):
+    result_path = runner.review_result_path(str(tmp_path), "CTV2-102")
+    Path(result_path).parent.mkdir()
+    Path(result_path).write_bytes((FIXTURES / "valid.json").read_bytes())
+
+    result = runner.load_review_result(
+        str(tmp_path), "CTV2-102", ["positive outcome"], ["negative boundary"]
+    )
+    assert len(result.ac_results) == 2
+
+
 @pytest.mark.parametrize(
     ("metadata", "expected"),
     [
@@ -1379,6 +1390,24 @@ def test_advance_task_todo_with_ac_dispatches_the_best_matched_executor(driver_d
     run_agent_mock.send.assert_called_once()
 
 
+def test_advance_task_todo_with_constraints_only_passes_fail_closed_gate(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-CONSTRAINTS",
+        acceptance_criteria=[],
+        constraints=["Do not change the public API"],
+    )
+
+    outcome = runner.advance_task.fn("ADV-CONSTRAINTS", "manual")
+
+    assert outcome == "dispatched"
+    db = factory()
+    assert db.get(Task, "ADV-CONSTRAINTS").status == "dispatched"
+    db.close()
+    run_agent_mock.send.assert_called_once()
+
+
 def test_advance_task_supervised_todo_stops_at_gate_pending_and_never_loops(driver_db):
     factory, run_agent_mock = driver_db
     _driver_task(factory, "ADV-003", mode="supervised", acceptance_criteria=["Tests pass"])
@@ -1591,6 +1620,27 @@ def test_advance_task_changes_requested_escalates_at_custom_policy_round_cap(dri
     assert task.status == "failed"
     assert task.awaiting_approval is False
     db.close()
+    run_agent_mock.send.assert_not_called()
+
+
+def test_advance_task_enforces_plan_local_round_limit(driver_db):
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-PLAN-ROUND",
+        status="changes-requested",
+        executor="@executor",
+        acceptance_criteria=["Tests pass"],
+        limits={"max_execution_rounds": 1, "max_tokens": 100_000},
+    )
+    db = factory()
+    db.add(TaskRound(task_id="ADV-PLAN-ROUND", round_no=1))
+    db.commit()
+    db.close()
+
+    outcome = runner.advance_task.fn("ADV-PLAN-ROUND", "manual")
+
+    assert outcome == "escalated_round_limit"
     run_agent_mock.send.assert_not_called()
 
 
