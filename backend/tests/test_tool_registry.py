@@ -179,6 +179,16 @@ def test_spec_tools_are_executor_only():
     assert TOOL_REGISTRY['spec_stale'].required_role == 'executor'
 
 
+def test_update_settings_description_documents_autonomy_and_rejects_default_mode():
+    """CTV2-222: the generated ToolSpec must tell coordinators that autonomy
+    is the real mode knob and that default_mode is not writable."""
+    spec = TOOL_REGISTRY['update_settings']
+    assert 'autonomy' in spec.description
+    assert 'default_mode' in spec.description
+    assert 'supervised' in spec.description
+    assert 'plan-only' in spec.description
+
+
 def test_command_router_commands_derived_from_registry():
     for spec in TOOL_REGISTRY.values():
         if spec.slash_alias is None:

@@ -762,7 +762,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "entity=settings for readable keys). Admin-permission: in "
                 "supervised mode this creates a pending gate awaiting "
                 "/approve; in bypass mode it applies immediately. Rejects "
-                "keys outside the whitelist."
+                "keys outside the whitelist. "
+                "The `autonomy` setting controls task mode behavior: "
+                "`supervised` requires human approval at every gate, "
+                "`auto` allows low-risk tasks to bypass gates automatically, "
+                "and `plan-only` blocks dispatch entirely. "
+                "The `default_mode` key is not a writable setting and will "
+                "be rejected."
             ),
             parameters={
                 "type": "object",

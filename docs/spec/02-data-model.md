@@ -24,8 +24,8 @@ Cột đáng chú ý:
   chạy `autoflush=False`, `_cas_status` **flush trước** khi bắn raw UPDATE để
   constraint thấy trọn transition (đã từng dính `ck_tasks_terminal_not_awaiting_approval`).
 - `mode`: supervised | plan-only | bypass — resolve lúc tạo bởi `mode_for_task`
-  từ setting `autonomy` (+ `auto_max_risk` so với `task.risk`). Setting
-  `default_mode` là nút CHẾT (CTV2-222).
+  từ setting `autonomy` (+ `auto_max_risk` so với `task.risk`). `autonomy` là
+  nguồn policy duy nhất; `default_mode` đã gỡ khỏi whitelist (CTV2-222).
 - `result_ref`: `"<base>..<head>"` do executor commit thật, validate ancestor
   bằng git. Task không commit thì KHÔNG có đường done (gap CTV2-235).
 - `verdict`/`final_verdict`: chỉ được set qua verdict gate từ review run thật;

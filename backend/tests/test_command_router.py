@@ -1243,21 +1243,40 @@ async def test_update_settings_bypass_applies_immediately_with_audit(db_session)
 
     result = await CommandRouter(db_session).execute_tool(
         "update_settings",
-        {"key": "default_mode", "value": "bypass", "mode": "bypass"},
+        {"key": "autonomy", "value": "supervised", "mode": "bypass"},
         "session-1",
     )
 
     assert result["action"] == "settings_updated"
-    assert result["key"] == "default_mode"
-    assert result["value"] == "bypass"
+    assert result["key"] == "autonomy"
+    assert result["value"] == "supervised"
 
-    setting = db_session.query(Setting).filter(Setting.key == "default_mode").first()
+    setting = db_session.query(Setting).filter(Setting.key == "autonomy").first()
     assert setting is not None
-    assert setting.value == "bypass"
+    assert setting.value == "supervised"
 
     audit_rows = db_session.query(AuditLog).filter(AuditLog.action.like("admin_gate:%")).all()
     assert len(audit_rows) == 1
     assert audit_rows[0].actor == "chat:session-1"
+
+
+@pytest.mark.asyncio
+async def test_update_settings_rejects_default_mode_before_any_write(db_session):
+    """default_mode is a dead key (CTV2-222): autonomy is the sole mode
+    control. Rejecting before the admin gate or Setting write prevents
+    coordinators from recording a no-op mutation."""
+    from app.db.models import AdminGateRecord, Setting
+
+    result = await CommandRouter(db_session).execute_tool(
+        "update_settings",
+        {"key": "default_mode", "value": "supervised", "mode": "bypass"},
+        "session-1",
+    )
+
+    assert "error" in result
+    assert "default_mode" in result["error"]
+    assert db_session.query(Setting).filter(Setting.key == "default_mode").first() is None
+    assert db_session.query(AdminGateRecord).count() == 0
 
 
 @pytest.mark.asyncio
@@ -1313,7 +1332,7 @@ async def test_update_settings_rejects_key_outside_whitelist_no_db_write(db_sess
 async def test_query_db_settings_reads_whitelisted_values(db_session):
     from app.db.models import Setting
 
-    db_session.add(Setting(key="default_mode", value="supervised", description="d"))
+    db_session.add(Setting(key="autonomy", value="supervised", description="d"))
     db_session.commit()
 
     result = await CommandRouter(db_session).execute("query_db", "settings", "session-1")
@@ -1321,7 +1340,7 @@ async def test_query_db_settings_reads_whitelisted_values(db_session):
     assert result["status"] == "success"
     assert result["entity"] == "settings"
     assert result["rows"] == [
-        {"key": "default_mode", "value": "supervised", "description": "d"}
+        {"key": "autonomy", "value": "supervised", "description": "d"}
     ]
 
 

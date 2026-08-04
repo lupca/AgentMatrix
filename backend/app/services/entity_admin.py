@@ -426,7 +426,6 @@ def archive_knowledge(db: Session, item_id: str) -> KnowledgeItem:
 # when a new setting is needed — no migration required.
 SETTINGS_WHITELIST: dict[str, str] = {
     "default_coordinator_model": "Default model used for new coordinator sessions.",
-    "default_mode": "Default gate mode (supervised/plan-only/bypass) for new tasks.",
     "context_snapshot_top_n": "Number of recent tasks listed in the context snapshot.",
     "autonomy_enabled": "Global kill switch for autonomous task progression.",
     "max_cost_usd_per_task": "Maximum accumulated LLM cost allowed for one task.",
