@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -11,11 +13,49 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.mcp_native as mcp_native
+from app.core.runtime_version import RuntimeVersionMonitor
 from app.db.base import Base
 from app.db.models import Agent, InboxItem, Project, Task
 from app.mcp_native import authenticate_token, build_server, envelope, issue_token
-from app.services.tool_registry import get_mcp_tool_specs
 from app.services.task_orchestration import TaskOrchestrationService
+from app.services.tool_registry import get_mcp_tool_specs
+
+
+def _runtime_monitor_with_new_commit(tmp_path) -> RuntimeVersionMonitor:
+    repo = tmp_path / "agenticmatix"
+    repo.mkdir()
+    for args in (
+        ("init", "-q", "-b", "main"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"),
+    ):
+        subprocess.run(
+            ["git", "-C", str(repo), *args], capture_output=True, check=True
+        )
+    (repo / "base.txt").write_text("base\n")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "base.txt"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "-m", "base"],
+        capture_output=True,
+        check=True,
+    )
+    monitor = RuntimeVersionMonitor.capture(repo)
+    (repo / "landed.txt").write_text("landed\n")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "landed.txt"],
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-q", "-m", "landed"],
+        capture_output=True,
+        check=True,
+    )
+    return monitor
 
 
 def test_role_token_round_trip_and_task_scope_claim():
@@ -114,6 +154,47 @@ async def test_tool_call_end_to_end_through_mcp_client(monkeypatch):
 
     assert body["ok"] is True, body
     assert body["data"]["task"]["id"] == "T-1"
+    assert "runtime_warning" not in body["data"]
+
+
+@pytest.mark.asyncio
+async def test_land_task_result_warns_that_landed_code_needs_restart(
+    monkeypatch, tmp_path
+):
+    monitor = _runtime_monitor_with_new_commit(tmp_path)
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    monkeypatch.setattr(
+        mcp_native.CommandRouter,
+        "execute_tool",
+        AsyncMock(
+            return_value={
+                "action": "landed",
+                "task_id": "T-1",
+                "status": "done",
+                "landed_ref": "new-head",
+            }
+        ),
+    )
+
+    server = build_server(
+        default_token=issue_token("test-secret", role="coordinator"),
+        runtime_version=monitor,
+    )
+    async with Client(server) as client:
+        result = await client.call_tool("land_task", {"task_id": "T-1"})
+        body = json.loads(result.content[0].text)
+
+    warning = body["data"]["runtime_warning"]
+    assert warning["pending_commit_count"] == 1
+    assert "Code đã vào main nhưng CHƯA có hiệu lực" in warning["message"]
+    assert "restart backend/worker" in warning["message"]
 
 
 @pytest.mark.asyncio

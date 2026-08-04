@@ -28,6 +28,7 @@ from fastmcp.tools.function_tool import FunctionTool
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
+from app.core.runtime_version import RuntimeVersionMonitor
 from app.db.base import SessionLocal
 from app.db.models import AdminGateRecord, GateRecord, Session as SessionModel, Task
 from app.graph.context import invalidate_context_snapshot
@@ -60,7 +61,9 @@ SERVER_INSTRUCTIONS = (
     "update_settings (a pending admin gate returns 'admin:<id>' — pass it to "
     "approve_gate). If a result carries pending_approvals, restate them to "
     "the human at the END of every reply, as a question, until each is "
-    "decided. Errors are structured with a hint: follow the hint, do "
+    "decided. If a result carries runtime_warning, report it verbatim and "
+    "never restart processes yourself. Errors are structured with a hint: "
+    "follow the hint, do "
     "not retry blindly. The verdict belongs to the reviewer: never record a "
     "verdict for a review you did not run, never merge ct-run/* branches "
     "yourself, and report the task status from get_status verbatim — a "
@@ -323,7 +326,12 @@ def _ensure_session(db, claims: TokenClaims) -> str:
     return session_id
 
 
-def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
+def make_tool_handler(
+    spec: ToolSpec,
+    *,
+    default_token: str = "",
+    runtime_version: RuntimeVersionMonitor | None = None,
+):
     async def handler(**kwargs: Any) -> dict[str, Any]:
         claims = _claims_from_request(default_token)
         if claims is None:
@@ -336,6 +344,14 @@ def make_tool_handler(spec: ToolSpec, *, default_token: str = ""):
         try:
             session_id = _ensure_session(db, claims)
             result = await CommandRouter(db).execute_tool(spec.name, kwargs, session_id)
+            if (
+                runtime_version is not None
+                and spec.name in {"get_status", "land_task"}
+                and not result.get("error")
+            ):
+                warning = runtime_version.stale_warning()
+                if warning is not None:
+                    result = {**result, "runtime_warning": warning}
             # Native calls bypass the REST endpoint, so invalidate the same
             # context cache the old /api/mcp/tools/call path invalidated.
             invalidate_context_snapshot(db, project_id=None)
@@ -392,7 +408,14 @@ class RoleFilteredFastMCP(FastMCP):
         ]
 
 
-def build_server(*, default_token: str = "") -> FastMCP:
+def build_server(
+    *,
+    default_token: str = "",
+    runtime_version: RuntimeVersionMonitor | None = None,
+) -> FastMCP:
+    # Capture once while constructing the process' MCP application.  Every
+    # get_status/land_task call compares against this immutable boot SHA.
+    runtime_version = runtime_version or RuntimeVersionMonitor.capture()
     specs = get_mcp_tool_specs()
     mcp = RoleFilteredFastMCP(
         "agmx",
@@ -405,18 +428,29 @@ def build_server(*, default_token: str = "") -> FastMCP:
             name=spec.name,
             description=spec.description + " Follow the precondition and the `next` field in every result.",
             parameters=spec.parameters,
-            fn=make_tool_handler(spec, default_token=default_token),
+            fn=make_tool_handler(
+                spec,
+                default_token=default_token,
+                runtime_version=runtime_version,
+            ),
         ))
     return mcp
 
 
-def build_http_app(*, default_token: str = ""):
+def build_http_app(
+    *,
+    default_token: str = "",
+    runtime_version: RuntimeVersionMonitor | None = None,
+):
     """Build the standalone ASGI app and reject unauthenticated HTTP calls."""
 
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.responses import JSONResponse
 
-    server = build_server(default_token=default_token)
+    server = build_server(
+        default_token=default_token,
+        runtime_version=runtime_version,
+    )
     app = server.http_app()
 
     async def health(_request):
