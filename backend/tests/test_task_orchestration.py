@@ -1,4 +1,5 @@
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -304,6 +305,37 @@ def test_terminal_failure_rejects_all_pending_gates_and_clears_flag(
     assert {record.actor for record in decisions} == {"system:terminal-cleanup"}
 
 
+def test_terminal_task_cancels_active_agent_run(orchestration, db_session):
+    task = _task(db_session, "GATE-TERMINAL-CANCEL")
+    task.status = "dispatched"
+    task.executor = "@executor"
+    run = AgentRun(
+        id="terminal-cancel-run",
+        task_id=task.id,
+        agent_id="@executor",
+        cli="codex",
+        command="sleep 60",
+        status="running",
+        pid=4242,
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    orchestration.record_execution_failure(
+        task_id=task.id,
+        error="executor failed",
+        actor="@executor",
+        idempotency_key="terminal-cancel-failure",
+        run_id=run.id,
+        error_code="process-failed",
+    )
+
+    db_session.refresh(run)
+    assert task.status == "failed"
+    assert run.status == "cancelled"
+    assert run.error_message == "Task reached terminal state: failed"
+
+
 def test_terminal_done_rejects_pending_gate(orchestration, db_session):
     task = _task(db_session, "GATE-STALE-DONE", mode="bypass")
     db_session.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex"))
@@ -436,6 +468,73 @@ def test_review_result_failure_preserves_executor_result_and_allows_new_reviewer
     assert reassigned.agent_run.agent_id == "@new-reviewer"
     assert reassigned.gate_record.reviewer == "@new-reviewer"
     assert reassigned.gate_record.executor == "@executor"
+
+
+def test_orchestration_review_key_includes_reviewer_for_same_round(
+    orchestration, db_session, monkeypatch
+):
+    """A legal reviewer replacement must not collide on task+round alone."""
+    db_session.add_all(
+        [
+            Agent(id="@reviewer-a", name="Reviewer A", role="reviewer", cli="codex"),
+            Agent(id="@reviewer-b", name="Reviewer B", role="reviewer", cli="codex"),
+        ]
+    )
+    task = _task(db_session, "REVIEW-KEY-001", mode="supervised")
+    task.status = "awaiting-review"
+    task.executor = "@executor"
+    task.result_ref = "base..head"
+    db_session.commit()
+
+    def candidate(agent_id):
+        return SimpleNamespace(
+            agent_id=agent_id,
+            final_score=0.8,
+            matched_skills=[],
+            performance=0.8,
+            rejection_reason=None,
+        )
+
+    first = SimpleNamespace(
+        suggestions=[candidate("@reviewer-a")],
+        candidates=[candidate("@reviewer-a")],
+    )
+    second = SimpleNamespace(
+        suggestions=[candidate("@reviewer-b")],
+        candidates=[candidate("@reviewer-b")],
+    )
+
+    import app.workers.agent_runner as runner
+
+    scores = iter([first, second])
+    monkeypatch.setattr(
+        runner.AgentMatcher,
+        "score_candidates",
+        lambda *args, **kwargs: next(scores),
+    )
+    service = orchestration
+    monkeypatch.setattr(
+        service,
+        "check_brakes",
+        lambda *args, **kwargs: SimpleNamespace(allowed=True),
+    )
+    assert runner._advance_awaiting_review(db_session, service, task) == "gate_pending"
+    db_session.refresh(task)
+    assert runner._advance_awaiting_review(db_session, service, task) == "gate_pending"
+
+    roots = (
+        db_session.query(GateRecord)
+        .filter(
+            GateRecord.task_id == task.id,
+            GateRecord.gate_type == "review_order",
+            GateRecord.parent_id.is_(None),
+        )
+        .order_by(GateRecord.id)
+        .all()
+    )
+    assert roots[0].input_payload["reviewer"] == "@reviewer-a"
+    assert roots[1].input_payload["reviewer"] == "@reviewer-b"
+    assert roots[0].idempotency_key != roots[1].idempotency_key
 
 
 def test_awaiting_approval_sync_ignores_resolved_pending_root(

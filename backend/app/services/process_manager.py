@@ -382,7 +382,38 @@ class WorktreeManager:
             if os.path.isabs(run_id_or_path)
             else self.worktree_path(run_id_or_path)
         )
+        run_id = os.path.basename(os.path.normpath(path))
+        # Keep commits reachable after deleting the run-owned branch.  A tag
+        # is deliberately used as the durable result anchor; it cannot be
+        # checked out by another run and therefore does not reintroduce the
+        # branch-name collision this cleanup prevents.
+        if run_id and os.path.isdir(path):
+            try:
+                head = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=path,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                ).stdout.strip()
+                if head:
+                    subprocess.run(
+                        ["git", "tag", "-f", f"ct-result/{run_id}", head],
+                        cwd=self.repo_root,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        check=False,
+                    )
+            except (OSError, subprocess.SubprocessError):
+                logger.warning("Could not preserve result ref for %s", run_id, exc_info=True)
         self._force_remove(path)
+        # The branch is owned by this run as well as the checkout.  Leaving
+        # it behind makes a redelivered attempt fail at `git worktree add -b`
+        # and used to trigger unsafe fallback behavior in older callers.
+        if run_id:
+            self._delete_branch_if_exists(self.branch_name(run_id))
 
     def _force_remove(self, path: str) -> None:
         try:

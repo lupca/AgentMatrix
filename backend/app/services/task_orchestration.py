@@ -255,6 +255,7 @@ class TaskOrchestrationService:
         idempotency_key: str,
         expected_status: str = "dispatched",
         run_id: str | None = None,
+        error_code: str | None = None,
     ) -> TransitionResult:
         return self.state_machine.record_execution_failure(
             task_id=task_id,
@@ -263,6 +264,7 @@ class TaskOrchestrationService:
             idempotency_key=idempotency_key,
             expected_status=expected_status,
             run_id=run_id,
+            error_code=error_code,
         )
 
     def record_review_failure(
