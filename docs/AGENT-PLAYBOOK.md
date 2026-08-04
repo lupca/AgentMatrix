@@ -215,19 +215,36 @@ reviewer** cho tới khi CTV2-1349 xong (2/2 lần trả sai schema). Muốn ch�
 reviewer riêng: `request_review {task_id, reviewer}` rồi approve gate — nó ghi
 đè đề xuất của matcher.
 
-### Mô tả task: đây là đòn bẩy chất lượng lớn nhất
+### Mô tả task: quan trọng, nhưng KHÔNG phải càng dài càng tốt
 
-Đo 2026-08-04: mô tả task trung bình **204–306 ký tự** (2–3 câu). Nhóm mô tả
-ngắn nhất có số vòng cao nhất (2.00 so với 1.50–1.62). Nhiều acceptance criteria
-**không** làm tăng số vòng — mô tả mỏng mới làm.
-
-Viết `raw_input` dài **1.500–2.500 ký tự**, gồm:
+Viết `raw_input` gồm:
 - **Số đo và bằng chứng**, không phải mô tả cảm tính ("158 bản ghi, cột X NULL
   100%" thay vì "attribution có vẻ chưa đúng")
 - **Tham chiếu `file.py:dòng`** cho từng chỗ cần đụng
 - **Cái đã xác minh rồi** — để agent khỏi mò lại
 - **"KHÔNG làm trong task này: ..."** — chặn phình phạm vi, và chặn thêm migration
 - **Vướng mắc kỹ thuật đã biết** kèm gợi ý hướng, để agent không đâm đầu vào tường
+
+> **CẢNH BÁO — đừng biến độ dài thành chỉ tiêu.** Đo lần đầu (08-03, so nhóm
+> theo số AC) thấy mô tả ngắn ↔ nhiều vòng, và tôi suýt kết luận "dài hơn = tốt
+> hơn". Đo lại (08-04, **so trong cùng một ngày** để khử nhiễu độ khó):
+>
+> | | 1 vòng (n=19) | 2+ vòng (n=4) |
+> |---|---|---|
+> | độ dài | 1.656 | **3.190** |
+> | có `file:dòng` | 0.42 | **0.75** |
+> | số AC | 5.8 | **8.0** |
+>
+> **Mọi chỉ số "chi tiết hơn" đều CAO hơn ở nhóm cần nhiều vòng.** Vì coordinator
+> viết dài hơn cho task khó hơn — độ dài là *hệ quả của độ khó*, không phải
+> *nguyên nhân của chất lượng*. (n=4 nhỏ; kết luận an toàn duy nhất: **dữ liệu
+> không ủng hộ ngưỡng độ dài**.)
+>
+> Hệ quả khi thiết kế bất kỳ cổng chất lượng nào (`impl_design`, spec gate...):
+> **chấm tính kiểm chứng được, đừng chấm khối lượng.** Hỏi *"thứ bạn nói có tồn
+> tại không"* (file có thật? symbol có trong code graph?), đừng hỏi *"bạn nói
+> được bao nhiêu"*. Ngưỡng ký tự/số AC chỉ khuyến khích viết dài vô nghĩa để qua
+> cổng. Xem CTV2-1355.
 
 ### Thu hồi task bị `failed` oan (đừng dispatch lại — phí công executor)
 
