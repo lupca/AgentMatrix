@@ -1,3 +1,4 @@
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -82,6 +83,101 @@ def _dispatch_and_approve(orchestration, task, idempotency_key):
             idempotency_key=f"{idempotency_key}:approval",
         )
     return result
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
+def test_integration_branch_moves_only_after_independent_pass_verdict(
+    orchestration, db_session, tmp_path
+):
+    """CTV2-225 reproducer for the governed execution-to-landing sequence."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "base.txt").write_text("base\n")
+    _git(repo, "add", "base.txt")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD")
+
+    _git(repo, "checkout", "-q", "-b", "ct-run/ctv2-225-reproducer")
+    (repo / "result.txt").write_text("review me\n")
+    _git(repo, "add", "result.txt")
+    _git(repo, "commit", "-q", "-m", "executor result")
+    result_head = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+
+    project = db_session.get(Project, "project")
+    project.repo_root = str(repo)
+    db_session.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex"))
+    task = _task(db_session, "CTV2-225-REPRO", mode="bypass")
+    task.status = "dispatched"
+    task.executor = "@executor"
+    db_session.commit()
+
+    execution = orchestration.record_execution_success(
+        task_id=task.id,
+        result_ref=f"{base}..{result_head}",
+        actor="agent:@executor",
+        idempotency_key="ctv2-225:execution",
+        run_id="executor-run",
+    )
+    assert execution.task.status == "awaiting-review"
+    assert execution.gate_record.gate_type == "execution"
+    assert _git(repo, "rev-parse", "main") == base
+    assert db_session.query(OutboxEvent).count() == 0
+
+    review = orchestration.request_review(
+        task_id=task.id,
+        reviewer="@reviewer",
+        actor="system:orchestration-driver",
+        idempotency_key="ctv2-225:review",
+    )
+    assert review.task.status == "in-review"
+    assert review.agent_run is not None
+    assert _git(repo, "rev-parse", "main") == base
+    outbox = db_session.query(OutboxEvent).all()
+    assert [event.event_type for event in outbox] == ["run_requested"]
+
+    review.agent_run.status = "success"
+    db_session.commit()
+    verdict = orchestration.request_verdict(
+        task_id=task.id,
+        verdict="pass",
+        ac_results=[{"passed": True, "evidence": "review run completed"}],
+        actor="@reviewer",
+        idempotency_key="ctv2-225:verdict",
+    )
+    assert verdict.task.status == "done"
+    assert verdict.task.landed_ref
+    assert _git(repo, "merge-base", "--is-ancestor", result_head, "main") == ""
+    landed_head = _git(repo, "rev-parse", "main")
+    assert landed_head != base
+    pass_records = (
+        db_session.query(GateRecord)
+        .filter_by(task_id=task.id, gate_type="verdict", status="approved")
+        .all()
+    )
+    assert len(pass_records) == 1
+    assert pass_records[0].output_ref == "pass"
+
+    # Verdict approval already performs the merge. land_task is the explicit,
+    # idempotent retry/backfill surface and must not create another commit.
+    landed = orchestration.land_task(task_id=task.id, actor="@operator")
+    assert landed["status"] == "done"
+    assert _git(repo, "rev-parse", "main") == landed_head
+    assert [event.event_type for event in db_session.query(OutboxEvent).all()] == [
+        "run_requested",
+        "graph_rebuild_requested",
+    ]
 
 
 @pytest.mark.parametrize(

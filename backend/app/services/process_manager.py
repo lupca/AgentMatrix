@@ -289,8 +289,9 @@ class WorktreeUnsupportedError(RuntimeError):
 
     Raised for any failure of ``git worktree add`` (missing git, repo not
     initialized, worktree feature disabled by config, path collision that
-    survives a cleanup attempt, ...). Callers are expected to catch this and
-    fall back to running directly in the shared repo root.
+    survives a cleanup attempt, ...). Callers must fail closed: running an
+    executor in the shared repo root can move the integration branch before
+    the result has an independent pass verdict.
     """
 
 

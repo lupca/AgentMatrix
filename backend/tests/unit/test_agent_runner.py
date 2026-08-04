@@ -292,57 +292,59 @@ def test_worktree_base_ref_uses_prior_head_for_re_dispatch(
     assert create_calls == [("run-001", prior_head)]
 
 
-def test_run_agent_falls_back_to_sequential_when_worktree_unsupported(
+def test_run_agent_fails_closed_when_worktree_unsupported(
     worker_db, monkeypatch, git_repo_root
 ):
-    warning = MagicMock()
-    monkeypatch.setattr(runner.logger, "warning", warning)
     monkeypatch.setattr(
         runner.WorktreeManager,
         "create",
         MagicMock(side_effect=WorktreeUnsupportedError("no git worktree support")),
     )
+    initial_head = runner._parse_result_ref(git_repo_root)
 
-    result = runner.run_agent.fn(
-        "run-001",
-        "RUN-001",
-        "echo change > change.txt && git add change.txt && git commit -q -m change",
-        git_repo_root,
-        5,
-    )
+    with pytest.raises(
+        runner.AgentExecutionError,
+        match="refusing to use the integration checkout",
+    ):
+        runner.run_agent.fn(
+            "run-001",
+            "RUN-001",
+            "echo change > change.txt && git add change.txt && git commit -q -m change",
+            git_repo_root,
+            5,
+        )
 
     db = worker_db()
     run = db.get(AgentRun, "run-001")
-    assert result == 0
-    assert run.status == "success"
+    assert run.status == "queued"
     db.close()
-    assert any(
-        "falls back to the shared sequential working tree" in str(call.args[0])
-        for call in warning.call_args_list
-    )
-    # The commit landed directly on the primary checkout's branch.
-    log = subprocess.run(
-        ["git", "log", "--format=%H"], cwd=git_repo_root, check=True,
-        capture_output=True, text=True,
-    ).stdout
-    assert run.result_ref.partition("..")[2] in log
+    assert runner._parse_result_ref(git_repo_root) == initial_head
+    assert not (Path(git_repo_root) / "change.txt").exists()
 
 
-def test_run_agent_skips_worktree_when_disabled_via_env(worker_db, monkeypatch, git_repo_root):
+def test_run_agent_fails_closed_when_worktree_disabled_via_env(
+    worker_db, monkeypatch, git_repo_root
+):
     monkeypatch.setattr(runner, "WORKTREE_ENABLED", False)
     create = MagicMock()
     monkeypatch.setattr(runner.WorktreeManager, "create", create)
+    initial_head = runner._parse_result_ref(git_repo_root)
 
-    result = runner.run_agent.fn(
-        "run-001",
-        "RUN-001",
-        "echo change > change.txt && git add change.txt && git commit -q -m change",
-        git_repo_root,
-        5,
-    )
+    with pytest.raises(
+        runner.AgentExecutionError,
+        match="worktree isolation is disabled",
+    ):
+        runner.run_agent.fn(
+            "run-001",
+            "RUN-001",
+            "echo change > change.txt && git add change.txt && git commit -q -m change",
+            git_repo_root,
+            5,
+        )
 
-    assert result == 0
     create.assert_not_called()
+    assert runner._parse_result_ref(git_repo_root) == initial_head
+    assert not (Path(git_repo_root) / "change.txt").exists()
 
 
 def test_run_agent_cleans_up_worktree_after_a_failed_run(worker_db, git_repo_root):
