@@ -55,6 +55,11 @@ queued → running → success / failed / cancelled
 - Review run lỗi process hoặc artifact không đọc được chỉ làm AgentRun
   `failed`; Task CAS từ `in-review` về `awaiting-review`, giữ nguyên executor và
   `result_ref` để tạo review attempt kế tiếp.
+- Review run bị cancel, kể cả watchdog chặn trước lúc spawn process, cũng đi
+  qua cùng `record_review_failure`: AgentRun giữ trạng thái `cancelled`, Task
+  CAS về `awaiting-review`, và `review_result/rejected` ghi rõ brake/reason.
+  Execute run bị watchdog cancel đi qua `record_execution_failure` và Task về
+  `failed`; cancel chủ động của operator vẫn đưa execute Task về `todo`.
 
 ## TaskRound
 

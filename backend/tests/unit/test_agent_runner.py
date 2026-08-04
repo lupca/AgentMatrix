@@ -32,6 +32,7 @@ from app.services.process_manager import (
     ProcessStatus,
     WorktreeUnsupportedError,
 )
+from app.services.task_orchestration import BrakeDecision
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "review_results"
 
@@ -388,6 +389,78 @@ def test_run_agent_cancellation_leaves_no_worktree_or_lock(worker_db, monkeypatc
     db.close()
     assert _worktree_entries(git_repo_root).count("[") == 1
     assert not (Path(git_repo_root) / ".git" / "index.lock").exists()
+
+
+def _force_no_progress_brake(monkeypatch):
+    real_service = runner.TaskOrchestrationService
+
+    class NoProgressService(real_service):
+        def check_brakes(self, *_args, **_kwargs):
+            return BrakeDecision(
+                False,
+                "Run made no progress within the allowed interval",
+                "no_progress_limit",
+            )
+
+    monkeypatch.setattr(runner, "TaskOrchestrationService", NoProgressService)
+
+
+def test_watchdog_cancelled_execute_run_records_failure_and_unsticks_task(
+    worker_db, monkeypatch, git_repo_root
+):
+    _force_no_progress_brake(monkeypatch)
+
+    assert runner.run_agent.fn(
+        "run-001", "RUN-001", "echo should-not-run", git_repo_root, 5
+    ) is None
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    task = db.get(Task, "RUN-001")
+    failure = db.query(GateRecord).filter_by(
+        task_id=task.id, gate_type="execution", status="rejected"
+    ).one()
+    assert run.status == "cancelled"
+    assert task.status == "failed"
+    assert "no_progress_limit" in task.error
+    assert failure.output_ref == run.id
+    assert failure.error_message == task.error
+    db.close()
+
+
+def test_watchdog_cancelled_review_run_returns_task_to_review_boundary(
+    worker_db, monkeypatch, git_repo_root
+):
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    run.kind = "review"
+    run.agent_role = "reviewer"
+    task = db.get(Task, "RUN-001")
+    task.status = "in-review"
+    task.result_ref = "base..head"
+    task.reviewer = "@reviewer"
+    db.commit()
+    db.close()
+    _force_no_progress_brake(monkeypatch)
+
+    assert runner.run_agent.fn(
+        "run-001", "RUN-001", "echo should-not-run", git_repo_root, 5
+    ) is None
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    task = db.get(Task, "RUN-001")
+    failure = db.query(GateRecord).filter_by(
+        task_id=task.id, gate_type="review_result", status="rejected"
+    ).one()
+    assert run.status == "cancelled"
+    assert task.status == "awaiting-review"
+    assert task.current_gate == "review_order"
+    assert task.result_ref == "base..head"
+    assert "no_progress_limit" in task.error
+    assert failure.output_ref == run.id
+    assert failure.error_message == task.error
+    db.close()
 
 
 def test_two_concurrent_agent_runs_commit_independently(monkeypatch, git_repo_root):
