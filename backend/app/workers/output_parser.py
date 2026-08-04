@@ -188,15 +188,28 @@ def _json_objects(stdout: str) -> list[dict[str, Any]]:
     """Return JSON objects found in JSONL or whole-document CLI output."""
     objects: list[dict[str, Any]] = []
     for line in (stdout or "").splitlines():
-        value = _json_line(line.strip())
-        if value is not None:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            value = json.loads(stripped)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(value, dict):
             objects.append(value)
+        elif isinstance(value, list):
+            objects.extend(item for item in value if isinstance(item, dict))
     try:
         value = json.loads(stdout)
     except (TypeError, json.JSONDecodeError):
         value = None
-    if isinstance(value, dict) and value not in objects:
-        objects.append(value)
+    if isinstance(value, dict):
+        if value not in objects:
+            objects.append(value)
+    elif isinstance(value, list):
+        for item in value:
+            if isinstance(item, dict) and item not in objects:
+                objects.append(item)
     return objects
 
 
