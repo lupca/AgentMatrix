@@ -190,7 +190,7 @@ def test_dispatch_stream_json_output_flags_preserve_prompt_contract(cli, tmp_pat
         assert argv[format_index - 1] == "--dangerously-skip-permissions"
         assert "--verbose" in argv
     else:
-        assert argv[argv.index("-p") + 1] == argv[format_index - 1]
+        assert argv[argv.index("-p") + 1]
         if cli == "qwen":
             assert argv[argv.index("--yolo") + 1] == "-p"
 

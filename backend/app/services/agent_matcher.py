@@ -62,6 +62,9 @@ _STOP_WORDS = {
 }
 _ACTIVE_RUN_STATUSES = ("queued", "running")
 _UNAVAILABLE_STATUSES = {"offline", "deprecated", "disabled"}
+# Retired API-backed planner profiles. They are kept as historical rows for
+# auditability, but must never be selected after the CLI-only planner cutover.
+RETIRED_AGENT_IDS = frozenset({"spec-planner-api", "spec-planner-glm"})
 
 # CT v1 lesson: research/review work should route to agents who advertise
 # that strength explicitly, not just whoever scores highest on generic
@@ -214,6 +217,8 @@ class AgentMatcher:
         excluded: str | None,
         required_capabilities: set[str] | None,
     ) -> str | None:
+        if agent.id.strip().casefold() in RETIRED_AGENT_IDS:
+            return "agent profile is retired (CLI-only planner cutover)"
         if agent.status in _UNAVAILABLE_STATUSES:
             return f"agent status is {agent.status}"
         if excluded and agent.id.strip().casefold() == excluded:

@@ -3,39 +3,19 @@
 from __future__ import annotations
 
 import os
-import json
-import shlex
-import tempfile
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
 from app.db.models import Agent, Project, Task
-from app.core.config import settings
-from app.services.cli_dispatcher import build_mcp_config
+from app.services.cli_command import SUPPORTED_CLIS, build_cli_command
 from app.services.review_criteria import merged_review_criteria
-
-SUPPORTED_CLIS = {"agy", "codex", "claude", "qwen"}
-_EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
-_AGY_PRINT_TIMEOUT_FALLBACK_SECONDS = 1_800
-
 
 def _model_has_effort_suffix(model: str | None) -> bool:
     """Check if model name already includes effort level (e.g. gemini-3.6-flash-low)."""
     if not model:
         return False
-    lowered = model.lower()
-    return any(lowered.endswith(suffix) for suffix in _EFFORT_SUFFIXES)
-
-
-def _agy_print_timeout(timeout_seconds: int | None) -> str:
-    """Format the AgentRun timeout for agy's duration-valued CLI option."""
-    seconds = (
-        timeout_seconds
-        if timeout_seconds is not None and timeout_seconds > 0
-        else _AGY_PRINT_TIMEOUT_FALLBACK_SECONDS
-    )
-    return f"{seconds}s"
+    return model.lower().endswith(("-low", "-medium", "-high", "-extra-high", "-max", "-ultra"))
 
 
 def review_result_path(repo_root: str, task_id: str) -> str:
@@ -70,57 +50,13 @@ def build_dispatch_command(
     model_has_effort = _model_has_effort_suffix(agent.model)
     prompt = _task_prompt(task, review_result_path(repo_root, task.id))
     prompt = _inject_project_context(prompt, project, task, db)
-    if cli == "codex":
-        argv = ["codex", "exec", "--json"]
-        if agent.model:
-            argv.extend(["-m", agent.model])
-        if not model_has_effort:
-            argv.extend(["-c", f"model_reasoning_effort={resolved_effort}"])
-        argv.extend(["--dangerously-bypass-approvals-and-sandbox", prompt])
-    elif cli == "claude":
-        argv = ["claude"]
-        if agent.model:
-            argv.extend(["--model", agent.model])
-        if not model_has_effort:
-            argv.extend(["--effort", resolved_effort])
-        argv.extend(
-            [
-                "-p",
-                prompt,
-                "--dangerously-skip-permissions",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ]
-        )
-    elif cli == "qwen":
-        # qwen uses -m for model, -p for prompt (similar to claude)
-        argv = ["qwen"]
-        if agent.model:
-            argv.extend(["-m", agent.model])
-        argv.extend(["--yolo", "-p", prompt, "--output-format", "stream-json"])
-    else:
-        # agy: the prompt must directly follow --print — another flag in
-        # between makes agy drop the prompt and answer about the flag
-        # instead (verified against agy 1.1.9).
-        argv = ["agy"]
-        if agent.model:
-            argv.extend(["--model", agent.model])
-        if not model_has_effort:
-            argv.extend(["--effort", resolved_effort])
-        argv.extend(
-            [
-                "--dangerously-skip-permissions",
-                "--output-format",
-                "stream-json",
-                "--print",
-                prompt,
-                "--print-timeout",
-                _agy_print_timeout(timeout_seconds),
-            ]
-        )
-
-    return shlex.join(argv), repo_root, cli
+    return build_cli_command(
+        cli,
+        agent.model,
+        prompt,
+        effort=resolved_effort if not model_has_effort else None,
+        timeout_seconds=timeout_seconds,
+    ), repo_root, cli
 
 
 def build_review_command(
@@ -162,55 +98,13 @@ def build_review_command(
     prompt = _inject_project_context(prompt, project, task, db)
     resolved_effort = agent.effort or "medium"
     model_has_effort = _model_has_effort_suffix(agent.model)
-    if cli == "codex":
-        argv = ["codex", "exec", "--json"]
-        if agent.model:
-            argv.extend(["-m", agent.model])
-        if not model_has_effort:
-            argv.extend(["-c", f"model_reasoning_effort={resolved_effort}"])
-        argv.extend(["--dangerously-bypass-approvals-and-sandbox", prompt])
-    elif cli == "claude":
-        argv = ["claude"]
-        if agent.model:
-            argv.extend(["--model", agent.model])
-        if not model_has_effort:
-            argv.extend(["--effort", resolved_effort])
-        argv.extend(
-            [
-                "-p",
-                prompt,
-                "--dangerously-skip-permissions",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ]
-        )
-    elif cli == "qwen":
-        # qwen uses -m for model, -p for prompt (similar to claude)
-        argv = ["qwen"]
-        if agent.model:
-            argv.extend(["-m", agent.model])
-        argv.extend(["--yolo", "-p", prompt, "--output-format", "stream-json"])
-    else:
-        # agy: the prompt must directly follow --print (see build_dispatch_command).
-        argv = ["agy"]
-        if agent.model:
-            argv.extend(["--model", agent.model])
-        if not model_has_effort:
-            argv.extend(["--effort", resolved_effort])
-        argv.extend(
-            [
-                "--dangerously-skip-permissions",
-                "--output-format",
-                "stream-json",
-                "--print",
-                prompt,
-                "--print-timeout",
-                _agy_print_timeout(timeout_seconds),
-            ]
-        )
-
-    return shlex.join(argv), repo_root, cli
+    return build_cli_command(
+        cli,
+        agent.model,
+        prompt,
+        effort=resolved_effort if not model_has_effort else None,
+        timeout_seconds=timeout_seconds,
+    ), repo_root, cli
 
 
 def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -> str:

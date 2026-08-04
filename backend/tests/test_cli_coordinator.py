@@ -16,6 +16,7 @@ from app.services.cli_dispatcher import (
     build_cli_command,
     write_mcp_config,
 )
+from app.services.command_builder import build_cli_command as shared_build_cli_command
 from app.services.coordinator import CoordinatorService
 from app.services.process_manager import ProcessResult, ProcessStatus
 
@@ -46,12 +47,55 @@ def test_prompt_formatter_preserves_system_turns_and_tool_results():
 
 
 def test_cli_commands_use_account_login_and_shell_safe_prompt():
-    assert build_cli_command("claude", "claude-sonnet-4", 'say "hi"').startswith(
-        "claude --model claude-sonnet-4 -p"
-    )
+    claude_argv = shlex.split(build_cli_command("claude", "claude-sonnet-4", 'say "hi"'))
+    assert claude_argv[:2] == ["claude", "--model"]
+    assert "--dangerously-skip-permissions" in claude_argv
+    assert claude_argv[claude_argv.index("-p") + 1] == 'say "hi"'
     agy_command = build_cli_command("agy", "gemini-2.5-pro", "hello world")
-    assert "agy --model gemini-2.5-pro --print" in agy_command
+    assert "--dangerously-skip-permissions" in shlex.split(agy_command)
+    assert "--print" in shlex.split(agy_command)
     assert "hello world" in agy_command
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cli,model,required",
+    [
+        ("claude", "claude-sonnet-4", {"--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"}),
+        ("agy", "gemini-2.5-pro", {"--dangerously-skip-permissions", "--output-format", "stream-json", "--print", "--print-timeout"}),
+        ("qwen", "qwen-coder", {"--yolo", "--output-format", "stream-json"}),
+        ("codex", "gpt-5-codex", {"--json", "--dangerously-bypass-approvals-and-sandbox"}),
+    ],
+)
+async def test_planner_dispatcher_uses_one_full_cli_contract(
+    cli, model, required, monkeypatch, tmp_path
+):
+    manager = MagicMock()
+    manager.run_with_streaming.return_value = iter(
+        [ProcessResult(ProcessStatus.COMPLETED, 0, None)]
+    )
+    monkeypatch.setattr(
+        "app.services.cli_dispatcher.ProcessManager",
+        MagicMock(return_value=manager),
+    )
+
+    async for _ in CLIDispatcher(working_directory=str(tmp_path)).spawn(
+        cli, model, "return the plan as JSON"
+    ):
+        pass
+
+    command, _ = manager.run_with_streaming.call_args.args
+    argv = shlex.split(command)
+    assert set(required).issubset(argv)
+    assert shared_build_cli_command is build_cli_command
+    assert argv.count("--output-format") <= 1
+    if cli == "agy":
+        assert argv[argv.index("--print") + 1] == "return the plan as JSON"
+        assert argv[-2:] == ["--print-timeout", "14400s"]
+    if cli == "qwen":
+        assert manager.run_with_streaming.call_args.kwargs["env"][
+            "QWEN_CODE_SUPPRESS_YOLO_WARNING"
+        ] == "1"
 
 
 @pytest.mark.asyncio
@@ -73,7 +117,10 @@ async def test_cli_dispatcher_forwards_process_output_and_raises_failures(monkey
 
     assert chunks == ["first\n", "second\n"]
     command, cwd = manager.run_with_streaming.call_args.args
-    assert command.startswith("claude --model claude-sonnet-4 --mcp-config")
+    argv = shlex.split(command)
+    assert argv[:2] == ["claude", "--model"]
+    assert "--mcp-config" in argv
+    assert "--dangerously-skip-permissions" in argv
     assert cwd == "/tmp"
     manager.terminate.assert_called_once()
 
@@ -178,7 +225,10 @@ async def test_cli_coordinator_rehydrates_history_when_switching_models(db_sessi
 
     second_command = second_manager.run_with_streaming.call_args.args[0]
     # agy uses --model (not --agent) and does not support --mcp-config.
-    assert second_command.startswith("agy --model gemini-2.5-pro --print")
+    second_argv = shlex.split(second_command)
+    assert second_argv[:3] == ["agy", "--model", "gemini-2.5-pro"]
+    assert "--dangerously-skip-permissions" in second_argv
+    assert "--print" in second_argv
     assert "USER:\nRemember my name is Ada." in second_command
     assert "ASSISTANT:\nAda remembered" in second_command
     assert "USER:\nWhat is my name?" in second_command
@@ -225,7 +275,7 @@ def test_build_cli_command_codex_omits_mcp_config():
     """codex exec does not support --mcp-config; the flag must not appear."""
     command = build_cli_command("codex", "gpt-5-codex", "hello", "/tmp/ct-mcp-x.json")
     assert "--mcp-config" not in command
-    assert "codex exec -m gpt-5-codex" in command
+    assert "codex exec --json -m gpt-5-codex" in command
 
 
 def test_build_mcp_config_registers_the_native_http_server():
@@ -306,7 +356,8 @@ async def test_dispatcher_reads_mcp_env_defaults(monkeypatch):
 def test_cli_commands_forward_configured_effort():
     # agy: gemini-3.6-flash REQUIRES --effort; exits 1 without it.
     agy = build_cli_command("agy", "gemini-3.6-flash", "hi", effort="high")
-    assert "--effort high --print hi" in agy
+    assert "--effort high" in agy
+    assert "--print hi" in agy
     # model names already carrying an effort suffix must not get the flag twice
     suffixed = build_cli_command("agy", "gemini-3.6-flash-high", "hi", effort="high")
     assert "--effort" not in suffixed
