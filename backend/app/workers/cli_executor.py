@@ -1030,23 +1030,13 @@ def execute_agent_run(
             },
         )
 
-        if result.status == ProcessStatus.FAILED and attempt < run.max_attempts:
-            run.status = "queued"
-            run.completed_at = None
-            db.commit()
-            publish_status(
-                run_id,
-                "retrying",
-                attempt=attempt,
-                max_attempts=run.max_attempts,
-                exit_code=result.exit_code,
-                error=result.error,
-            )
-            raise AgentExecutionError(result.error or "Agent process failed")
-
-        # Parse only after a terminal attempt.  A retry must not create a
-        # second usage row for the same AgentRun, and malformed vendor output
-        # is intentionally a no-op.
+        # Persist vendor-reported usage before retrying a failed attempt.  A
+        # CLI can time out internally (for example agy's default 5-minute
+        # print wait) and exit non-zero after consuming tokens.  The
+        # agent_run_id/provider/operation uniqueness check keeps retries
+        # idempotent while ensuring a terminal timeout is not the first point
+        # at which usage becomes visible.
+        raw_output = ""
         if result.status != ProcessStatus.CANCELLED:
             raw_output = "\n".join(
                 event.raw_output
@@ -1062,6 +1052,20 @@ def execute_agent_run(
                 _extract_explicit_result_ref(raw_output) or explicit_result_ref
             )
             _record_cli_usage(db, run, run.cli, raw_output)
+
+        if result.status == ProcessStatus.FAILED and attempt < run.max_attempts:
+            run.status = "queued"
+            run.completed_at = None
+            db.commit()
+            publish_status(
+                run_id,
+                "retrying",
+                attempt=attempt,
+                max_attempts=run.max_attempts,
+                exit_code=result.exit_code,
+                error=result.error,
+            )
+            raise AgentExecutionError(result.error or "Agent process failed")
 
         run.status = result.status.value
         run.completed_at = datetime.now(timezone.utc)

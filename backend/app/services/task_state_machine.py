@@ -1043,6 +1043,7 @@ class TaskStateMachine:
                 project,
                 effort=resolved_effort,
                 db=self.db,
+                timeout_seconds=resolved_timeout,
             )
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc
@@ -1134,6 +1135,7 @@ class TaskStateMachine:
                 base_ref,
                 head_ref,
                 db=self.db,
+                timeout_seconds=resolved_timeout,
             )
         except ValueError as exc:
             raise PrerequisiteError(str(exc)) from exc
