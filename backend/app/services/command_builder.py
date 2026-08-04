@@ -95,7 +95,7 @@ def build_dispatch_command(
         argv = ["qwen"]
         if agent.model:
             argv.extend(["-m", agent.model])
-        argv.extend(["-p", prompt, "--output-format", "json"])
+        argv.extend(["-p", prompt, "--output-format", "stream-json"])
     else:
         # agy: the prompt must directly follow --print — another flag in
         # between makes agy drop the prompt and answer about the flag
@@ -109,7 +109,7 @@ def build_dispatch_command(
             [
                 "--dangerously-skip-permissions",
                 "--output-format",
-                "json",
+                "stream-json",
                 "--print",
                 prompt,
             ]
@@ -184,7 +184,7 @@ def build_review_command(
         argv = ["qwen"]
         if agent.model:
             argv.extend(["-m", agent.model])
-        argv.extend(["-p", prompt, "--output-format", "json"])
+        argv.extend(["-p", prompt, "--output-format", "stream-json"])
     else:
         # agy: the prompt must directly follow --print (see build_dispatch_command).
         argv = ["agy"]
@@ -196,7 +196,7 @@ def build_review_command(
             [
                 "--dangerously-skip-permissions",
                 "--output-format",
-                "json",
+                "stream-json",
                 "--print",
                 prompt,
             ]
