@@ -36,7 +36,18 @@ from app.core.config import settings
 
 UNCONFIRMED_SUFFIX = " *(chưa xác nhận)*"
 _MAX_ATTEMPTS = 2
-PLAN_CRITIC_TOKEN_BUDGET = 50_000
+# Raised 50k -> 150k on 2026-08-04. VOMA-033's critic blew the 50k cap on a
+# normal-sized plan, and the cap is meant to stop a runaway critic, not to make
+# ordinary plans unreviewable.
+#
+# Why 150k is still cheap: one execute run measures ~1.03M tokens. The critic
+# exists to prevent extra execute rounds (0.474 -> 0 extra rounds/task in the
+# before/after sample), so each round it saves is worth ~7x this whole budget.
+#
+# Note the estimator below counts UTF-8 *bytes*/3. Vietnamese runs 2-3 bytes per
+# character, so Vietnamese plans are charged well above their real token count —
+# part of why 50k bound sooner than it looks.
+PLAN_CRITIC_TOKEN_BUDGET = 150_000
 _PLAN_CRITIC_MAX_OUTPUT_TOKENS = 4_096
 _SEARCH_QUERY_MAX_CHARS = 500
 _PRIOR_PLAN_MAX_CHARS = 25_000
@@ -300,13 +311,30 @@ def _parse_json(content: str) -> dict:
         if text.startswith("json"):
             text = text[4:]
     text = text.strip()
-    # Last resort: models that ignore "ONLY JSON" and add prose around the
-    # object. Take the outermost {...} span instead of failing outright.
+    # Models that ignore "ONLY JSON" wrap the object in prose. Skip anything
+    # before the first '{' ...
     if not text.startswith("{"):
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            text = text[start : end + 1]
-    return json.loads(text)
+        start = text.find("{")
+        if start != -1:
+            text = text[start:]
+    # ... and let raw_decode stop at the end of the first complete object,
+    # ignoring whatever follows.
+    #
+    # Trailing content used to be fatal: the old recovery was gated on
+    # ``not text.startswith("{")``, so output that *began* with a valid object
+    # and then added a closing sentence skipped recovery entirely and died in
+    # json.loads with "Extra data: line 2 column 1". Observed live on VOMA-033,
+    # where the agy plan critic failed that way three times in a row while the
+    # claude planner — same parser, no trailing prose — succeeded.
+    #
+    # raw_decode also replaces the old rfind("}") span, which silently picked
+    # the wrong closing brace whenever prose after the object contained one.
+    decoded, _ = json.JSONDecoder().raw_decode(text)
+    if not isinstance(decoded, dict):
+        raise json.JSONDecodeError(
+            f"expected a JSON object, got {type(decoded).__name__}", text, 0
+        )
+    return decoded
 
 
 async def generate_spec_plan(

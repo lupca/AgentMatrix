@@ -268,6 +268,60 @@ def test_parse_json_extracts_object_from_surrounding_prose():
     assert _parse_json(prose) == {"a": [1, 2]}
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param('{"a": 1}\nDone. I reviewed the plan.', id="trailing_prose"),
+        pytest.param('{"a": 1}\n{"ignored": true}', id="trailing_second_object"),
+        pytest.param('{"a": 1}\n\n', id="trailing_whitespace"),
+    ],
+)
+def test_parse_json_ignores_content_after_the_first_object(raw):
+    """Output that *starts* with a valid object must not die on what follows.
+
+    The old recovery was gated on ``not text.startswith("{")``, so this exact
+    shape skipped recovery and raised "Extra data: line 2 column 1". It took
+    down the agy plan critic on VOMA-033 three times in a row while the claude
+    planner — same parser, no trailing prose — passed, which is why the failure
+    looked CLI-specific rather than like a parser bug.
+    """
+    from app.services.spec_plan_generator import _parse_json
+
+    assert _parse_json(raw) == {"a": 1}
+
+
+def test_parse_json_picks_the_right_brace_with_prose_on_both_sides():
+    """A '}' inside trailing prose must not extend the parsed span.
+
+    The previous rfind("}") span swallowed it and produced garbage instead of
+    failing, which is worse than either correct parsing or a clean error.
+    """
+    from app.services.spec_plan_generator import _parse_json
+
+    raw = 'Review below:\n{"a": 1}\nSee the } in this sentence.'
+    assert _parse_json(raw) == {"a": 1}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param("I could not complete the review.", id="no_json_at_all"),
+        pytest.param("[1, 2, 3]", id="json_array_not_object"),
+        pytest.param('{"a": 1', id="truncated_object"),
+    ],
+)
+def test_parse_json_still_rejects_unusable_output(raw):
+    """Recovery must not turn a real failure into silence.
+
+    A critic that returned no usable object has not reviewed anything; the
+    caller retries on JSONDecodeError, so failing loudly here is the point.
+    """
+    from app.services.spec_plan_generator import _parse_json
+
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json(raw)
+
+
 def test_prompt_includes_description_context_and_quality_bars():
     from app.db.models import Task
     from app.services.spec_plan_generator import _build_prompt
