@@ -18,6 +18,7 @@ from typing import Any
 
 import psutil
 from dramatiq.middleware import CurrentMessage
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.db.base import SessionLocal
@@ -28,6 +29,7 @@ from app.db.models import (
     AgentRun,
     LLMUsage,
     RunResourceUsage,
+    Task,
     VendorRawEvent,
 )
 from app.schemas.task import ReviewResult
@@ -252,7 +254,13 @@ def _record_run_resource_usage(db: Session, run: AgentRun) -> None:
     )
     active_seconds = 0.0
     if run.started_at and run.completed_at:
-        active_seconds = max(0.0, (run.completed_at - run.started_at).total_seconds())
+        started_at = run.started_at
+        completed_at = run.completed_at
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
+        if completed_at.tzinfo is None:
+            completed_at = completed_at.replace(tzinfo=timezone.utc)
+        active_seconds = max(0.0, (completed_at - started_at).total_seconds())
     usage = db.get(RunResourceUsage, run.id)
     if usage is None:
         usage = RunResourceUsage(agent_run_id=run.id)
@@ -382,6 +390,107 @@ def _cleanup_stale_process(run: AgentRun, grace_seconds: float = 2.0) -> None:
         return
     except (psutil.Error, OSError):
         logger.exception("Could not clean stale process %s for run %s", run.pid, run.id)
+
+
+def _execution_failure_code(error: str, *, status: str | None = None) -> str:
+    """Return a stable, low-cardinality code for execution idempotency."""
+    message = (error or "").lower()
+    if "without committed changes" in message:
+        return "no-committed-changes"
+    if "declared 'result_ref: none'" in message:
+        return "none-with-committed-changes"
+    if "could not determine repository head" in message:
+        return "missing-base"
+    if status:
+        return f"execution-{status.lower()}"
+    return "unexpected-execution-failure"
+
+
+def _record_execution_failure(
+    db: Session,
+    orch_svc_cls: type[TaskOrchestrationService],
+    *,
+    task_id: str,
+    error: str,
+    actor: str,
+    idempotency_key: str,
+    run_id: str,
+    expected_status: str = "dispatched",
+    error_code: str | None = None,
+) -> None:
+    """Record a failure without turning an idempotent replay into a retry."""
+    try:
+        orch_svc_cls(db).record_execution_failure(
+            task_id=task_id,
+            error=error,
+            actor=actor,
+            idempotency_key=idempotency_key,
+            expected_status=expected_status,
+            run_id=run_id,
+            error_code=error_code or _execution_failure_code(error),
+        )
+    except OrchestrationError as exc:
+        from app.services.task_validators import IdempotencyConflictError
+
+        if not isinstance(exc, IdempotencyConflictError):
+            raise
+        db.rollback()
+        logger.warning(
+            "Execution failure for run %s was already recorded under %s",
+            run_id,
+            idempotency_key,
+        )
+
+
+def _claim_run_attempt(db: Session, run: AgentRun, attempt: int) -> bool:
+    """Atomically acquire the durable per-run execution lock."""
+    if run.status not in {"queued", "failed"}:
+        return False
+    now = datetime.now(timezone.utc)
+    db.flush()
+    result = db.execute(
+        update(AgentRun)
+        .where(
+            AgentRun.id == run.id,
+            AgentRun.status.in_(["queued", "failed"]),
+        )
+        .values(
+            status="running",
+            attempt=attempt,
+            started_at=now,
+            completed_at=None,
+            exit_code=None,
+            pid=None,
+            error_message=None,
+            updated_at=now,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        db.rollback()
+        return False
+    db.commit()
+    db.refresh(run)
+    return True
+
+
+def _running_attempt_is_alive(run: AgentRun) -> bool:
+    """Treat a running row as locked unless its recorded process is dead."""
+    if not run.pid:
+        # The worker may have claimed the row but not persisted the child PID.
+        return True
+    try:
+        process = psutil.Process(run.pid)
+        if not process.is_running() or process.status() == psutil.STATUS_ZOMBIE:
+            return False
+        command_line = " ".join(process.cmdline())
+        # An unknown command line is safer to treat as live than to kill or
+        # overlap a process that may belong to this run after PID reuse.
+        return not run.command or run.command in command_line
+    except psutil.NoSuchProcess:
+        return False
+    except psutil.Error:
+        return True
 
 
 def _parse_result_ref(repo_root: str) -> str | None:
@@ -703,7 +812,20 @@ def _record_unexpected_failure(
     orch_cls = _get_attr("TaskOrchestrationService", TaskOrchestrationService)
     try:
         run = db.query(AgentRun).filter(AgentRun.id == run_id).first()
-        should_retry = run is None or run.attempt < run.max_attempts
+        task = db.get(Task, task_id) if run is not None else None
+        task_terminal = task is not None and task.status in {"done", "failed", "cancelled"}
+        if run is not None and (run.status == "cancelled" or task_terminal):
+            run.status = "cancelled"
+            run.pid = None
+            run.completed_at = run.completed_at or datetime.now(timezone.utc)
+            run.error_message = run.error_message or "Task reached terminal state"
+            db.commit()
+            return False
+
+        should_retry = run is None or (
+            run.status in {"queued", "running", "failed"}
+            and run.attempt < run.max_attempts
+        )
         if run is not None and should_retry:
             run.status = "queued"
             run.pid = None
@@ -714,12 +836,15 @@ def _record_unexpected_failure(
             run.pid = None
             run.error_message = str(exc)
             run.completed_at = datetime.now(timezone.utc)
-            orch_cls(db).record_execution_failure(
+            _record_execution_failure(
+                db,
+                orch_cls,
                 task_id=task_id,
                 error=str(exc),
                 actor=f"agent:{run.agent_id}",
-                idempotency_key=f"run:{run.id}:unexpected-failure",
+                idempotency_key=f"run:{run.id}:execution-failure:unexpected",
                 run_id=run.id,
+                error_code="unexpected-execution-failure",
             )
         db.commit()
         return should_retry
@@ -745,7 +870,25 @@ def execute_agent_run(
     emit_event_fn = _get_attr("emit_task_event", emit_task_event)
 
     db: Session = session_factory()
-    cancel_check = _throttled_cancel_check(run_id)
+    redis_cancel_check = _throttled_cancel_check(run_id)
+
+    def cancel_check() -> bool:
+        if redis_cancel_check():
+            return True
+        current_run_status = (
+            db.query(AgentRun.status)
+            .filter(AgentRun.id == run_id)
+            .scalar()
+        )
+        if current_run_status == "cancelled":
+            return True
+        current_task_status = (
+            db.query(Task.status)
+            .filter(Task.id == task_id)
+            .scalar()
+        )
+        return current_task_status in {"done", "failed", "cancelled"}
+
     process_manager = process_mgr_cls(
         timeout_seconds=timeout_seconds,
         cancel_check=cancel_check,
@@ -766,6 +909,33 @@ def execute_agent_run(
             run.status == "failed" and run.attempt >= run.max_attempts
         ):
             logger.info("Ignoring duplicate delivery for terminal run %s", run_id)
+            return run.exit_code
+
+        task = db.get(Task, task_id)
+        if task is not None and task.status in {"done", "failed", "cancelled"}:
+            run.status = "cancelled"
+            run.error_message = f"Task reached terminal state: {task.status}"
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            return None
+
+        if run.status == "running":
+            if _running_attempt_is_alive(run):
+                logger.info("Ignoring duplicate delivery while run %s is active", run_id)
+                return run.exit_code
+            # Worker restart recovery: only a definitely dead recorded PID
+            # releases the lock.  A missing PID remains locked because it can
+            # represent the short claim-to-process-start window.
+            run.status = "queued"
+            run.pid = None
+            run.completed_at = None
+            run.error_message = "Recovered stale running attempt"
+            db.commit()
+            db.refresh(run)
+
+        attempt = _current_attempt(run)
+        if not _claim_run_attempt(db, run, attempt):
+            logger.info("Ignoring duplicate delivery while run %s is active", run_id)
             return run.exit_code
 
         brake = orch_svc_cls(db).check_brakes(
@@ -792,15 +962,6 @@ def execute_agent_run(
         )
         if is_review_task:
             _prepare_review_artifact(repo_root, task_id, task.acceptance_criteria)
-        attempt = _current_attempt(run)
-        run.status = "running"
-        run.attempt = attempt
-        run.started_at = datetime.now(timezone.utc)
-        run.completed_at = None
-        run.exit_code = None
-        run.pid = None
-        run.error_message = None
-
         base_ref = _run_base_ref(run.result_ref) or _parse_result_ref(repo_root)
         if base_ref is None:
             run.status = "failed"
@@ -816,12 +977,15 @@ def execute_agent_run(
                     "exit_code": -1,
                 },
             )
-            orch_svc_cls(db).record_execution_failure(
+            _record_execution_failure(
+                db,
+                orch_svc_cls,
                 task_id=task_id,
                 error=run.error_message,
                 actor=f"agent:{run.agent_id}",
-                idempotency_key=f"run:{run.id}:missing-base",
+                idempotency_key=f"run:{run.id}:execution-failure:missing-base",
                 run_id=run.id,
+                error_code="missing-base",
             )
             _nudge_driver(task_id, "run_agent_completed")
             return None
@@ -855,6 +1019,11 @@ def execute_agent_run(
             worktree_path = worktree_manager.create(run.id, worktree_ref)
             exec_cwd = worktree_path
         except WorktreeUnsupportedError as exc:
+            run.status = "queued"
+            run.pid = None
+            run.error_message = str(exc)
+            run.completed_at = None
+            db.commit()
             raise AgentExecutionError(
                 "Could not create an isolated git worktree for run "
                 f"{run_id}; refusing to use the integration checkout: {exc}"
@@ -1052,6 +1221,22 @@ def execute_agent_run(
             )
             _record_cli_usage(db, run, run.cli, raw_output)
 
+        # A terminal task wins over a late process result.  Do not let a
+        # worker that outlived the task submit a verdict or re-queue itself.
+        db.refresh(run)
+        db.refresh(task)
+        if run.status == "cancelled" or task.status in {"done", "failed", "cancelled"}:
+            run.status = "cancelled"
+            run.pid = None
+            run.completed_at = run.completed_at or datetime.now(timezone.utc)
+            run.error_message = run.error_message or f"Task reached terminal state: {task.status}"
+            _record_run_resource_usage(db, run)
+            db.commit()
+            publish_status(run_id, "cancelled", attempt=attempt, error=run.error_message)
+            clear_cancel_request(run_id)
+            _nudge_driver(task_id, "run_agent_completed")
+            return result.exit_code
+
         if result.status == ProcessStatus.FAILED and attempt < run.max_attempts:
             run.status = "queued"
             run.completed_at = None
@@ -1108,12 +1293,15 @@ def execute_agent_run(
                     run.status = ProcessStatus.FAILED.value
                     effective_status = ProcessStatus.FAILED.value
                     run.error_message = err
-                    orch_svc_cls(db).record_execution_failure(
+                    _record_execution_failure(
+                        db,
+                        orch_svc_cls,
                         task_id=task_id,
                         error=err,
                         actor=f"agent:{run.agent_id}",
-                        idempotency_key=f"run:{run.id}:none-with-commits",
+                        idempotency_key=f"run:{run.id}:execution-failure:none-with-committed-changes",
                         run_id=run.id,
+                        error_code="none-with-committed-changes",
                     )
                 else:
                     try:
@@ -1127,12 +1315,15 @@ def execute_agent_run(
                         run.status = ProcessStatus.FAILED.value
                         effective_status = ProcessStatus.FAILED.value
                         run.error_message = str(exc)
-                        orch_svc_cls(db).record_execution_failure(
+                        _record_execution_failure(
+                            db,
+                            orch_svc_cls,
                             task_id=task_id,
                             error=str(exc),
                             actor=f"agent:{run.agent_id}",
-                            idempotency_key=f"run:{run.id}:no-commit-rejected",
+                            idempotency_key=f"run:{run.id}:execution-failure:no-commit-rejected",
                             run_id=run.id,
+                            error_code="no-commit-rejected",
                         )
             else:
                 result_ref, no_change_error = _build_execution_result_ref(
@@ -1144,12 +1335,15 @@ def execute_agent_run(
                     run.status = ProcessStatus.FAILED.value
                     effective_status = ProcessStatus.FAILED.value
                     run.error_message = no_change_error
-                    orch_svc_cls(db).record_execution_failure(
+                    _record_execution_failure(
+                        db,
+                        orch_svc_cls,
                         task_id=task_id,
                         error=no_change_error,
                         actor=f"agent:{run.agent_id}",
-                        idempotency_key=f"run:{run.id}:no-committed-changes",
+                        idempotency_key=f"run:{run.id}:execution-failure:no-committed-changes",
                         run_id=run.id,
+                        error_code="no-committed-changes",
                     )
                 else:
                     run.result_ref = result_ref
@@ -1160,7 +1354,6 @@ def execute_agent_run(
                         idempotency_key=f"run:{run.id}:execution-success",
                         run_id=run.id,
                     )
-                    from app.db.models import Task
                     task_obj = db.get(Task, task_id)
                     if task_obj and task_obj.project and repo_root:
                         record_commit_event(
@@ -1169,6 +1362,8 @@ def execute_agent_run(
                             repo_root,
                             commit_sha=run.result_ref,
                         )
+        elif result.status == ProcessStatus.CANCELLED:
+            run.status = ProcessStatus.CANCELLED.value
         elif is_review_run:
             orch_svc_cls(db).record_review_failure(
                 task_id=task_id,
@@ -1178,12 +1373,15 @@ def execute_agent_run(
                 run_id=run.id,
             )
         else:
-            orch_svc_cls(db).record_execution_failure(
+            _record_execution_failure(
+                db,
+                orch_svc_cls,
                 task_id=task_id,
                 error=result.error or result.status.value,
                 actor=f"agent:{run.agent_id}",
-                idempotency_key=f"run:{run.id}:execution-{result.status.value}",
+                idempotency_key=f"run:{run.id}:execution-failure:{result.status.value}",
                 run_id=run.id,
+                error_code=f"execution-{result.status.value}",
             )
         _record_run_resource_usage(db, run)
         db.commit()

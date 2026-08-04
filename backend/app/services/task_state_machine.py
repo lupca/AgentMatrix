@@ -330,11 +330,37 @@ class TaskStateMachine:
 
     def _sync_after_transition(self, task: Task) -> None:
         if task.status in {"done", "failed", "cancelled"}:
+            self._cancel_active_runs(task)
             self._reject_all_pending_gates(
                 task, f"Task reached terminal state: {task.status}"
             )
         else:
             self.sync_awaiting_approval(task)
+
+    def _cancel_active_runs(self, task: Task) -> int:
+        """Cancel runs that must not outlive a terminal task projection.
+
+        This is an atomic status claim, not a direct process-side effect.  A
+        worker observing the cancelled row exits through its normal cancel
+        path, so the DB transition and the process stop remain retry-safe.
+        """
+        now = datetime.now(timezone.utc)
+        self.db.flush()
+        result = self.db.execute(
+            update(AgentRun)
+            .where(
+                AgentRun.task_id == task.id,
+                AgentRun.status.in_(["queued", "running"]),
+            )
+            .values(
+                status="cancelled",
+                error_message=f"Task reached terminal state: {task.status}",
+                completed_at=now,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        return int(result.rowcount or 0)
 
     def audit(
         self,
@@ -1399,11 +1425,13 @@ class TaskStateMachine:
         idempotency_key: str,
         expected_status: str = "dispatched",
         run_id: str | None = None,
+        error_code: str | None = None,
     ) -> TransitionResult:
         task = self.validator.task(task_id)
+        normalized_error_code = (error_code or "execution-failed").strip().lower()
         payload = {
             "expected_status": expected_status,
-            "error": error,
+            "error_code": normalized_error_code,
             "run_id": run_id,
         }
         input_hash = TaskValidator.input_hash(payload)

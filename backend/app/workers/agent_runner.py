@@ -489,11 +489,15 @@ def _advance_awaiting_review(
 
     round_ = service.changes_round_count(task.id)
     try:
+        # Reviewer identity is part of the idempotency input.  Replacing a
+        # matcher suggestion in the same review round is valid; using only
+        # task+round made that legal request collide after the first review
+        # gate had already consumed tokens.
         result = service.request_review(
             task_id=task.id,
             reviewer=reviewer,
             actor="system:orchestration-driver",
-            idempotency_key=f"advance:{task.id}:review:r{round_}",
+            idempotency_key=f"advance:{task.id}:review:r{round_}:reviewer:{reviewer}",
             selection_reason=selection_reason,
         )
     except OrchestrationError as exc:

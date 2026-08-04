@@ -324,7 +324,9 @@ class TaskValidator:
             )
             self.db.add(record)
             self.db.flush()
-            TaskStateMachine(self.db)._reject_all_pending_gates(
+            state_machine = TaskStateMachine(self.db)
+            state_machine._cancel_active_runs(task)
+            state_machine._reject_all_pending_gates(
                 task, f"Task reached terminal state: {task.status}"
             )
             self.db.add(

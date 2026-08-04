@@ -485,6 +485,10 @@ def _next_agent_event_seq(db: Session, run_id: str, count: int = 1) -> int:
     """
     from sqlalchemy import text
 
+    # SessionLocal disables autoflush.  Flush before the raw UPDATE so a
+    # just-created AgentRun (and any pending state used by this allocation)
+    # is visible to the database statement.
+    db.flush()
     result = db.execute(
         text("""
             UPDATE agent_runs

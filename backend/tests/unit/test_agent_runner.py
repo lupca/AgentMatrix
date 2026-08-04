@@ -470,6 +470,78 @@ def test_two_concurrent_agent_runs_commit_independently(monkeypatch, git_repo_ro
     assert _worktree_entries(git_repo_root).count("[") == 1
 
 
+def test_duplicate_delivery_same_run_only_one_attempt_runs(
+    monkeypatch, git_repo_root, tmp_path
+):
+    """A redelivered Dramatiq message cannot start a second attempt/seq stream."""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'worker.sqlite'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    db = factory()
+    db.add(Project(id="project", name="Project", repo_root=git_repo_root))
+    db.add(Task(id="TASK-LOCK", project="project", title="locked", status="dispatched"))
+    db.add(
+        AgentRun(
+            id="run-lock",
+            task_id="TASK-LOCK",
+            agent_id="@test",
+            cli="agy",
+            command="echo",
+        )
+    )
+    db.commit()
+    db.close()
+
+    entered = threading.Event()
+    release = threading.Event()
+    manager = MagicMock()
+
+    def stream(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=5)
+        yield ProcessResult(ProcessStatus.COMPLETED, 0, None)
+
+    manager.run_with_streaming.side_effect = stream
+    monkeypatch.setattr(runner, "SessionLocal", factory)
+    monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
+    monkeypatch.setattr(runner, "redis_client", MagicMock())
+    monkeypatch.setattr(runner, "is_cancel_requested", MagicMock(return_value=False))
+    monkeypatch.setattr(runner, "clear_cancel_request", MagicMock())
+
+    first_errors = []
+
+    def first_attempt():
+        try:
+            runner.run_agent.fn("run-lock", "TASK-LOCK", "echo", git_repo_root, 5)
+        except Exception as exc:  # pragma: no cover - assertion below surfaces it
+            first_errors.append(exc)
+
+    thread = threading.Thread(target=first_attempt)
+    thread.start()
+    assert entered.wait(timeout=5)
+
+    # The first attempt has committed its running claim; the duplicate must
+    # return without entering ProcessManager or allocating event sequences.
+    assert runner.run_agent.fn("run-lock", "TASK-LOCK", "echo", git_repo_root, 5) is None
+    assert manager.run_with_streaming.call_count == 1
+
+    release.set()
+    thread.join(timeout=10)
+    assert not first_errors
+
+    db = factory()
+    run = db.get(AgentRun, "run-lock")
+    seqs = [event.seq for event in run.agent_events]
+    assert seqs == list(range(len(seqs)))
+    assert len(seqs) == len(set(seqs))
+    db.close()
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
 def test_concurrency_brake_queues_run_without_spawning_process(
     worker_db, monkeypatch, git_repo_root
 ):
