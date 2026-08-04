@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -20,6 +21,7 @@ SPEC_CONFIDENCES = {"asserted", "derived", "verified"}
 RELATION_KINDS = {"conflicts_with", "duplicates", "refines", "depends_on"}
 ANCHOR_RELATION_KINDS = {"implements", "constrains", "tests", "documents"}
 TASK_LINK_RELATIONS = {"implements", "modifies", "violates", "references"}
+_ANCHOR_SHA_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 _ITEM_FIELDS = {
     "project_id", "kind", "title", "body", "status", "supersedes_id",
@@ -267,14 +269,24 @@ def write_specs(
                 anchor_relation = _clean_string(operation.get("relation"), "relation", required=True)
                 if anchor_relation not in ANCHOR_RELATION_KINDS:
                     raise SpecError(f"anchor relation must be one of {sorted(ANCHOR_RELATION_KINDS)}")
-                anchor_sha = _clean_string(operation.get("anchor_sha"), "anchor_sha")
+                # Always attempt the server-side computation first.  A value from an
+                # agent is never trusted when the source is available; the explicit
+                # value is only a compatibility fallback for repos not checked out
+                # on the server, and must be a symbol hash rather than a commit SHA.
+                computed_anchor_sha = compute_anchor_sha(repo, path, symbol)
+                supplied_anchor_sha = _clean_string(operation.get("anchor_sha"), "anchor_sha")
+                if supplied_anchor_sha and not _ANCHOR_SHA_RE.fullmatch(supplied_anchor_sha):
+                    raise SpecError(
+                        "anchor_sha must be exactly 64 hexadecimal characters; "
+                        "a commit SHA or other value is not accepted"
+                    )
+                anchor_sha = computed_anchor_sha or supplied_anchor_sha
                 if not anchor_sha:
-                    anchor_sha = compute_anchor_sha(repo, path, symbol)
-                    if not anchor_sha:
-                        raise SpecError(
-                            f"could not resolve symbol '{symbol}' in {path} under {repo}; "
-                            "pass anchor_sha explicitly if that path isn't checked out here"
-                        )
+                    raise SpecError(
+                        f"could not resolve symbol '{symbol}' in {path} under {repo}; "
+                        "provide a 64-character hexadecimal anchor_sha only when the repo "
+                        "is not checked out here"
+                    )
                 exists = db.query(SpecAnchor).filter_by(
                     spec_item_id=item.id, repo=repo, path=path, symbol=symbol, relation=anchor_relation
                 ).first()

@@ -10,7 +10,7 @@ from app.db.models import OutboxEvent, Project, SpecAnchor, SpecItem
 from app.services.command_router import CommandRouter
 from app.services.outbox import publish_pending_events
 from app.services.spec_anchor import apply_commit_staleness, compute_anchor_sha
-from app.services.spec_service import write_specs
+from app.services.spec_service import SpecError, write_specs
 
 
 MODULE_V1 = "def foo():\n    return 1\n\ndef bar():\n    return 2\n"
@@ -72,6 +72,42 @@ def test_anchor_op_hashes_symbol_content_from_repo(anchored_item, db_session, gi
     assert row.path == "mod.py"
     assert row.symbol == "foo"
     assert row.anchor_sha == expected
+
+
+def test_anchor_op_ignores_supplied_hash_when_source_is_available(
+    anchored_item, db_session, git_repo_root
+):
+    result = write_specs(db_session, [
+        {
+            "op": "create", "id": "spec-anchor-server-wins", "project_id": "anchor-proj",
+            "kind": "constraint", "title": "server hash", "body": "server computes it",
+        },
+        {
+            "op": "anchor", "spec_item_id": "spec-anchor-server-wins", "repo": git_repo_root,
+            "path": "mod.py", "symbol": "foo", "relation": "implements",
+            "anchor_sha": "a" * 64,
+        },
+    ])
+
+    assert result["anchors"][0]["anchor_sha"] == compute_anchor_sha(git_repo_root, "mod.py", "foo")
+    assert result["anchors"][0]["anchor_sha"] != "a" * 64
+
+
+def test_anchor_op_rejects_commit_sha_even_when_source_is_available(
+    anchored_item, db_session, git_repo_root
+):
+    with pytest.raises(SpecError, match="exactly 64 hexadecimal characters"):
+        write_specs(db_session, [
+            {
+                "op": "create", "id": "spec-anchor-invalid", "project_id": "anchor-proj",
+                "kind": "constraint", "title": "invalid hash", "body": "reject commit SHA",
+            },
+            {
+                "op": "anchor", "spec_item_id": "spec-anchor-invalid", "repo": git_repo_root,
+                "path": "mod.py", "symbol": "foo", "relation": "implements",
+                "anchor_sha": "b" * 40,
+            },
+        ])
 
 
 def test_commit_touching_anchored_symbol_marks_item_stale(anchored_item, db_session, git_repo_root):

@@ -1281,11 +1281,14 @@ class SpecAnchor(Base):
     """A pure-code anchor from a spec item to a repo/path/symbol (CTV2-1342).
 
     ``anchor_sha`` hashes the symbol's source at anchor time (see
-    ``app.services.spec_anchor.compute_anchor_sha``) -- an LLM never supplies
-    it directly. The commit-triggered invalidation engine recomputes the same
-    hash at the changed commit and flips the owning ``spec_item`` to
-    ``stale`` when it no longer matches; the anchor row itself is never
-    rewritten by that engine, only compared against.
+    ``app.services.spec_anchor.compute_anchor_sha``). ``spec_write`` always
+    computes it on the server and ignores a supplied value when the source is
+    available; a supplied value is only a compatibility fallback for a repo
+    that is not checked out and must be a 64-character hexadecimal symbol hash.
+    The commit-triggered invalidation engine recomputes the same hash at the
+    changed commit and flips the owning ``spec_item`` to ``stale`` when it no
+    longer matches; the anchor row itself is never rewritten by that engine,
+    only compared against.
     """
 
     __tablename__ = "spec_anchor"
