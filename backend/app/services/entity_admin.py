@@ -430,7 +430,7 @@ SETTINGS_WHITELIST: dict[str, str] = {
     "context_snapshot_top_n": "Number of recent tasks listed in the context snapshot.",
     "autonomy_enabled": "Global kill switch for autonomous task progression.",
     "max_cost_usd_per_task": "Maximum accumulated LLM cost allowed for one task.",
-    "max_tokens_per_task": "Maximum accumulated input, cached, and output tokens allowed for one task.",
+    "max_tokens_per_task": "Maximum accumulated total input and output tokens allowed for one task (cached input is already included in input_tokens).",
     "max_concurrent_runs": "Maximum number of queued or running agent runs.",
     "run_timeout_seconds": "Maximum wall-clock time for one agent run.",
     "max_active_seconds_per_run": "Maximum active execution time for one agent run.",

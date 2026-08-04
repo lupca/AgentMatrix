@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -24,6 +25,7 @@ from app.services.command_builder import review_result_path
 from app.services.tool_metrics import record_tool_metric
 
 OUTPUT_CHUNK_LINES = max(1, int(os.getenv("AGENT_OUTPUT_CHUNK_LINES", "100")))
+logger = logging.getLogger(__name__)
 
 
 class ReviewResultLoadError(ValueError):
@@ -270,10 +272,32 @@ def parse_cli_token_usage(cli: str, stdout: str) -> dict[str, Any] | None:
                         0,
                     )
 
+        raw_input_tokens = _nonnegative_int(usage.get("input_tokens"))
+        cached_tokens = _nonnegative_int(cached_tokens)
+
+        # Claude and Agy report the uncached input in input_tokens and cache
+        # reads in a separate field.  Codex and Qwen already report total
+        # input, with cache as a subset.  Persist one contract regardless of
+        # vendor: input_tokens is total input and cached_tokens is its subset.
+        if vendor in {"claude", "agy"}:
+            input_tokens = raw_input_tokens + cached_tokens
+        else:
+            input_tokens = raw_input_tokens
+
+        if cached_tokens > input_tokens:
+            logger.warning(
+                "CLI token usage invariant violated: cli=%s cached_tokens=%d "
+                "exceeds input_tokens=%d; capping cached_tokens to input_tokens",
+                vendor,
+                cached_tokens,
+                input_tokens,
+            )
+            cached_tokens = input_tokens
+
         result: dict[str, Any] = {
-            "input_tokens": _nonnegative_int(usage.get("input_tokens")),
+            "input_tokens": input_tokens,
             "output_tokens": _nonnegative_int(usage.get("output_tokens")),
-            "cached_tokens": _nonnegative_int(cached_tokens),
+            "cached_tokens": cached_tokens,
         }
 
         if vendor == "codex" and "reasoning_output_tokens" in usage:

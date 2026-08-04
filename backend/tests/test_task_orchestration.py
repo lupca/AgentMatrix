@@ -614,7 +614,7 @@ def test_cli_subscription_cost_does_not_trip_usd_brake_but_tokens_do(
             model="claude-sonnet-5",
             provider="claude",
             operation="cli",
-            input_tokens=2,
+            input_tokens=7,
             cached_tokens=5,
             output_tokens=4,
             cost_usd="100.0",
