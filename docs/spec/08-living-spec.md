@@ -1,12 +1,13 @@
 # 08 — Hệ spec sống
 
 > **TRẠNG THÁI: MỘT PHẦN ĐÃ TRIỂN KHAI.** Đã có thật trong code (CTV2-1341,
-> CTV2-1342): bảng `spec_item`/`spec_relation`/`spec_anchor`, cột
+> CTV2-1342, CTV2-1355, CTV2-1367): bảng
+> `spec_item`/`spec_relation`/`spec_anchor`/`spec_task_link`/`impl_design`, cột
 > `spec_item.stale_reason`, tool `spec_write`/`spec_get`/`spec_stale`, và cơ
 > chế mất hiệu lực thuần code ở mục *Cơ chế mất hiệu lực* dưới đây
 > (`backend/app/services/spec_anchor.py`, hook vào `_publish_graph_rebuild`
 > trong `backend/app/services/outbox.py`). Phần còn lại của file (spec_search,
-> spec_link như tool riêng, impl_design, pm_wbs_node, pm_document) **vẫn chỉ
+> spec_link như tool riêng, pm_wbs_node, pm_document) **vẫn chỉ
 > là thiết kế, chưa triển khai** — mọi bảng/tool có tiền tố đó khác các bảng
 > liệt kê ở trên đều chưa tồn tại.
 >
@@ -139,6 +140,14 @@ spec_relation (
   from_id, to_id,
   kind                  -- conflicts_with | duplicates | refines | depends_on
 )
+
+spec_task_link (
+  id, spec_item_id, task_id,
+  relation,             -- implements | modifies | violates | references
+  confidence,           -- asserted | derived | verified
+  created_by, created_at,
+  unique(spec_item_id, task_id, relation)
+)
 ```
 
 `spec_anchor` là bộ phận quyết định. Không có neo thì spec chỉ là văn bản và
@@ -148,6 +157,16 @@ không thể biết khi nào nó hết đúng.
 quyết định mới **neo được vào code**, tránh việc agent đời sau vô hiệu hoá một
 quyết định có chủ đích vì không biết nó tồn tại. Đây là dạng lệch spec nguy hiểm
 nhất vì nó âm thầm.
+
+`spec_task_link` là cạnh nhiều-nhiều nối hai nửa project spec và task plan. Một
+spec có thể được nhiều task hiện thực hoặc sửa qua thời gian; một task cũng có
+thể chạm nhiều spec. Cạnh được ghi **thủ công** qua op `"task_link"` của
+`spec_write`; CTV2-1367 không tự gợi ý liên kết và không tự phát hiện xung đột.
+Task land cũng chưa tự đánh dấu spec liên kết là stale trong thay đổi này.
+Chọn `spec_write` thay vì nhét danh sách vào `impl_design` vì `impl_design` là
+bản hiện tại có thể được ghi lại, trong khi cạnh spec-task là lịch sử độc lập
+cần tồn tại qua nhiều plan. `spec_get(task_id=...)` đọc từ task ra spec;
+`spec_get(ids=[...])` trả `task_links` để đọc ngược từ spec ra task.
 
 ### Bản thiết kế thực thi
 
@@ -413,10 +432,10 @@ còn lọc lúc liệt kê chỉ là tối ưu context.
 
 ```
 spec_search(project, query, kinds?)     → tìm trùng/xung đột TRƯỚC khi tạo task           [chưa làm]
-spec_get(ids[] | anchor)                → đọc spec_item + quan hệ                         [đã làm — chưa trả neo]
-spec_write(ops[])                       → tạo/sửa/supersede theo lô + op "anchor" để neo   [đã làm]
+spec_get(ids[] | task_id | anchor)      → đọc spec_item + quan hệ spec/task                [đã làm — chưa trả neo]
+spec_write(ops[])                       → tạo/sửa/supersede + neo code/task theo lô         [đã làm]
 spec_stale(project)                     → cái gì đang lỗi thời và vì sao                   [đã làm]
-impl_design(action, task_id, ...)       → soạn/đọc/chấm bản thiết kế thực thi              [chưa làm]
+impl_design(action, task_id, ...)       → soạn/đọc/chấm bản thiết kế thực thi              [đã làm]
 pm_plan(project, ops?)                  → WBS: đọc cả cây hoặc sửa theo lô                 [chưa làm]
 pm_document(action, project, doc_type)  → charter/scope/template                           [chưa làm]
 ```

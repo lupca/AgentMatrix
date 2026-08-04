@@ -192,6 +192,8 @@ def _task_scope_arguments(
     properties = spec.parameters.get("properties", {})
     if not isinstance(properties, Mapping) or "task_id" not in properties:
         return scoped
+    if not spec.infer_task_scope:
+        return scoped
 
     required = spec.parameters.get("required", ())
     if (
@@ -216,6 +218,8 @@ def _task_scope_ok(
         return True
 
     requested = arguments.get("task_id")
+    if not requested and not spec.infer_task_scope:
+        return True
     return bool(claims.task_id and requested and str(requested) == claims.task_id)
 
 

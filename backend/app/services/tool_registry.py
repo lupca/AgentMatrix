@@ -34,6 +34,8 @@ class ToolSpec:
     slash_alias: str | None
     group: str
     required_role: Role = "coordinator"
+    infer_task_scope: bool = True
+    """Whether an executor token fills an omitted optional ``task_id``."""
 
 
 # Deferred-tool groups loadable via the ``load_tools`` meta-tool (ADR-001
@@ -954,8 +956,9 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="spec_write",
             description=(
-                "Write living-spec items and relations in one transaction. "
-                "Supports batched create, update, supersede, and relation operations. "
+                "Write living-spec items, relations, code anchors, and manual task links "
+                "in one transaction. Task-link relations are implements, modifies, "
+                "violates, or references. "
                 "Always preserve derived_from_sha and confidence when recording a claim."
             ),
             parameters={
@@ -963,7 +966,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "properties": {
                     "ops": {
                         "type": "array",
-                        "description": "Batch of create, update, supersede, or relation operations.",
+                        "description": (
+                            "Batch of create, update, supersede, relation, anchor, or task_link "
+                            "operations. A task_link requires spec_item_id, task_id, relation, "
+                            "confidence, and created_by."
+                        ),
                         "items": {"type": "object"},
                     },
                     "project_id": {
@@ -984,8 +991,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="spec_get",
             description=(
-                "Read a complete active living-spec cluster by ids or filter, "
-                "including all related spec relations in one call."
+                "Read active living specs by ids, filter, or linked task_id. Returns "
+                "spec relations and manual task links in both top-level and per-item views."
             ),
             parameters={
                 "type": "object",
@@ -999,6 +1006,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "type": "object",
                         "description": "Filter by project_id, kind, status, confidence, or provenance fields.",
                     },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Return spec items manually linked to this task.",
+                    },
                 },
                 "required": [],
             },
@@ -1009,6 +1020,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             slash_alias=None,
             group="spec",
             required_role="executor",
+            infer_task_scope=False,
         ),
         ToolSpec(
             name="spec_stale",

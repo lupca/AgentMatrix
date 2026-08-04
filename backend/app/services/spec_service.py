@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from app.db.models import SpecAnchor, SpecItem, SpecRelation
+from app.db.models import SpecAnchor, SpecItem, SpecRelation, SpecTaskLink, Task
 from app.services.spec_anchor import compute_anchor_sha
 
 
@@ -19,6 +19,7 @@ SPEC_STATUSES = {"draft", "active", "stale", "superseded"}
 SPEC_CONFIDENCES = {"asserted", "derived", "verified"}
 RELATION_KINDS = {"conflicts_with", "duplicates", "refines", "depends_on"}
 ANCHOR_RELATION_KINDS = {"implements", "constrains", "tests", "documents"}
+TASK_LINK_RELATIONS = {"implements", "modifies", "violates", "references"}
 
 _ITEM_FIELDS = {
     "project_id", "kind", "title", "body", "status", "supersedes_id",
@@ -101,7 +102,7 @@ def _operation_name(operation: Mapping[str, Any]) -> str:
     value = operation.get("op", operation.get("action"))
     aliases = {
         "add": "create", "edit": "update", "replace": "supersede",
-        "relate": "relation", "link": "relation",
+        "relate": "relation", "link": "relation", "link_task": "task_link",
     }
     return aliases.get(str(value or "").strip().lower(), str(value or "").strip().lower())
 
@@ -117,7 +118,11 @@ def _item_payload(operation: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in operation.items() if key in _ITEM_FIELDS}
 
 
-def _item_snapshot(item: SpecItem, relations: list[dict[str, str]] | None = None) -> dict[str, Any]:
+def _item_snapshot(
+    item: SpecItem,
+    relations: list[dict[str, str]] | None = None,
+    task_links: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     return {
         "id": item.id, "project_id": item.project_id, "kind": item.kind,
         "title": item.title, "body": item.body, "status": item.status,
@@ -130,6 +135,7 @@ def _item_snapshot(item: SpecItem, relations: list[dict[str, str]] | None = None
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         "relations": relations or [],
+        "task_links": task_links or [],
     }
 
 
@@ -142,6 +148,15 @@ def _anchor_snapshot(anchor: SpecAnchor) -> dict[str, str]:
         "id": anchor.id, "spec_item_id": anchor.spec_item_id, "repo": anchor.repo,
         "path": anchor.path, "symbol": anchor.symbol, "relation": anchor.relation,
         "anchor_sha": anchor.anchor_sha,
+    }
+
+
+def _task_link_snapshot(link: SpecTaskLink) -> dict[str, Any]:
+    return {
+        "id": link.id, "spec_item_id": link.spec_item_id, "task_id": link.task_id,
+        "relation": link.relation, "confidence": link.confidence,
+        "created_by": link.created_by,
+        "created_at": link.created_at.isoformat() if link.created_at else None,
     }
 
 
@@ -158,6 +173,7 @@ def write_specs(
     written: list[SpecItem] = []
     written_relations: list[SpecRelation] = []
     written_anchors: list[SpecAnchor] = []
+    written_task_links: list[SpecTaskLink] = []
     try:
         for operation in operations:
             if not isinstance(operation, Mapping):
@@ -272,8 +288,53 @@ def write_specs(
                 )
                 db.add(anchor)
                 written_anchors.append(anchor)
+            elif name == "task_link":
+                item_id = _clean_string(
+                    operation.get("spec_item_id", operation.get("item_id", operation.get("id"))),
+                    "spec_item_id", required=True,
+                )
+                item = _resolve_item(db, item_id, pending)
+                task_id = _clean_string(operation.get("task_id"), "task_id", required=True)
+                task = db.get(Task, task_id)
+                if task is None:
+                    raise SpecError(f"Task '{task_id}' not found")
+                if task.project != item.project_id:
+                    raise SpecError("task links must connect a task and spec item in the same project")
+                link_relation = _clean_string(
+                    operation.get("relation", operation.get("kind")),
+                    "relation", required=True,
+                )
+                if link_relation not in TASK_LINK_RELATIONS:
+                    raise SpecError(
+                        f"task link relation must be one of {sorted(TASK_LINK_RELATIONS)}"
+                    )
+                confidence = _clean_string(
+                    operation.get("confidence"), "confidence", required=True
+                )
+                if confidence not in SPEC_CONFIDENCES:
+                    raise SpecError(f"confidence must be one of {sorted(SPEC_CONFIDENCES)}")
+                created_by = _clean_string(
+                    operation.get("created_by"), "created_by", required=True
+                )
+                exists = db.query(SpecTaskLink).filter_by(
+                    spec_item_id=item.id, task_id=task_id, relation=link_relation
+                ).first()
+                if exists is not None or any(
+                    link.spec_item_id == item.id and link.task_id == task_id
+                    and link.relation == link_relation
+                    for link in written_task_links
+                ):
+                    continue
+                link = SpecTaskLink(
+                    spec_item_id=item.id, task_id=task_id, relation=link_relation,
+                    confidence=confidence, created_by=created_by,
+                )
+                db.add(link)
+                written_task_links.append(link)
             else:
-                raise SpecError("op must be one of create, update, supersede, relation, anchor")
+                raise SpecError(
+                    "op must be one of create, update, supersede, relation, anchor, task_link"
+                )
 
         # SessionLocal has autoflush=False; this is intentionally explicit.
         db.flush()
@@ -288,6 +349,7 @@ def write_specs(
         "items": [_item_snapshot(item) for item in unique_items],
         "relations": [_relation_snapshot(relation) for relation in written_relations],
         "anchors": [_anchor_snapshot(anchor) for anchor in written_anchors],
+        "task_links": [_task_link_snapshot(link) for link in written_task_links],
     }
 
 
@@ -295,8 +357,9 @@ def get_specs(
     db: Session,
     ids: list[str] | None = None,
     filters: Mapping[str, Any] | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
-    """Return one active spec cluster and all active relations touching it."""
+    """Return active specs selected by ids, filters, or a linked task."""
     filters = dict(filters or {})
     unknown = set(filters) - _FILTER_FIELDS
     if unknown:
@@ -307,8 +370,16 @@ def get_specs(
         ids = list(dict.fromkeys(str(item).strip() for item in ids if str(item).strip()))
         if not ids:
             raise SpecError("ids must contain at least one id")
+    if task_id is not None:
+        task_id = _clean_string(task_id, "task_id", required=True)
+        if db.get(Task, task_id) is None:
+            raise SpecError(f"Task '{task_id}' not found")
 
     query = db.query(SpecItem).filter(SpecItem.archived_at.is_(None))
+    if task_id is not None:
+        query = query.join(
+            SpecTaskLink, SpecTaskLink.spec_item_id == SpecItem.id
+        ).filter(SpecTaskLink.task_id == task_id)
     if ids is not None:
         query = query.filter(SpecItem.id.in_(ids))
     for field, value in filters.items():
@@ -322,7 +393,10 @@ def get_specs(
     items = query.order_by(SpecItem.project_id.asc(), SpecItem.id.asc()).limit(1000).all()
     seed_ids = [item.id for item in items]
     if not seed_ids:
-        return {"action": "spec_fetched", "count": 0, "items": [], "relations": []}
+        return {
+            "action": "spec_fetched", "count": 0, "items": [],
+            "relations": [], "task_links": [],
+        }
 
     # An id query returns the connected active cluster, not just isolated
     # vertices.  This lets an executor consume a decision and its constraints
@@ -331,7 +405,7 @@ def get_specs(
     # that result set.
     item_ids = list(seed_ids)
     all_relations: dict[tuple[str, str, str], SpecRelation] = {}
-    expand_cluster = ids is not None
+    expand_cluster = ids is not None and task_id is None
     while True:
         active_ids = select(SpecItem.id).where(SpecItem.archived_at.is_(None))
         relation_query = db.query(SpecRelation).filter(
@@ -364,15 +438,30 @@ def get_specs(
         key=lambda relation: (relation.from_id, relation.to_id, relation.kind),
     )
     relation_data = [_relation_snapshot(relation) for relation in relations]
+    task_link_query = db.query(SpecTaskLink).filter(
+        SpecTaskLink.spec_item_id.in_(item_ids)
+    )
+    if task_id is not None:
+        task_link_query = task_link_query.filter(SpecTaskLink.task_id == task_id)
+    task_links = task_link_query.order_by(
+        SpecTaskLink.spec_item_id.asc(), SpecTaskLink.task_id.asc(), SpecTaskLink.relation.asc()
+    ).all()
+    task_link_data = [_task_link_snapshot(link) for link in task_links]
     by_item: dict[str, list[dict[str, str]]] = {item_id: [] for item_id in item_ids}
+    links_by_item: dict[str, list[dict[str, Any]]] = {item_id: [] for item_id in item_ids}
     for relation in relation_data:
         by_item[relation["from_id"]].append(relation)
         if relation["to_id"] != relation["from_id"]:
             by_item[relation["to_id"]].append(relation)
+    for link in task_link_data:
+        links_by_item[link["spec_item_id"]].append(link)
     return {
         "action": "spec_fetched", "count": len(items),
-        "items": [_item_snapshot(item, by_item[item.id]) for item in items],
+        "items": [
+            _item_snapshot(item, by_item[item.id], links_by_item[item.id]) for item in items
+        ],
         "relations": relation_data,
+        "task_links": task_link_data,
     }
 
 
