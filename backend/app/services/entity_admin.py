@@ -130,6 +130,57 @@ def _validate_agent_configuration(
         raise EntityValidationError("CLI agents require a cli tool.")
 
 
+# Known-valid (cli, model) pairs, captured from `<cli> --model xxx --print x`
+# runs (2026-08-04). Grows stale as providers ship new models — override or
+# extend per-CLI via the `cli_model_overrides` setting (JSON: {"agy": [...]})
+# rather than editing this table for a one-off model.
+CLI_MODEL_CATALOG: dict[str, set[str]] = {
+    "agy": {
+        "gemini-3.6-flash-high",
+        "gemini-3.6-flash-medium",
+        "gemini-3.6-flash-low",
+        "gemini-3.5-flash-high",
+        "gemini-3.5-flash-medium",
+        "gemini-3.5-flash-low",
+        "gemini-3.1-pro-high",
+        "gemini-3.1-pro-low",
+        "claude-sonnet-4.6-thinking",
+        "claude-opus-4.6-thinking",
+        "gpt-oss-120b-medium",
+    },
+}
+
+
+def _valid_models_for_cli(db: Session, cli: str) -> set[str] | None:
+    """Return the known-valid model set for ``cli``, or None if unconstrained.
+
+    Checks the `cli_model_overrides` setting first (per-CLI JSON list) so an
+    operator can extend/replace the built-in catalog without a code change,
+    then falls back to CLI_MODEL_CATALOG. A CLI absent from both is treated
+    as unconstrained (not every CLI has a fixed, enumerable model list).
+    """
+    override = db.get(Setting, "cli_model_overrides")
+    if override is not None and isinstance(override.value, dict):
+        models = override.value.get(cli)
+        if models is not None:
+            return set(models)
+    catalog = CLI_MODEL_CATALOG.get(cli)
+    return set(catalog) if catalog is not None else None
+
+
+def _validate_cli_model(db: Session, cli: str | None, model: str | None) -> None:
+    if not cli or not model:
+        return
+    valid = _valid_models_for_cli(db, cli)
+    if valid is None:
+        return
+    if model not in valid:
+        raise EntityValidationError(
+            f"Model {model!r} is not valid for CLI {cli!r}; "
+            f"expected one of {sorted(valid)}"
+        )
+
+
 def _validate_default_role(role: str, is_default: bool) -> None:
     if is_default and role != "coordinator":
         raise EntityValidationError(
@@ -202,6 +253,8 @@ def create_agent(db: Session, data: dict[str, Any]) -> Agent:
         bool(api_key or api_key_encrypted),
         require_cli=has_explicit_type,
     )
+    if agent_type == "cli":
+        _validate_cli_model(db, data.get("cli"), data.get("model"))
 
     fields = {k: v for k, v in data.items() if k in _AGENT_CREATE_FIELDS and k != "roles"}
     fields["id"] = agent_id
@@ -276,6 +329,11 @@ def update_agent(db: Session, agent_id: str, data: dict[str, Any]) -> Agent:
         has_api_key,
         require_cli=not legacy_cli_update,
     )
+    if target_type == "cli" and ("model" in patch or "cli" in patch):
+        # Only re-validate when cli/model is actually being changed, so a
+        # pre-existing invalid model on the row (from before this check
+        # existed) doesn't block unrelated updates to the same agent.
+        _validate_cli_model(db, target_cli, patch.get("model", agent.model))
 
     if target_type == "api" and api_key_was_provided:
         patch["api_key"] = api_key_encrypted or encrypt_api_key(api_key)
@@ -386,6 +444,7 @@ SETTINGS_WHITELIST: dict[str, str] = {
     "embedding_api_url": "Base URL for the text embedding API.",
     "embedding_api_key": "API key for the text embedding API.",
     "embedding_model": "Model used by the text embedding API.",
+    "cli_model_overrides": "Per-CLI valid-model list override (JSON: {\"agy\": [...]}) for manage_agent validation.",
 }
 
 
