@@ -27,7 +27,9 @@ from app.db.models import (
     TaskRound,
 )
 from app.db.models import Session as SessionModel
-from app.services.agent_matcher import AgentMatcher, POLICY_VERSION as AGENT_MATCHER_POLICY_VERSION
+from app.services.agent_matcher import POLICY_VERSION as AGENT_MATCHER_POLICY_VERSION
+from app.services.agent_matcher import AgentMatcher
+from app.services.agent_run_classification import classify_termination
 from app.services.landing import LandingResult, head_of, land_result
 from app.services.outbox import record_commit_event, record_run_requested
 from app.services.review_criteria import merged_review_criteria
@@ -1435,6 +1437,11 @@ class TaskStateMachine:
         run_id: str | None = None,
         error_code: str | None = None,
     ) -> TransitionResult:
+        run = self.db.get(AgentRun, run_id) if run_id else None
+        if run is not None:
+            run.failure_category = classify_termination(
+                status="failed", error=error, kind=run.kind
+            )
         task = self.validator.task(task_id)
         normalized_error_code = (error_code or "execution-failed").strip().lower()
         payload = {
@@ -1480,6 +1487,11 @@ class TaskStateMachine:
         run_id: str | None = None,
         error_details: dict[str, Any] | None = None,
     ) -> TransitionResult:
+        run = self.db.get(AgentRun, run_id) if run_id else None
+        if run is not None:
+            run.failure_category = classify_termination(
+                status="failed", error=error, kind=run.kind
+            )
         task = self.validator.task(task_id)
         payload = {
             "expected_status": expected_status,
@@ -1570,6 +1582,9 @@ class TaskStateMachine:
         now = datetime.now(timezone.utc)
         run.status = "failed"
         run.error_message = error
+        run.failure_category = classify_termination(
+            status="failed", error=error, kind=run.kind
+        )
         run.completed_at = now
         self.cas_status(task, reset_status)
         task.error = error
@@ -1613,6 +1628,7 @@ class TaskStateMachine:
             if was_active:
                 run.status = "cancelled"
                 run.error_message = reason
+                run.failure_category = "cancelled"
                 run.completed_at = datetime.now(timezone.utc)
                 self.db.flush()
             failure = self.record_review_failure(
@@ -1649,6 +1665,7 @@ class TaskStateMachine:
         now = datetime.now(timezone.utc)
         run.status = "cancelled"
         run.error_message = reason
+        run.failure_category = "cancelled"
         run.completed_at = now
         if task.status == "dispatched":
             self.cas_status(task, "todo")

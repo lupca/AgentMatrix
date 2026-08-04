@@ -155,6 +155,48 @@ async def test_get_stats_distinguishes_measured_zero_from_unmeasured_cli_cost(db
 
 
 @pytest.mark.asyncio
+async def test_get_stats_reports_failure_classification(db_session):
+    from app.db.models import AgentRun, Project, Task
+
+    project = Project(id="failure-report-project", name="Failure report")
+    task = Task(id="FAILURE-REPORT", project=project.id, title="Failure report")
+    db_session.add_all(
+        [
+            project,
+            task,
+            AgentRun(
+                id="failure-infra",
+                task_id=task.id,
+                agent_id="@agy",
+                cli="agy",
+                command="agy",
+                status="failed",
+                failure_category="infra_timeout",
+            ),
+            AgentRun(
+                id="failure-agent",
+                task_id=task.id,
+                agent_id="@agy",
+                cli="agy",
+                command="agy",
+                status="failed",
+                failure_category="agent_no_output",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    stats = await CommandRouter(db_session).execute_tool(
+        "get_stats", {"task_id": task.id}, "failure-report-session"
+    )
+
+    assert stats["failure_classification"]["failed_runs_total"] == 2
+    assert stats["failure_classification"]["infra_failed_runs"] == 1
+    assert stats["failure_classification"]["agent_failed_runs"] == 1
+    assert stats["failure_classification"]["infra_vs_agent"]["infra_share"] == 0.5
+
+
+@pytest.mark.asyncio
 async def test_get_stats_reports_plan_critic_return_rate_and_extra_rounds(db_session):
     from app.db.models import GateRecord, Project, Task, TaskRound
 
