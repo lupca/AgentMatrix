@@ -438,6 +438,54 @@ def test_review_result_failure_preserves_executor_result_and_allows_new_reviewer
     assert reassigned.gate_record.executor == "@executor"
 
 
+def test_explicit_review_cancellation_uses_review_failure_transition(
+    orchestration, db_session
+):
+    db_session.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex"))
+    task = _task(db_session, "REVIEW-CANCEL", mode="bypass")
+    task.status = "in-review"
+    task.executor = "@executor"
+    task.reviewer = "@reviewer"
+    task.result_ref = "base..head"
+    run = AgentRun(
+        id="review-cancel-run",
+        task_id=task.id,
+        agent_id="@reviewer",
+        cli="codex",
+        command="codex review",
+        kind="review",
+        agent_role="reviewer",
+        status="running",
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    result = orchestration.cancel_run(
+        run_id=run.id,
+        actor="@operator",
+        idempotency_key="cancel-review-run",
+    )
+
+    assert result.agent_run is run
+    assert run.status == "cancelled"
+    assert result.task.status == "awaiting-review"
+    assert result.task.current_gate == "review_order"
+    assert result.task.error == "Cancelled by user"
+    assert result.gate_record.gate_type == "review_result"
+    assert result.gate_record.status == "rejected"
+    assert result.gate_record.output_ref == run.id
+
+    replay = orchestration.cancel_run(
+        run_id=run.id,
+        actor="@operator",
+        idempotency_key="cancel-review-run",
+    )
+    assert replay.task.status == "awaiting-review"
+    assert db_session.query(GateRecord).filter_by(
+        task_id=task.id, idempotency_key="cancel-review-run"
+    ).count() == 1
+
+
 def test_awaiting_approval_sync_ignores_resolved_pending_root(
     orchestration, db_session
 ):

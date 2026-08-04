@@ -777,10 +777,39 @@ def execute_agent_run(
                 run.error_message = brake.reason
                 db.commit()
                 raise AgentExecutionError(brake.reason)
+            error = (
+                f"Run cancelled by safety brake {brake.code or 'unknown'}: "
+                f"{brake.reason or 'no reason recorded'}"
+            )
             run.status = "cancelled"
             run.completed_at = datetime.now(timezone.utc)
-            run.error_message = brake.reason
-            db.commit()
+            run.error_message = error
+            db.flush()
+
+            # A watchdog decision is a terminal run failure, not merely a run
+            # projection update.  Route it through the FSM so the owning task
+            # cannot remain in dispatched/in-review with no active run.
+            service = orch_svc_cls(db)
+            if run.kind == "review" and run.task.status == "in-review":
+                service.record_review_failure(
+                    task_id=task_id,
+                    error=error,
+                    actor="system:safety-brake",
+                    idempotency_key=f"run:{run.id}:review-{brake.code or 'brake'}",
+                    run_id=run.id,
+                )
+            elif run.kind != "review" and run.task.status == "dispatched":
+                service.record_execution_failure(
+                    task_id=task_id,
+                    error=error,
+                    actor="system:safety-brake",
+                    idempotency_key=f"run:{run.id}:execution-{brake.code or 'brake'}",
+                    run_id=run.id,
+                )
+            else:
+                # Some brakes (for example terminal-task and cost brakes)
+                # already moved the task to a state with a legal next step.
+                db.commit()
             return None
 
         _cleanup_stale_process(run)

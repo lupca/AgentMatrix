@@ -311,9 +311,13 @@ class TaskOrchestrationService:
         run_id: str,
         actor: str,
         idempotency_key: str,
+        reason: str = "Cancelled by user",
     ) -> TransitionResult:
         return self.state_machine.cancel_run(
-            run_id=run_id, actor=actor, idempotency_key=idempotency_key
+            run_id=run_id,
+            actor=actor,
+            idempotency_key=idempotency_key,
+            reason=reason,
         )
 
     def attach_result(

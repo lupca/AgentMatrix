@@ -116,10 +116,12 @@ def test_native_envelope_structures_transition_error_and_hint():
 
 
 def test_native_envelope_includes_next_for_task_state():
-    result = envelope(
-        {"task": {"id": "task-1", "status": "awaiting-review"}},
-        next_step="Gọi request_review để bắt đầu review độc lập.",
-    )
+    router_result = {
+        "action": "gate_decision",
+        "decision": "rejected",
+        "task": {"id": "task-1", "status": "awaiting-review"},
+    }
+    result = envelope(router_result, next_step=mcp_native._next_step(router_result))
     assert result["ok"] is True
     assert result["next"] == "Gọi request_review để bắt đầu review độc lập."
 

@@ -94,6 +94,11 @@ verdict approved tồn tại — vì vậy KHÔNG được emit event giữa ch�
   bắt đầu lại từ main. Prompt cũng có mục **Review feedback to address** với
   verdict và từng finding theo file/line/severity/description; full history
   của các round cũ không thuộc scope.
+- Reject một verdict gate không được giữ Task ở `in-review`: FSM CAS về
+  `awaiting-review`, đặt `current_gate=review_order`, clear verdict projection,
+  và MCP trả `next` yêu cầu gọi `request_review`. Review run cũ vẫn là bằng
+  chứng immutable; review attempt mới dùng số attempt tiếp theo và vẫn phải
+  tuân four-eyes.
 - Task read-only: tag `no-commit` + executor in `RESULT_REF: none` (worktree
   phải thật sự không có commit) → done qua gate verdict hệ thống
   (reviewer `@system-no-commit`, minh bạch trong ledger — CTV2-235).
@@ -124,13 +129,12 @@ authoritative API cost ≥ `max_cost_usd_per_task` STOP → token total ≥
 per-run: `max_active_seconds_per_run`, `max_tool_calls_per_run`,
 `max_no_progress_seconds` → `max_concurrent_runs` (QUEUE).
 
-**Bẫy no-progress (CTV2-232)**: "progress" = `run.updated_at` nhích, mà
-`claude -p` KHÔNG in gì cho đến khi xong → run dài im lặng bị cancel oan
-("Run made no progress within the allowed interval"). Tạm thời setting
-`max_no_progress_seconds=2400`. Fix chuẩn (chưa làm): heartbeat theo PID sống.
-Review run bị cancel/process chết đi qua `record_review_failure`: run hỏng nhưng
-task quay về `awaiting-review`, không cần SQL/attach_result để request reviewer
-khác.
+**Bẫy no-progress (CTV2-232/CTV2-231)**: CTV2-232 bơm `run.updated_at` khi PID
+còn sống và dùng stream-json để tránh false positive. Nếu watchdog vẫn chặn một
+run trước lúc spawn/re-spawn, worker không chỉ đổi projection AgentRun: review
+cancel đi qua `record_review_failure` về `awaiting-review`; execute cancel đi
+qua `record_execution_failure` về `failed`. Cả hai ghi nguyên nhân brake vào
+Task + ledger, nên không còn Task `in-review`/`dispatched` không có đường tiếp.
 
 ## Settings (SETTINGS_WHITELIST, entity_admin.py)
 

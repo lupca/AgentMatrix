@@ -1562,12 +1562,46 @@ class TaskStateMachine:
         run_id: str,
         actor: str,
         idempotency_key: str,
+        reason: str = "Cancelled by user",
     ) -> TransitionResult:
         run = self.db.get(AgentRun, run_id)
         if run is None:
             raise TransitionConflictError(f"Run {run_id} not found")
         task = self.validator.task(run.task_id)
-        payload = {"run_id": run_id}
+        if run.kind == "review":
+            was_active = run.status in {"queued", "running"}
+            if not was_active and run.status != "cancelled":
+                raise TransitionConflictError(
+                    f"Cannot cancel run in status: {run.status}"
+                )
+            if was_active:
+                run.status = "cancelled"
+                run.error_message = reason
+                run.completed_at = datetime.now(timezone.utc)
+                self.db.flush()
+            failure = self.record_review_failure(
+                task_id=task.id,
+                error=reason,
+                actor=actor,
+                idempotency_key=idempotency_key,
+                run_id=run.id,
+            )
+            if was_active:
+                emit_task_event(
+                    task_id=task.id,
+                    event_type="cancelled",
+                    payload={"run_id": run.id, "cancelled_by": actor},
+                    db=self.db,
+                )
+            self.db.refresh(run)
+            return TransitionResult(
+                task=failure.task,
+                gate_record=failure.gate_record,
+                applied=failure.applied,
+                agent_run=run,
+            )
+
+        payload = {"run_id": run_id, "reason": reason}
         input_hash = TaskValidator.input_hash(payload)
         existing = self.validator.idempotent_record(task.id, idempotency_key, input_hash)
         if existing is not None:
@@ -1578,10 +1612,11 @@ class TaskStateMachine:
             )
         now = datetime.now(timezone.utc)
         run.status = "cancelled"
-        run.error_message = "Cancelled by user"
+        run.error_message = reason
         run.completed_at = now
         if task.status == "dispatched":
             self.cas_status(task, "todo")
+        task.error = reason
         task.updated_at = now
         record = self.ledger_record(
             task=task,
