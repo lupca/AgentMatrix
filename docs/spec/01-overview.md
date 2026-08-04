@@ -18,7 +18,7 @@ Coordinator CLI (claude/agy/codex, chạy từ WORKDIR NGOÀI repo này)
                       │  getattr(self, f'_handle_{spec.handler}')
           ┌───────────┴───────────────┐
           ▼                           ▼
-   Services (task_orchestration,   PostgreSQL :5433 (docker `control_tower_db`)
+   Services (task_orchestration,   PostgreSQL :5433 (docker `agmx_db`)
    entity_admin, admin_gate,       + role `ct_readonly_user` cho query_db
    spec_plan_generator, ...)
           │

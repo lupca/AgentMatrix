@@ -1,7 +1,7 @@
 services:
   db:
     image: pgvector/pgvector:pg16
-    container_name: control_tower_db
+    container_name: agmx_db
     restart: always
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-ct}
@@ -19,7 +19,7 @@ services:
 
   mcp:
     build: ./backend
-    container_name: control_tower_mcp
+    container_name: agmx_mcp
     restart: unless-stopped
     ports:
       - "${MCP_PORT:-8100}:8100"
@@ -40,7 +40,7 @@ services:
 
   worker:
     build: ./backend
-    container_name: control_tower_worker
+    container_name: agmx_worker
     restart: unless-stopped
     command: ["dramatiq", "app.workers.agent_runner", "app.workers.outbox_publisher"]
     environment:
@@ -55,7 +55,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: control_tower_redis
+    container_name: agmx_redis
     restart: unless-stopped
     command: redis-server --appendonly yes
     # Port exposed for local backend access

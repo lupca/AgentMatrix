@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-# Default to running via docker exec against control_tower_db container
-if docker ps >/dev/null 2>&1 && docker ps | grep -q control_tower_db; then
-    PSQL_CMD="docker exec -i control_tower_db psql -U ct -d control_tower"
+# Default to running via docker exec against agmx_db container
+if docker ps >/dev/null 2>&1 && docker ps | grep -q agmx_db; then
+    PSQL_CMD="docker exec -i agmx_db psql -U ct -d control_tower"
 else
     # Fallback to local psql if docker is not available or container is not running
     DB_URL=${1:-"postgresql://ct:secret@localhost:5433/control_tower"}

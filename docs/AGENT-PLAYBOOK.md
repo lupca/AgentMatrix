@@ -50,7 +50,7 @@ rõ, và NÓI CHO USER BIẾT nó đang nằm sổ.
 
 ```bash
 # DB thật (production!):
-docker exec -i control_tower_db psql -U ct -d control_tower   # port 5433, user ct
+docker exec -i agmx_db psql -U ct -d control_tower   # port 5433, user ct
 
 # Verify code executor TRƯỚC khi duyệt verdict (reviewer thường không chạy full suite):
 git worktree add /tmp/wt-X <head-commit>
