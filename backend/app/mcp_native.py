@@ -394,7 +394,7 @@ def make_tool_handler(
                 }
                 and not result.get("error")
             ):
-                warning = runtime_version.stale_warning()
+                warning = runtime_version.stale_warning(db=db)
                 if warning is not None:
                     result = {**result, "runtime_warning": warning}
             # Native calls bypass the REST endpoint, so invalidate the same

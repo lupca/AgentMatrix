@@ -155,7 +155,7 @@ def test_pending_review_order_includes_the_persisted_approval_prompt(db_session)
 
 
 @pytest.mark.asyncio
-async def test_tool_call_end_to_end_through_mcp_client(monkeypatch):
+async def test_tool_call_end_to_end_through_mcp_client(monkeypatch, tmp_path):
     """Full call path through a real fastmcp client. Regression for the
     handler signature bug: FunctionTool built from an explicit JSON schema
     never receives an injected Context, so a handler requiring one fails on
@@ -176,7 +176,8 @@ async def test_tool_call_end_to_end_through_mcp_client(monkeypatch):
     monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
 
     token = issue_token("test-secret", role="coordinator")
-    server = build_server(default_token=token)
+    monitor = _runtime_monitor(tmp_path, advance_head=False)
+    server = build_server(default_token=token, runtime_version=monitor)
     async with Client(server) as client:
         result = await client.call_tool("get_status", {"task_id": "T-1"})
         body = json.loads(result.content[0].text)
