@@ -1840,8 +1840,10 @@ class TaskStateMachine:
             task.awaiting_approval = True
             question_block = f"\n{questions}" if questions else ""
             task.approval_prompt = (
-                f"Spec chưa đủ rõ (clarity={spec_clarity}). Trả lời các câu hỏi sau "
-                f"rồi chạy lại generate_spec_plan:{question_block}"
+                f"Spec chưa đủ rõ (clarity={spec_clarity}). Cập nhật task.plan với "
+                f"câu trả lời cho các câu hỏi sau (dùng update_task, trường plan) "
+                f"rồi chạy lại generate_spec_plan — planner sẽ đọc task.plan ở vòng "
+                f"tiếp theo:{question_block}"
             )
         else:
             task.open_questions = []

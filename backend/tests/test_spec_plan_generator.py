@@ -499,3 +499,55 @@ def test_build_prompt_no_warning_when_graph_ok():
     task = Task(id="T-4", project="p1", title="Something")
     prompt = _build_prompt(task, ["app/foo.py"])
     assert "IMPORTANT" not in prompt
+
+
+def test_build_prompt_includes_prior_round_task_plan():
+    """CTV2-1376: task.plan must reach the planner so coordinator answers to
+    open_questions (placed there via update_task) are visible on the next
+    generate_spec_plan call.  Without this the planner re-asks the same
+    questions every round, burning ~98k tokens per loop."""
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_prompt
+
+    distinctive_constraint = "Do not remove or migrate claimed_by_session_id"
+    task = Task(
+        id="T-PLAN-1",
+        project="p1",
+        title="Prior plan visibility",
+        plan=(
+            "Intent: preserve existing session column.\n"
+            f"Scope — in: auth.py; out: coordinator.py\n"
+            f"1. {distinctive_constraint}\n"
+            "2. Delete the wake path entirely; do not retain a no-op\n"
+            "Open questions: none"
+        ),
+    )
+    prompt = _build_prompt(task, ["app/auth.py"])
+
+    assert "Prior-round plan and coordinator decisions" in prompt
+    assert "task.plan" in prompt
+    assert distinctive_constraint in prompt
+    assert "Delete the wake path entirely" in prompt
+
+
+def test_build_prompt_omits_prior_plan_block_when_task_plan_is_empty():
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_prompt
+
+    task = Task(id="T-PLAN-2", project="p1", title="No prior plan")
+    prompt = _build_prompt(task, [])
+    assert "Prior-round plan" not in prompt
+
+
+def test_build_prompt_truncates_oversized_task_plan():
+    from app.db.models import Task
+    from app.services.spec_plan_generator import (
+        _PRIOR_PLAN_MAX_CHARS,
+        _build_prompt,
+    )
+
+    oversized = "x" * (_PRIOR_PLAN_MAX_CHARS + 5_000)
+    task = Task(id="T-PLAN-3", project="p1", title="Big plan", plan=oversized)
+    prompt = _build_prompt(task, [])
+    assert "truncated to fit 25KB cap" in prompt
+    assert len(prompt) < len(oversized) + 5_000

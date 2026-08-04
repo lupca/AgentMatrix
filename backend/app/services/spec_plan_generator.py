@@ -39,6 +39,8 @@ _MAX_ATTEMPTS = 2
 PLAN_CRITIC_TOKEN_BUDGET = 50_000
 _PLAN_CRITIC_MAX_OUTPUT_TOKENS = 4_096
 _SEARCH_QUERY_MAX_CHARS = 500
+_PRIOR_PLAN_MAX_CHARS = 25_000
+_PRIOR_PLAN_TRUNCATION_NOTICE = "\n\n[... prior plan truncated to fit 25KB cap ...]"
 _GRAPH_UNAVAILABLE_WARNING = (
     "The code graph search failed or returned no results. This plan was generated "
     "without repository grounding — treat file paths and flow references as unverified."
@@ -196,6 +198,22 @@ def _build_prompt(
         if project_context and project_context.strip()
         else ""
     )
+    prior_plan_text = (getattr(task, "plan", None) or "").strip()
+    if prior_plan_text:
+        if len(prior_plan_text) > _PRIOR_PLAN_MAX_CHARS:
+            keep = _PRIOR_PLAN_MAX_CHARS - len(_PRIOR_PLAN_TRUNCATION_NOTICE)
+            prior_plan_text = prior_plan_text[: max(0, keep)] + _PRIOR_PLAN_TRUNCATION_NOTICE
+        prior_plan_block = (
+            "Prior-round plan and coordinator decisions (from task.plan — this is the "
+            "result the coordinator saved from a previous generate_spec_plan run, "
+            "including any answers to open questions the coordinator placed here via "
+            "update_task). Use it as input: respect stated constraints and coordinator "
+            "answers, do not copy the plan text blindly, and produce a fresh plan that "
+            "reflects these decisions):\n"
+            f"{prior_plan_text}\n\n"
+        )
+    else:
+        prior_plan_block = ""
     project_id_json = json.dumps(task.project, ensure_ascii=False)
     return (
         "You are a software spec/plan generator for a task-coordination system.\n"
@@ -203,6 +221,7 @@ def _build_prompt(
         f"Project: {task.project}\n\n"
         f"{details_block}"
         f"{context_block}"
+        f"{prior_plan_block}"
         f"{warning_block}"
         "Bạn đang đứng TRONG repo của project. Hãy ĐỌC (read-only, không sửa gì) "
         "các file liên quan tới task — bắt đầu từ README/docs/entry points rồi "
