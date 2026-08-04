@@ -1337,7 +1337,7 @@ class SpecRelation(Base):
 
 
 class SpecTaskLink(Base):
-    """A manually asserted, typed edge between a project spec and a task."""
+    """A manual or landing-derived typed edge between a project spec and task."""
 
     __tablename__ = "spec_task_link"
 

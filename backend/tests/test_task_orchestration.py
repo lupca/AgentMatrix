@@ -17,6 +17,9 @@ from app.db.models import (
     OutboxEvent,
     Project,
     Setting,
+    SpecAnchor,
+    SpecItem,
+    SpecTaskLink,
     Task,
     TaskDependency,
     TaskRound,
@@ -118,6 +121,27 @@ def test_integration_branch_moves_only_after_independent_pass_verdict(
 
     project = db_session.get(Project, "project")
     project.repo_root = str(repo)
+    db_session.add(
+        SpecItem(
+            id="spec-result-file",
+            project_id=project.id,
+            kind="requirement",
+            title="Reviewed results are landed",
+            body="The governed result file is part of the delivered behavior.",
+            status="active",
+        )
+    )
+    db_session.add(
+        SpecAnchor(
+            id="anchor-result-file",
+            spec_item_id="spec-result-file",
+            repo=str(repo),
+            path="result.txt",
+            symbol="result",
+            relation="implements",
+            anchor_sha="a" * 64,
+        )
+    )
     db_session.add(Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex"))
     task = _task(db_session, "CTV2-225-REPRO", mode="bypass")
     task.status = "dispatched"
@@ -169,12 +193,20 @@ def test_integration_branch_moves_only_after_independent_pass_verdict(
     )
     assert len(pass_records) == 1
     assert pass_records[0].output_ref == "pass"
+    derived_link = db_session.query(SpecTaskLink).filter_by(
+        task_id=task.id, spec_item_id="spec-result-file", relation="modifies"
+    ).one()
+    assert derived_link.confidence == "derived"
+    assert derived_link.created_by == "system:landing"
 
     # Verdict approval already performs the merge. land_task is the explicit,
     # idempotent retry/backfill surface and must not create another commit.
     landed = orchestration.land_task(task_id=task.id, actor="@operator")
     assert landed["status"] == "done"
     assert _git(repo, "rev-parse", "main") == landed_head
+    assert db_session.query(SpecTaskLink).filter_by(
+        task_id=task.id, spec_item_id="spec-result-file", relation="modifies"
+    ).count() == 1
     assert [event.event_type for event in db_session.query(OutboxEvent).all()] == [
         "run_requested",
         "graph_rebuild_requested",

@@ -196,6 +196,7 @@ def _build_prompt(
         if project_context and project_context.strip()
         else ""
     )
+    project_id_json = json.dumps(task.project, ensure_ascii=False)
     return (
         "You are a software spec/plan generator for a task-coordination system.\n"
         f"Task title: {task.title}\n"
@@ -208,6 +209,24 @@ def _build_prompt(
         "lần theo — TRƯỚC KHI viết plan. Dựa trên những gì đã đọc: nếu spec còn "
         "mơ hồ (auth dùng gì, liên kết module nào, convention nào...) thì đặt câu "
         "hỏi cụ thể vào open_questions và chấm spec_clarity tương ứng.\n\n"
+        "BẮT BUỘC tra kho living spec qua MCP trước khi kết luận prior_art hoặc "
+        "constraints. Trên MCP native tool được expose trực tiếp: gọi "
+        f'`spec_get({{"filter":{{"project_id":{project_id_json}}}}})` để lấy '
+        "toàn bộ spec của project trong một lần. Không truy vấn DB trực tiếp và "
+        "không bỏ qua bước này dù code hiện tại có vẻ đủ rõ. Đọc kết quả theo "
+        "đúng thứ tự ưu tiên sau (thà lấy thừa spec còn hơn bỏ sót):\n"
+        "  1. Negative boundaries: quan hệ conflicts_with và item "
+        "kind=constraint — kiểm tra TRƯỚC; vi phạm là hỏng.\n"
+        "  2. Existing system: item kind=requirement và kind=design trong cùng project.\n"
+        "  3. Code location: anchors của các item liên quan để biết file/symbol nào "
+        "hiện thực hoặc bị ràng buộc.\n"
+        "  4. Delivery history: task_links của các item liên quan để biết task nào "
+        "đã implements/modifies/references chúng.\n"
+        "Nếu task chạm path/symbol có item constraint hoặc một đầu của "
+        "conflicts_with, constraints PHẢI nêu ranh giới đó. Khi kho có prior art "
+        "liên quan, prior_art PHẢI dẫn `spec_item:<id>` cụ thể (kèm title/kết luận), "
+        "không được chỉ nói rằng đã đọc code. Ghi exact MCP query và phần kết quả "
+        "được dùng vào evidence với source_type=query.\n\n"
         "Files the code graph reports as relevant to this area (prefer these; "
         "you may name others but they will be marked unconfirmed):\n"
         f"{candidates}\n"
@@ -435,6 +454,7 @@ def _build_critic_prompt(
 ) -> str:
     details = (task.raw_input or "").strip()
     context = (project_context or "").strip()
+    project_id_json = json.dumps(task.project, ensure_ascii=False)
     retry_note = (
         f"\nPrevious critic output was invalid: {retry_reason}. Return corrected JSON only.\n"
         if retry_reason
@@ -452,8 +472,12 @@ def _build_critic_prompt(
         "run. Stay focused. You are NOT given a diff and MUST NOT run git diff, "
         "git show, broad repository scans, or open unrelated files. Verify only the "
         "specific commands, query results, and file:line citations named in evidence; "
-        "you may query spec_item/spec_task_link and use targeted git history only to "
-        "check claimed prior art.\n\n"
+        "you MUST first call the MCP tool "
+        f'`spec_get({{"filter":{{"project_id":{project_id_json}}}}})` before '
+        "evaluating prior_art. Check spec_item, relations, anchors, and "
+        "spec_task_link; a prior_art claim backed by the living spec must cite a "
+        "concrete spec_item id. You may use targeted git history only after that "
+        "mandatory spec lookup to check claimed prior art.\n\n"
         "Challenge whether evidence reproduces, prior_art avoids duplicate work, "
         "ruled_out considered credible alternatives, constraints missed an invariant, "
         "and high-risk limits are sufficient. Reject only for a concrete blocking "

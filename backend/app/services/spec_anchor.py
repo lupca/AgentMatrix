@@ -19,10 +19,11 @@ import hashlib
 import os
 import re
 import subprocess
+import uuid
 
 from sqlalchemy.orm import Session
 
-from app.db.models import SpecAnchor, SpecItem
+from app.db.models import SpecAnchor, SpecItem, SpecTaskLink, Task
 
 _GIT_TIMEOUT_SECONDS = 30
 
@@ -143,6 +144,83 @@ def _changed_paths(repo_root: str, before: str, after: str) -> set[str]:
     if proc.returncode != 0:
         return set()
     return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
+def link_task_to_changed_specs(
+    db: Session,
+    task: Task,
+    repo_root: str,
+    commit_ref: str,
+) -> list[SpecTaskLink]:
+    """Derive idempotent task→spec links from landed changed paths.
+
+    A landing already has an immutable reviewed ``base..head`` range. Matching
+    that range's changed files against project-local anchors is deterministic,
+    requires no LLM, and gives future planners the missing delivery-history
+    edge. Multiple anchors for one spec still produce one ``modifies`` link.
+
+    The caller owns the transaction. This function explicitly flushes because
+    the application session uses ``autoflush=False``.
+    """
+    if not task.project or not repo_root or not commit_ref:
+        return []
+
+    before, after = _diff_range(commit_ref)
+    changed_paths = _changed_paths(repo_root, before, after)
+    if not changed_paths:
+        return []
+
+    normalized_repo = os.path.abspath(repo_root)
+    repo_candidates = {repo_root, normalized_repo}
+    anchored_item_ids = {
+        item_id
+        for (item_id,) in (
+            db.query(SpecAnchor.spec_item_id)
+            .join(SpecItem, SpecAnchor.spec_item_id == SpecItem.id)
+            .filter(
+                SpecAnchor.repo.in_(repo_candidates),
+                SpecAnchor.path.in_(changed_paths),
+                SpecItem.project_id == task.project,
+                SpecItem.archived_at.is_(None),
+            )
+            .all()
+        )
+    }
+    if not anchored_item_ids:
+        return []
+
+    existing_item_ids = {
+        item_id
+        for (item_id,) in (
+            db.query(SpecTaskLink.spec_item_id)
+            .filter(
+                SpecTaskLink.task_id == task.id,
+                SpecTaskLink.relation == "modifies",
+                SpecTaskLink.spec_item_id.in_(anchored_item_ids),
+            )
+            .all()
+        )
+    }
+    links = [
+        SpecTaskLink(
+            id=str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"landed-spec-link:{task.id}:{item_id}:modifies",
+                )
+            ),
+            spec_item_id=item_id,
+            task_id=task.id,
+            relation="modifies",
+            confidence="derived",
+            created_by="system:landing",
+        )
+        for item_id in sorted(anchored_item_ids - existing_item_ids)
+    ]
+    if links:
+        db.add_all(links)
+        db.flush()
+    return links
 
 
 def apply_commit_staleness(
