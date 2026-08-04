@@ -844,22 +844,21 @@ def execute_agent_run(
                 )
             worktree_ref = review_head
 
-        if _use_worktree():
-            worktree_manager = worktree_mgr_cls(repo_root)
-            try:
-                worktree_path = worktree_manager.create(run.id, worktree_ref)
-                exec_cwd = worktree_path
-            except WorktreeUnsupportedError as exc:
-                logger.warning(
-                    "git worktree unavailable for %s (%s); run %s falls back to "
-                    "the shared sequential working tree",
-                    repo_root,
-                    exc,
-                    run_id,
-                )
-                worktree_manager = None
-                worktree_path = None
-                exec_cwd = repo_root
+        if not _use_worktree():
+            raise AgentExecutionError(
+                "Per-run git worktree isolation is disabled; refusing to run "
+                f"agent {run_id} in the integration checkout"
+            )
+
+        worktree_manager = worktree_mgr_cls(repo_root)
+        try:
+            worktree_path = worktree_manager.create(run.id, worktree_ref)
+            exec_cwd = worktree_path
+        except WorktreeUnsupportedError as exc:
+            raise AgentExecutionError(
+                "Could not create an isolated git worktree for run "
+                f"{run_id}; refusing to use the integration checkout: {exc}"
+            ) from exc
 
         if _has_uncommitted_changes(exec_cwd):
             logger.warning(
