@@ -171,6 +171,8 @@ def test_dispatch_stream_json_output_flags_preserve_prompt_contract(cli, tmp_pat
         assert "--verbose" in argv
     else:
         assert argv[argv.index("-p") + 1] == argv[format_index - 1]
+        if cli == "qwen":
+            assert argv[argv.index("--yolo") + 1] == "-p"
 
 
 def test_codex_receives_json_output_flag(tmp_path):
@@ -208,6 +210,8 @@ def test_review_command_output_flags_match_cli_contract(cli, tmp_path):
     else:
         prompt_flag = "-p"
         assert argv[argv.index(prompt_flag) + 1]
+        if cli == "qwen":
+            assert argv[argv.index("--yolo") + 1] == "-p"
 
 
 def test_build_review_command_never_infers_a_missing_base_ref(tmp_path):
