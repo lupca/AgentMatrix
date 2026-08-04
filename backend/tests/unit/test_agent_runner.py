@@ -449,6 +449,7 @@ def test_concurrency_brake_queues_run_without_spawning_process(
     monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
 
     db = worker_db()
+    db.add(Setting(key="max_concurrent_runs", value=2))
     db.add_all(
         [
             Task(id="RUN-002", project="project", title="Other", status="dispatched"),
