@@ -53,6 +53,18 @@ logger = logging.getLogger(__name__)
 GateDecision = Literal["approved", "rejected"]
 
 
+def _plan_critic_token_budget() -> int:
+    """The critic's real token ceiling, read at call time.
+
+    Local import: spec_plan_generator does not import this module today, but
+    keeping the dependency lazy means raising the budget never has to worry
+    about import order.
+    """
+    from app.services.spec_plan_generator import PLAN_CRITIC_TOKEN_BUDGET
+
+    return PLAN_CRITIC_TOKEN_BUDGET
+
+
 def _is_cheap_executor(agent: Agent) -> bool:
     """Identify the explicitly low-cost executor tier for impl-design gating."""
 
@@ -1884,7 +1896,14 @@ class TaskStateMachine:
             "verdict": critic_verdict,
             "findings": critic_findings,
             "summary": critic_summary,
-            "token_budget": 50_000,
+            # Read the real budget instead of restating it. This was hardcoded
+            # 50_000 and silently went stale the moment PLAN_CRITIC_TOKEN_BUDGET
+            # was raised to 150_000 — and because GateRecord is append-only, a
+            # wrong number here is written permanently into the ledger and
+            # cannot be corrected later. Imported locally: spec_plan_generator
+            # does not import this module, but keeping it lazy avoids creating
+            # that edge for future changes.
+            "token_budget": _plan_critic_token_budget(),
             "tokens_used": critic_tokens,
             "diff_provided": False,
         }
