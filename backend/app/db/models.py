@@ -252,6 +252,9 @@ class Task(ArchivableMixin, Base):
         "ImplDesign", back_populates="task", uselist=False,
         cascade="all, delete-orphan",
     )
+    spec_links = relationship(
+        "SpecTaskLink", back_populates="task", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -1230,6 +1233,9 @@ class SpecItem(ArchivableMixin, Base):
     anchors = relationship(
         "SpecAnchor", back_populates="spec_item", cascade="all, delete-orphan"
     )
+    task_links = relationship(
+        "SpecTaskLink", back_populates="spec_item", cascade="all, delete-orphan"
+    )
 
 
 class SpecAnchor(Base):
@@ -1288,6 +1294,43 @@ class SpecRelation(Base):
     )
     to_item = relationship(
         "SpecItem", foreign_keys=[to_id], back_populates="incoming_relations"
+    )
+
+
+class SpecTaskLink(Base):
+    """A manually asserted, typed edge between a project spec and a task."""
+
+    __tablename__ = "spec_task_link"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    spec_item_id = Column(
+        String(36), ForeignKey("spec_item.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    task_id = Column(
+        String(20), ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    relation = Column(String(20), nullable=False)
+    confidence = Column(String(20), nullable=False, default="asserted", server_default="asserted")
+    created_by = Column(String(100), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    spec_item = relationship("SpecItem", back_populates="task_links")
+    task = relationship("Task", back_populates="spec_links")
+
+    __table_args__ = (
+        CheckConstraint(
+            "relation IN ('implements', 'modifies', 'violates', 'references')",
+            name="ck_spec_task_link_relation",
+        ),
+        CheckConstraint(
+            "confidence IN ('asserted', 'derived', 'verified')",
+            name="ck_spec_task_link_confidence",
+        ),
+        UniqueConstraint(
+            "spec_item_id", "task_id", "relation", name="uq_spec_task_link_edge"
+        ),
     )
 
 

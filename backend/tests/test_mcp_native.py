@@ -99,6 +99,14 @@ def test_executor_task_scope_is_driven_by_tool_schema():
         claims, specs["get_status"], {"task_id": "task-2"}
     )
 
+    # spec_get remains usable as a project-spec lookup when no task selector
+    # is passed, but an executor may only name its own task explicitly.
+    spec_args = _task_scope_arguments(claims, specs["spec_get"], {"ids": ["spec-1"]})
+    assert spec_args == {"ids": ["spec-1"]}
+    assert _task_scope_ok(claims, specs["spec_get"], spec_args)
+    assert _task_scope_ok(claims, specs["spec_get"], {"task_id": "task-1"})
+    assert not _task_scope_ok(claims, specs["spec_get"], {"task_id": "task-2"})
+
 
 def test_native_envelope_structures_transition_error_and_hint():
     result = envelope({"error": "Task is already dispatched; expected status todo"})
@@ -185,6 +193,45 @@ async def test_tool_call_end_to_end_through_mcp_client(monkeypatch, tmp_path):
     assert body["ok"] is True, body
     assert body["data"]["task"]["id"] == "T-1"
     assert "runtime_warning" not in body["data"]
+
+
+@pytest.mark.asyncio
+async def test_spec_task_link_round_trip_through_real_mcp_client(monkeypatch):
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="spec-mcp", name="Spec MCP"))
+    seed.add(Task(id="SPEC-MCP-1", title="Link a spec", project="spec-mcp"))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    server = build_server(default_token=issue_token("test-secret", role="coordinator"))
+
+    async with Client(server) as client:
+        write_result = await client.call_tool("spec_write", {"ops": [
+            {
+                "op": "create", "id": "spec-mcp-1", "project_id": "spec-mcp",
+                "kind": "requirement", "title": "MCP linkage", "body": "Expose the edge",
+            },
+            {
+                "op": "task_link", "spec_item_id": "spec-mcp-1", "task_id": "SPEC-MCP-1",
+                "relation": "implements", "confidence": "asserted", "created_by": "@human",
+            },
+        ]})
+        read_result = await client.call_tool("spec_get", {"task_id": "SPEC-MCP-1"})
+
+    written = json.loads(write_result.content[0].text)
+    fetched = json.loads(read_result.content[0].text)
+    assert written["ok"] is True, written
+    assert written["data"]["task_links"][0]["spec_item_id"] == "spec-mcp-1"
+    assert fetched["ok"] is True, fetched
+    assert [item["id"] for item in fetched["data"]["items"]] == ["spec-mcp-1"]
+    assert fetched["data"]["task_links"][0]["task_id"] == "SPEC-MCP-1"
 
 
 @pytest.mark.asyncio

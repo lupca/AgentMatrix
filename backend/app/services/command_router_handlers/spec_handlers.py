@@ -37,7 +37,9 @@ class SpecHandlersMixin:
                 "source_doc_id", "supersedes_id",
             ) if key in payload}
         try:
-            return get_specs(self.db, ids=ids, filters=filters)
+            return get_specs(
+                self.db, ids=ids, filters=filters, task_id=payload.get("task_id")
+            )
         except SpecError as exc:
             return {"error": str(exc)}
 

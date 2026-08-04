@@ -318,6 +318,7 @@ class CommandRouter(
         elif canonical_name == 'spec_get':
             ids = args.get('ids')
             filters = args.get('filter', args.get('filters'))
+            task_id = args.get('task_id')
             if ids is not None and not isinstance(ids, list):
                 return {'error': 'ids must be an array'}
             if filters is not None and not isinstance(filters, Mapping):
@@ -325,6 +326,7 @@ class CommandRouter(
             command_args = json.dumps({
                 'ids': ids,
                 'filter': filters,
+                'task_id': task_id,
             }, ensure_ascii=False)
         elif canonical_name == 'spec_stale':
             project = str(args.get('project', '')).strip()

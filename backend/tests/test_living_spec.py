@@ -2,7 +2,7 @@ import asyncio
 
 from sqlalchemy import inspect
 
-from app.db.models import SpecItem, SpecRelation
+from app.db.models import SpecItem, SpecRelation, SpecTaskLink
 from app.services.command_router import CommandRouter
 
 
@@ -11,6 +11,7 @@ def test_living_spec_tables_are_registered(db_session):
     tables = inspector.get_table_names()
     assert "spec_item" in tables
     assert "spec_relation" in tables
+    assert "spec_task_link" in tables
     assert {
         "id", "project_id", "kind", "title", "body", "status", "supersedes_id",
         "source_doc_id", "derived_from_sha", "derived_by", "confidence", "verified_at",
@@ -19,6 +20,69 @@ def test_living_spec_tables_are_registered(db_session):
     assert {"from_id", "to_id", "kind"} <= {
         column["name"] for column in inspector.get_columns("spec_relation")
     }
+    assert {
+        "id", "spec_item_id", "task_id", "relation", "confidence",
+        "created_by", "created_at",
+    } <= {column["name"] for column in inspector.get_columns("spec_task_link")}
+    assert any(
+        constraint["column_names"] == ["spec_item_id", "task_id", "relation"]
+        for constraint in inspector.get_unique_constraints("spec_task_link")
+    )
+
+
+def test_spec_task_links_write_and_read_in_both_directions(db_session):
+    from app.db.models import Project, Task
+
+    project = Project(id="linked-project", name="Linked project")
+    task = Task(id="LINK-1", project=project.id, title="Implement linked specs")
+    later_task = Task(id="LINK-2", project=project.id, title="Implement the spec again")
+    db_session.add_all([project, task, later_task])
+    db_session.commit()
+    router = CommandRouter(db_session)
+    relations = ("implements", "modifies", "violates", "references")
+    ops = []
+    for relation in relations:
+        spec_id = f"spec-{relation}"
+        ops.extend([
+            {
+                "op": "create", "id": spec_id, "project_id": project.id,
+                "kind": "requirement", "title": relation, "body": f"{relation} behavior",
+            },
+            {
+                "op": "task_link", "spec_item_id": spec_id, "task_id": task.id,
+                "relation": relation, "confidence": "verified", "created_by": "@planner",
+            },
+        ])
+    ops.append({
+        "op": "task_link", "spec_item_id": "spec-implements", "task_id": later_task.id,
+        "relation": "implements", "confidence": "derived", "created_by": "@later-planner",
+    })
+
+    written = asyncio.run(router.execute_tool(
+        "spec_write", {"ops": ops}, "session-1"
+    ))
+
+    assert written["action"] == "spec_written"
+    assert {link["relation"] for link in written["task_links"]} == set(relations)
+    assert db_session.query(SpecTaskLink).count() == 5
+
+    # task -> specs: task_id is a real client-facing spec_get selector.
+    by_task = asyncio.run(router.execute_tool(
+        "spec_get", {"task_id": task.id}, "session-1"
+    ))
+    assert {item["id"] for item in by_task["items"]} == {
+        f"spec-{relation}" for relation in relations
+    }
+    assert {link["task_id"] for link in by_task["task_links"]} == {task.id}
+
+    # spec -> tasks: every item and the top-level projection expose its task links.
+    by_spec = asyncio.run(router.execute_tool(
+        "spec_get", {"ids": ["spec-implements"]}, "session-1"
+    ))
+    assert [link["task_id"] for link in by_spec["task_links"]] == [task.id, later_task.id]
+    assert by_spec["items"][0]["task_links"] == by_spec["task_links"]
+    assert {link["relation"] for link in by_spec["task_links"]} == {"implements"}
+    assert by_spec["task_links"][0]["created_by"] == "@planner"
 
 
 def test_spec_write_batch_relations_get_cluster_and_filters(db_session):
