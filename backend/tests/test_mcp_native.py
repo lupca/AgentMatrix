@@ -28,7 +28,7 @@ from app.services.task_orchestration import TaskOrchestrationService
 from app.services.tool_registry import get_mcp_tool_specs
 
 
-def _runtime_monitor_with_new_commit(tmp_path) -> RuntimeVersionMonitor:
+def _runtime_monitor(tmp_path, *, advance_head: bool = True) -> RuntimeVersionMonitor:
     repo = tmp_path / "agenticmatix"
     repo.mkdir()
     for args in (
@@ -51,17 +51,18 @@ def _runtime_monitor_with_new_commit(tmp_path) -> RuntimeVersionMonitor:
         check=True,
     )
     monitor = RuntimeVersionMonitor.capture(repo)
-    (repo / "landed.txt").write_text("landed\n")
-    subprocess.run(
-        ["git", "-C", str(repo), "add", "landed.txt"],
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(repo), "commit", "-q", "-m", "landed"],
-        capture_output=True,
-        check=True,
-    )
+    if advance_head:
+        (repo / "landed.txt").write_text("landed\n")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "landed.txt"],
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "landed"],
+            capture_output=True,
+            check=True,
+        )
     return monitor
 
 
@@ -250,7 +251,7 @@ async def test_executor_get_status_without_task_id_uses_token_scope(monkeypatch)
 async def test_land_task_result_warns_that_landed_code_needs_restart(
     monkeypatch, tmp_path
 ):
-    monitor = _runtime_monitor_with_new_commit(tmp_path)
+    monitor = _runtime_monitor(tmp_path)
 
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
@@ -284,6 +285,76 @@ async def test_land_task_result_warns_that_landed_code_needs_restart(
     assert warning["pending_commit_count"] == 1
     assert "Code đã vào main nhưng CHƯA có hiệu lực" in warning["message"]
     assert "restart backend/worker" in warning["message"]
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "payload"),
+    [
+        (
+            "dispatch_task",
+            {"task_id": "T-1", "executor": "@executor"},
+            {
+                "action": "gate_created",
+                "task_id": "T-1",
+                "executor": "@executor",
+                "gate_record_id": "gate-dispatch",
+            },
+        ),
+        (
+            "approve_gate",
+            {"task_id": "T-1", "decision": "approved"},
+            {
+                "action": "gate_approved",
+                "task_id": "T-1",
+                "gate_record_id": "gate-approved",
+                "nudged": True,
+            },
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "head_changed", [False, True], ids=["matching-sha", "stale-sha"]
+)
+@pytest.mark.asyncio
+async def test_risky_action_runtime_warning_matches_runtime_sha(
+    monkeypatch,
+    tmp_path,
+    tool_name,
+    arguments,
+    payload,
+    head_changed,
+):
+    monitor = _runtime_monitor(tmp_path, advance_head=head_changed)
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    monkeypatch.setattr(
+        mcp_native.CommandRouter,
+        "execute_tool",
+        AsyncMock(return_value=payload),
+    )
+
+    server = build_server(
+        default_token=issue_token("test-secret", role="coordinator"),
+        runtime_version=monitor,
+    )
+    async with Client(server) as client:
+        result = await client.call_tool(tool_name, arguments)
+        body = json.loads(result.content[0].text)
+
+    assert body["ok"] is True, body
+    for field, value in payload.items():
+        assert body["data"][field] == value
+    if head_changed:
+        warning = body["data"]["runtime_warning"]
+        assert warning["code"] == "runtime_restart_required"
+        assert warning["pending_commit_count"] == 1
+    else:
+        assert "runtime_warning" not in body["data"]
 
 
 @pytest.mark.asyncio
