@@ -159,22 +159,6 @@ def _nudge_driver(task_id: str, trigger: str) -> None:
         )
 
 
-def _enqueue_coordinator_wake(event_id: int) -> None:
-    try:
-        mod = _runner()
-        if mod and hasattr(mod, "wake_coordinator"):
-            mod.wake_coordinator.send(event_id)
-        else:
-            from app.workers.agent_runner import wake_coordinator
-            wake_coordinator.send(event_id)
-    except Exception:
-        logger.warning(
-            "Could not enqueue coordinator wake for task event %s",
-            event_id,
-            exc_info=True,
-        )
-
-
 def _emit_decision_event(
     db: Session,
     *,
@@ -190,7 +174,6 @@ def _emit_decision_event(
         payload=payload,
         db=db,
     )
-    _enqueue_coordinator_wake(event.id)
     return event
 
 
