@@ -295,6 +295,12 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
     sections = [f"Execute task {task.id}: {task.title}", details]
     if task.status == "changes-requested":
         sections.append(_review_feedback(task))
+    sections.append(
+        "Code graph tools reflect the main repo, not your worktree "
+        "(use to understand code before editing, not to check your own changes):\n"
+        '- get_impact_radius {"file": "<project-relative-path>"}\n'
+        '- get_minimal_context {"query": "<search-text>", "limit": 10}'
+    )
     if task.acceptance_criteria:
         sections.append(
             "Acceptance criteria:\n"

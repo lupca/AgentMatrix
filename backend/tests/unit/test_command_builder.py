@@ -211,3 +211,33 @@ def test_build_review_command_never_infers_a_missing_base_ref(tmp_path):
 
     with pytest.raises(ValueError, match="base_ref"):
         build_review_command(task, agent, project, "", "head-sha")
+
+
+def test_task_prompt_includes_graph_tool_guidance(tmp_path):
+    task = Task(id="GRAPH-001", project="p", title="Implement feature with graph tools")
+    agent = Agent(id="@agent", name="Agent", role="executor", cli="codex")
+    project = Project(id="p", name="Project", repo_root=str(tmp_path))
+
+    command, _, _ = build_dispatch_command(task, agent, project)
+    prompt = shlex.split(command)[-1]
+
+    # Verify presence of tools and input formats
+    assert "get_impact_radius" in prompt
+    assert "get_minimal_context" in prompt
+    assert 'get_impact_radius {"file":' in prompt
+    assert 'get_minimal_context {"query":' in prompt
+    assert '"limit": 10' in prompt
+
+    # Verify main repo vs worktree warning
+    assert "main repo" in prompt
+    assert "worktree" in prompt
+
+    # Verify load_tools is NOT recommended/mentioned
+    assert "load_tools" not in prompt
+
+    # Extract the graph tool section and check character length (< 400 chars)
+    graph_section = [
+        line for line in prompt.split("\n\n") if "get_impact_radius" in line
+    ][0]
+    assert len(graph_section) < 400
+
