@@ -1,10 +1,54 @@
 from datetime import date, datetime
-from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
+from typing import Annotated, Any, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    StringConstraints,
+    model_validator,
+)
 
 
 REVIEW_RESULT_SCHEMA_VERSION = "1.0"
-SPEC_PLAN_RESULT_SCHEMA_VERSION = "1.1"
+SPEC_PLAN_RESULT_SCHEMA_VERSION = "2.0"
+PLAN_CRITIC_RESULT_SCHEMA_VERSION = "1.0"
+NonEmptyStrictStr = Annotated[
+    str, StringConstraints(strict=True, strip_whitespace=True, min_length=1)
+]
+
+
+class PlanEvidence(BaseModel):
+    """One reproducible fact used by the planner."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    fact: NonEmptyStrictStr
+    source_type: Literal["command", "file", "query"]
+    source: NonEmptyStrictStr
+    result: NonEmptyStrictStr
+
+
+class RuledOutApproach(BaseModel):
+    """An alternative the planner considered and rejected."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    approach: NonEmptyStrictStr
+    reason: NonEmptyStrictStr
+
+
+class PlanLimits(BaseModel):
+    """Task-local ceilings enforced in addition to global safety brakes."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    max_execution_rounds: StrictInt = Field(ge=1)
+    max_tokens: StrictInt = Field(ge=1)
+    max_cost_usd: StrictFloat | StrictInt | None = Field(default=None, ge=0)
 
 
 class SpecPlanResult(BaseModel):
@@ -13,13 +57,57 @@ class SpecPlanResult(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     schema_version: Literal[SPEC_PLAN_RESULT_SCHEMA_VERSION]
-    acceptance_criteria: list[StrictStr] = Field(min_length=1)
+    acceptance_criteria: list[NonEmptyStrictStr]
+    constraints: list[NonEmptyStrictStr]
+    evidence: list[PlanEvidence] = Field(min_length=1)
+    prior_art: list[NonEmptyStrictStr]
+    ruled_out: list[RuledOutApproach]
+    limits: PlanLimits | None
     plan: StrictStr
     files: list[StrictStr] = Field(default_factory=list)
     tests: list[StrictStr] = Field(default_factory=list)
     risk: Literal["low", "medium", "high"]
     spec_clarity: Literal["high", "medium", "low"]
     open_questions: list[StrictStr]
+
+    @model_validator(mode="after")
+    def _enforce_plan_contract(self) -> "SpecPlanResult":
+        if not self.acceptance_criteria and not self.constraints:
+            raise ValueError(
+                "at least one acceptance criterion or constraint is required"
+            )
+        if self.risk == "high" and self.limits is None:
+            raise ValueError("limits are required when risk is high")
+        return self
+
+
+class PlanCriticFinding(BaseModel):
+    """A focused plan-critic finding backed by reproducible evidence."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    target: Literal[
+        "evidence", "prior_art", "ruled_out", "constraints", "limits", "contract"
+    ]
+    description: NonEmptyStrictStr
+    evidence: list[NonEmptyStrictStr] = Field(min_length=1)
+
+
+class PlanCriticResult(BaseModel):
+    """Independent, budgeted verdict on a generated plan."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[PLAN_CRITIC_RESULT_SCHEMA_VERSION]
+    verdict: Literal["accept", "reject"]
+    findings: list[PlanCriticFinding]
+    summary: NonEmptyStrictStr
+
+    @model_validator(mode="after")
+    def _rejection_requires_findings(self) -> "PlanCriticResult":
+        if self.verdict == "reject" and not self.findings:
+            raise ValueError("a rejected plan requires at least one evidenced finding")
+        return self
 
 
 class ReviewACResult(BaseModel):
@@ -133,6 +221,11 @@ class TaskState(BaseModel):
     status: str = "todo"
     mode: str = "supervised"
     acceptance_criteria: list[Any] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
+    prior_art: list[str] = Field(default_factory=list)
+    ruled_out: list[dict[str, Any]] = Field(default_factory=list)
+    limits: dict[str, Any] | None = None
     files: list[Any] = Field(default_factory=list)
     tests: list[Any] = Field(default_factory=list)
     plan: str | None = None
@@ -148,6 +241,10 @@ class TaskState(BaseModel):
     risk: str | None = None
     spec_clarity: str | None = None
     open_questions: list[str] | None = None
+    planner: str | None = None
+    plan_critic: str | None = None
+    plan_critic_status: str | None = None
+    plan_critic_findings: list[dict[str, Any]] = Field(default_factory=list)
     predicted_success: str | None = None
     prediction_factors: dict[str, Any] | None = None
     audit_trail: list[dict[str, Any]] = Field(default_factory=list)
@@ -221,6 +318,15 @@ class Task(BaseModel):
     executor: str | None = None
     reviewer: str | None = None
     acceptance_criteria: list[Any] | None = []
+    constraints: list[str] | None = []
+    evidence: list[dict[str, Any]] | None = []
+    prior_art: list[str] | None = []
+    ruled_out: list[dict[str, Any]] | None = []
+    limits: dict[str, Any] | None = None
+    planner: str | None = None
+    plan_critic: str | None = None
+    plan_critic_status: str | None = None
+    plan_critic_findings: list[dict[str, Any]] | None = []
     files: list[Any] | None = []
     tests: list[Any] | None = []
     flows: list[Any] | None = []

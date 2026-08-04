@@ -82,6 +82,28 @@ async def test_llm_service_forwards_cwd_through_cli_provider_to_spawn():
     assert response.usage_is_measured is False
 
 
+@pytest.mark.asyncio
+async def test_cli_provider_enforces_max_output_tokens():
+    class FakeDispatcher:
+        async def spawn(self, cli, model, prompt, **kwargs):
+            del cli, model, prompt, kwargs
+            yield "a" * 10
+            yield "b" * 10
+
+    agent = SimpleNamespace(
+        id="cli-agent", agent_type="cli", provider="openai",
+        cli="codex", model="gpt-5", effort="low",
+    )
+    response = await LLMService(
+        cli_provider=CLIProvider(dispatcher=FakeDispatcher())
+    ).complete(
+        agent, [{"role": "user", "content": "bounded"}], max_tokens=3
+    )
+
+    assert response.text == "a" * 10 + "b" * 2
+    assert response.usage.output_tokens <= 3
+
+
 def test_usage_extraction_normalizes_anthropic_cache_tokens():
     usage = extract_usage(
         {

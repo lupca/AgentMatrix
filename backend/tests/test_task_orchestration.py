@@ -879,6 +879,37 @@ def test_cli_subscription_cost_does_not_trip_usd_brake_but_tokens_do(
     assert audit.task_id == task.id
 
 
+def test_plan_local_token_limit_tightens_global_brake(orchestration, db_session):
+    task = _task(db_session, "GATE-PLAN-TOKENS", mode="bypass")
+    task.limits = {"max_execution_rounds": 2, "max_tokens": 10}
+    db_session.add(Setting(key="max_tokens_per_task", value="1000"))
+    db_session.add(
+        LLMUsage(
+            task_id=task.id,
+            model="test-model",
+            provider="test",
+            operation="chat",
+            input_tokens=8,
+            output_tokens=3,
+            cost_usd="0",
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(BrakeViolationError):
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="dispatch-over-plan-token-budget",
+        )
+
+    audit = db_session.query(AuditLog).filter(
+        AuditLog.action == "brake:token_limit"
+    ).one()
+    assert audit.details["decision"]["observations"]["token_limit"] == 10
+
+
 def test_dependency_pending_brake_queues_dispatch_instead_of_raising(
     orchestration, db_session
 ):
@@ -1241,6 +1272,27 @@ def test_dispatch_allows_legacy_no_ac_task_without_acceptance_criteria(
     assert result.task.status == "dispatched"
 
 
+def _critic_contract(*, constraints=None, limits=None):
+    return {
+        "constraints": constraints or [],
+        "evidence": [{
+            "fact": "Relevant module exists",
+            "source_type": "file",
+            "source": "backend/app/example.py:1",
+            "result": "module exists",
+        }],
+        "prior_art": [],
+        "ruled_out": [],
+        "limits": limits,
+        "planner": "@planner",
+        "critic": "@critic",
+        "critic_verdict": "accept",
+        "critic_findings": [],
+        "critic_summary": "Evidence reproduced",
+        "critic_tokens": 1200,
+    }
+
+
 def test_write_spec_plan_populates_task_and_opens_dispatch_gate(
     orchestration, db_session
 ):
@@ -1258,6 +1310,7 @@ def test_write_spec_plan_populates_task_and_opens_dispatch_gate(
         task_id=task.id,
         actor="@coordinator",
         acceptance_criteria=["Endpoint returns 200", "Unit tests pass"],
+        **_critic_contract(constraints=["Do not add a migration"]),
         plan="1. Add route. 2. Add tests.",
         files=["backend/app/api/foo.py", "unconfirmed/made_up.py *(chưa xác nhận)*"],
         tests=["backend/tests/test_foo.py"],
@@ -1276,7 +1329,8 @@ def test_write_spec_plan_populates_task_and_opens_dispatch_gate(
         .filter(AuditLog.task_id == task.id, AuditLog.action == "spec_plan_generated")
         .one()
     )
-    assert audit.details["ac_count"] == 2
+    assert audit.details["acceptance_count"] == 2
+    assert audit.details["review_criteria_count"] == 3
 
     # The AC gate is now open: dispatch no longer needs legacy_no_ac.
     result = orchestration.request_dispatch(
@@ -1304,6 +1358,7 @@ def test_write_spec_plan_rejects_empty_acceptance_criteria(orchestration, db_ses
             task_id=task.id,
             actor="@coordinator",
             acceptance_criteria=[],
+            **_critic_contract(),
             plan="plan",
             files=[],
             tests=[],
@@ -1311,6 +1366,156 @@ def test_write_spec_plan_rejects_empty_acceptance_criteria(orchestration, db_ses
             flows=[],
             spec_clarity="high",
             open_questions=[],
+        )
+
+
+def test_constraints_only_plan_dispatches_and_critic_is_in_ledger(
+    orchestration, db_session
+):
+    task = Task(
+        id="SPEC-CONSTRAINTS",
+        project="project",
+        title="Boundary-only change",
+        mode="bypass",
+        acceptance_criteria=[],
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    updated = orchestration.write_spec_plan(
+        task_id=task.id,
+        actor="@coordinator",
+        acceptance_criteria=[],
+        **_critic_contract(constraints=["Do not modify the public API"]),
+        plan="Preserve the API while applying the internal fix.",
+        files=[],
+        tests=[],
+        risk="low",
+        flows=[],
+        spec_clarity="high",
+        open_questions=[],
+    )
+    critic_row = db_session.query(GateRecord).filter_by(
+        task_id=task.id, gate_type="plan_critic"
+    ).one()
+    assert critic_row.status == "approved"
+    assert critic_row.executor == "@planner"
+    assert critic_row.reviewer == "@critic"
+    assert critic_row.input_payload["diff_provided"] is False
+    assert updated.constraints == ["Do not modify the public API"]
+
+    dispatched = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="constraint-only-dispatch",
+    )
+    assert dispatched.task.status == "dispatched"
+
+
+def test_rejected_plan_critic_blocks_dispatch_and_requires_evidence(
+    orchestration, db_session
+):
+    task = Task(
+        id="SPEC-REJECTED",
+        project="project",
+        title="Bad plan",
+        mode="bypass",
+        acceptance_criteria=[],
+    )
+    db_session.add(task)
+    db_session.commit()
+    rejected = _critic_contract()
+    rejected.update({
+        "critic_verdict": "reject",
+        "critic_findings": [{
+            "target": "evidence",
+            "description": "The cited file does not exist",
+            "evidence": ["test -e backend/app/example.py -> exit 1"],
+        }],
+        "critic_summary": "Planner evidence did not reproduce",
+    })
+    updated = orchestration.write_spec_plan(
+        task_id=task.id,
+        actor="@coordinator",
+        acceptance_criteria=["Observable outcome"],
+        **rejected,
+        plan="Edit the missing file.",
+        files=[],
+        tests=[],
+        risk="low",
+        flows=[],
+        spec_clarity="high",
+        open_questions=[],
+    )
+    assert updated.plan_critic_status == "reject"
+    assert updated.awaiting_approval is True
+    assert db_session.query(GateRecord).filter_by(
+        task_id=task.id, gate_type="plan_critic", status="rejected"
+    ).count() == 1
+    with pytest.raises(PrerequisiteError, match="independent plan critic"):
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="must-not-dispatch",
+        )
+
+    invalid = _critic_contract()
+    invalid.update({
+        "critic_verdict": "reject",
+        "critic_findings": [{"target": "contract", "description": "Vague"}],
+    })
+    with pytest.raises(PrerequisiteError, match="reproducible evidence"):
+        orchestration.write_spec_plan(
+            task_id=task.id,
+            actor="@coordinator",
+            acceptance_criteria=["Outcome"],
+            **invalid,
+            plan="Another plan",
+            files=[], tests=[], risk="low", flows=[],
+            spec_clarity="high", open_questions=[],
+        )
+
+
+def test_plan_critic_four_eyes_and_plan_edit_invalidation(orchestration, db_session):
+    task = Task(
+        id="SPEC-FOUR-EYES",
+        project="project",
+        title="Independent plan review",
+        mode="bypass",
+        acceptance_criteria=[],
+    )
+    db_session.add(task)
+    db_session.commit()
+    same_agent = _critic_contract()
+    same_agent["critic"] = same_agent["planner"]
+    with pytest.raises(PrerequisiteError, match="must differ"):
+        orchestration.write_spec_plan(
+            task_id=task.id, actor="@coordinator",
+            acceptance_criteria=["Outcome"], **same_agent,
+            plan="Plan", files=[], tests=[], risk="low", flows=[],
+            spec_clarity="high", open_questions=[],
+        )
+
+    orchestration.write_spec_plan(
+        task_id=task.id, actor="@coordinator",
+        acceptance_criteria=["Outcome"], **_critic_contract(),
+        plan="Accepted plan", files=[], tests=[], risk="low", flows=[],
+        spec_clarity="high", open_questions=[],
+    )
+    version = task.version
+    edited = orchestration.update_task_fields(
+        task_id=task.id,
+        patch={"plan": "Edited after criticism"},
+        actor="@coordinator",
+    )
+    assert edited.version == version + 1
+    assert edited.plan_critic_status is None
+    with pytest.raises(PrerequisiteError, match="independent plan critic"):
+        orchestration.request_dispatch(
+            task_id=task.id, agent_id="@executor", actor="@operator",
+            idempotency_key="stale-critic-verdict",
         )
 
 
@@ -1329,6 +1534,7 @@ def test_execute_dispatch_blocks_open_questions_until_clear(orchestration, db_se
         task_id=task.id,
         actor="@coordinator",
         acceptance_criteria=["Observable result"],
+        **_critic_contract(),
         plan="Research and implement.",
         files=[],
         tests=[],
@@ -1355,6 +1561,7 @@ def test_execute_dispatch_blocks_open_questions_until_clear(orchestration, db_se
         task_id=task.id,
         actor="@coordinator",
         acceptance_criteria=["Observable result"],
+        **_critic_contract(),
         plan="Research and implement.",
         files=[],
         tests=[],
@@ -1462,6 +1669,7 @@ def test_write_spec_plan_requires_todo_status(orchestration, db_session):
             task_id=task.id,
             actor="@coordinator",
             acceptance_criteria=["AC"],
+            **_critic_contract(),
             plan="plan",
             files=[],
             tests=[],
@@ -1732,6 +1940,7 @@ def test_write_spec_plan_updates_task_mode_by_policy(orchestration, db_session):
         task_id=task_low.id,
         actor="@planner",
         acceptance_criteria=["AC1"],
+        **_critic_contract(),
         plan="Plan",
         files=[],
         tests=[],
@@ -1748,6 +1957,11 @@ def test_write_spec_plan_updates_task_mode_by_policy(orchestration, db_session):
         task_id=task_high.id,
         actor="@planner",
         acceptance_criteria=["AC1"],
+        **_critic_contract(limits={
+            "max_execution_rounds": 2,
+            "max_tokens": 100_000,
+            "max_cost_usd": 5.0,
+        }),
         plan="Plan",
         files=[],
         tests=[],

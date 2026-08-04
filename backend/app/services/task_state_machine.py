@@ -30,6 +30,7 @@ from app.db.models import Session as SessionModel
 from app.services.agent_matcher import AgentMatcher, POLICY_VERSION as AGENT_MATCHER_POLICY_VERSION
 from app.services.landing import LandingResult, head_of, land_result
 from app.services.outbox import record_commit_event, record_run_requested
+from app.services.review_criteria import merged_review_criteria
 from app.services.task_event_service import emit_task_event
 from app.services.task_validators import (
     BrakeViolationError,
@@ -237,6 +238,8 @@ class TaskStateMachine:
         output_payload: dict[str, Any] | None = None,
         error_message: str | None = None,
         parent_id: int | None = None,
+        executor: str | None = None,
+        reviewer: str | None = None,
     ) -> GateRecord:
         record = GateRecord(
             task_id=task.id,
@@ -248,8 +251,8 @@ class TaskStateMachine:
             input_hash=input_hash,
             output_ref=output_ref,
             parent_id=parent_id,
-            executor=task.executor,
-            reviewer=task.reviewer,
+            executor=executor if executor is not None else task.executor,
+            reviewer=reviewer if reviewer is not None else task.reviewer,
             input_payload=payload,
             output_payload=output_payload,
             error_message=error_message,
@@ -1036,10 +1039,15 @@ class TaskStateMachine:
                 "execute dispatch requires expected_status in "
                 "{'todo', 'failed', 'changes-requested'}"
             )
-        if not (task.acceptance_criteria or []) and not task.legacy_no_ac:
+        if not merged_review_criteria(task.acceptance_criteria, task.constraints) and not task.legacy_no_ac:
             raise PrerequisiteError(
-                "dispatch requires acceptance_criteria; run the spec/plan gate "
+                "dispatch requires acceptance_criteria or constraints; run the spec/plan gate "
                 "first (or set legacy_no_ac for pre-existing tasks)"
+            )
+        if kind == "execute" and task.planner and task.plan_critic_status != "accept":
+            raise PrerequisiteError(
+                "dispatch is blocked until the current generated plan is accepted by "
+                "an independent plan critic"
             )
         agent = self.db.get(Agent, agent_id)
         if agent is None:
@@ -1694,6 +1702,11 @@ class TaskStateMachine:
                 f"Allowed fields: {', '.join(sorted(patchable_fields))}"
             )
 
+        self.cas_status(task, task.status)
+        if {"plan", "acceptance_criteria", "raw_input"} & set(patch):
+            # A critic verdict applies only to the exact generated contract.
+            task.plan_critic_status = None
+            task.plan_critic_findings = []
         for field, value in patch.items():
             setattr(task, field, value)
         task.updated_at = datetime.now(timezone.utc)
@@ -1715,6 +1728,11 @@ class TaskStateMachine:
         task_id: str,
         actor: str,
         acceptance_criteria: list[str],
+        constraints: list[str],
+        evidence: list[dict[str, Any]],
+        prior_art: list[str],
+        ruled_out: list[dict[str, Any]],
+        limits: dict[str, Any] | None,
         plan: str,
         files: list[str],
         tests: list[str],
@@ -1722,17 +1740,48 @@ class TaskStateMachine:
         flows: list[str],
         spec_clarity: str,
         open_questions: list[str],
+        planner: str,
+        critic: str,
+        critic_verdict: str,
+        critic_findings: list[dict[str, Any]],
+        critic_summary: str,
+        critic_tokens: int,
     ) -> Task:
         task = self.validator.task(task_id)
         if not actor or not actor.strip():
             raise PrerequisiteError("actor is required")
         self.validator.assert_status(task, "todo")
-        if not acceptance_criteria:
-            raise PrerequisiteError("acceptance_criteria must not be empty")
+        if not acceptance_criteria and not constraints:
+            raise PrerequisiteError(
+                "acceptance_criteria and constraints must not both be empty"
+            )
         if spec_clarity not in {"high", "medium", "low"}:
             raise PrerequisiteError("spec_clarity must be high, medium, or low")
+        if not evidence:
+            raise PrerequisiteError("evidence must not be empty")
+        if risk == "high" and not limits:
+            raise PrerequisiteError("limits are required when risk is high")
+        if critic_verdict not in {"accept", "reject"}:
+            raise PrerequisiteError("critic_verdict must be accept or reject")
+        if critic_verdict == "reject" and not critic_findings:
+            raise PrerequisiteError("critic rejection requires evidenced findings")
+        for finding in critic_findings:
+            if not isinstance(finding, dict) or not finding.get("evidence"):
+                raise PrerequisiteError(
+                    "every critic rejection finding requires reproducible evidence"
+                )
+        self.validator.require_independent(planner, critic)
 
         task.acceptance_criteria = acceptance_criteria
+        task.constraints = constraints
+        task.evidence = evidence
+        task.prior_art = prior_art
+        task.ruled_out = ruled_out
+        task.limits = limits
+        task.planner = planner
+        task.plan_critic = critic
+        task.plan_critic_status = critic_verdict
+        task.plan_critic_findings = critic_findings
         task.plan = plan
         task.files = files
         task.tests = tests
@@ -1743,7 +1792,13 @@ class TaskStateMachine:
             task.mode = self.validator.mode_for_task(task, risk=risk)
         task.flows = flows
         task.current_gate = "plan"
-        if open_questions or spec_clarity != "high":
+        if critic_verdict == "reject":
+            task.awaiting_approval = True
+            task.approval_prompt = (
+                f"Plan critic {critic} rejected this plan: {critic_summary}. "
+                "Correct the evidenced findings and run generate_spec_plan again."
+            )
+        elif open_questions or spec_clarity != "high":
             questions = "\n".join(
                 f"{index}) {question}" for index, question in enumerate(open_questions, 1)
             )
@@ -1760,6 +1815,11 @@ class TaskStateMachine:
         task.updated_at = datetime.now(timezone.utc)
         payload = {
             "acceptance_criteria": acceptance_criteria,
+            "constraints": constraints,
+            "evidence": evidence,
+            "prior_art": prior_art,
+            "ruled_out": ruled_out,
+            "limits": limits,
             "plan": plan,
             "files": files,
             "tests": tests,
@@ -1778,20 +1838,55 @@ class TaskStateMachine:
             input_hash=TaskValidator.input_hash(payload),
             payload=payload,
             output_payload=self.gate_output(task, "spec_plan"),
+            executor=planner,
         )
         self.audit(task, record)
+        critic_payload = {
+            "planner": planner,
+            "critic": critic,
+            "verdict": critic_verdict,
+            "findings": critic_findings,
+            "summary": critic_summary,
+            "token_budget": 50_000,
+            "tokens_used": critic_tokens,
+            "diff_provided": False,
+        }
+        critic_record = self.ledger_record(
+            task=task,
+            gate_type="plan_critic",
+            status="approved" if critic_verdict == "accept" else "rejected",
+            actor=critic,
+            idempotency_key=str(uuid.uuid4()),
+            input_hash=TaskValidator.input_hash(critic_payload),
+            payload=critic_payload,
+            output_payload={
+                "verdict": critic_verdict,
+                "findings": critic_findings,
+                "summary": critic_summary,
+                "tokens_used": critic_tokens,
+            },
+            error_message=critic_summary if critic_verdict == "reject" else None,
+            executor=planner,
+            reviewer=critic,
+        )
+        self.audit(task, critic_record)
         self.db.add(
             AuditLog(
                 task_id=task.id,
                 action="spec_plan_generated",
                 actor=actor,
                 details={
-                    "ac_count": len(acceptance_criteria),
+                    "acceptance_count": len(acceptance_criteria),
+                    "constraint_count": len(constraints),
+                    "review_criteria_count": len(acceptance_criteria) + len(constraints),
                     "files": files,
                     "flows": flows,
                     "risk": risk,
                     "spec_clarity": spec_clarity,
                     "open_question_count": len(open_questions),
+                    "critic": critic,
+                    "critic_verdict": critic_verdict,
+                    "critic_tokens": critic_tokens,
                 },
             )
         )

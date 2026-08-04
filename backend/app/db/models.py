@@ -192,6 +192,15 @@ class Task(ArchivableMixin, Base):
     executor = Column(String(50), nullable=True)
     reviewer = Column(String(50), nullable=True)
     acceptance_criteria = Column(JSON, default=list)
+    constraints = Column(JSON, default=list)
+    evidence = Column(JSON, default=list)
+    prior_art = Column(JSON, default=list)
+    ruled_out = Column(JSON, default=list)
+    limits = Column(JSON, nullable=True)
+    planner = Column(String(50), nullable=True)
+    plan_critic = Column(String(50), nullable=True)
+    plan_critic_status = Column(String(10), nullable=True)
+    plan_critic_findings = Column(JSON, default=list)
     legacy_no_ac = Column(Boolean, nullable=False, default=False)
     files = Column(JSON, default=list)
     tests = Column(JSON, default=list)
@@ -261,6 +270,15 @@ class Task(ArchivableMixin, Base):
             "executor IS NULL OR reviewer IS NULL "
             "OR lower(trim(executor)) <> lower(trim(reviewer))",
             name="ck_tasks_four_eyes",
+        ),
+        CheckConstraint(
+            "planner IS NULL OR plan_critic IS NULL "
+            "OR lower(trim(planner)) <> lower(trim(plan_critic))",
+            name="ck_tasks_plan_four_eyes",
+        ),
+        CheckConstraint(
+            "plan_critic_status IS NULL OR plan_critic_status IN ('accept', 'reject')",
+            name="ck_tasks_plan_critic_status",
         ),
         CheckConstraint(
             "status <> 'done' OR ("

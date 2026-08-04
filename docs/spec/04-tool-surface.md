@@ -17,8 +17,8 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 |---|---|
 | `create_task` | CHỈ nhận `title`, `project`, `depends_on`. Muốn plan/AC/priority/tags → `update_task` sau. Id tự sinh từ counter. |
 | `update_task` | Patch cho: `raw_input` (replace semantics), `acceptance_criteria`, `plan`, `priority`, `tags`; dependency edits giữ nguyên. Dùng `raw_input` để ghi câu trả lời human trước khi regenerate spec. KHÔNG nhận files/tests/risk/mode. |
-| `generate_spec_plan` | `{task_id, agent_id}` — chỉ agent CLI; API agent bị từ chối rõ ràng. CLI chạy với `cwd=Project.repo_root` và bắt buộc đọc read-only README/docs/entry points/source liên quan trước khi plan. Prompt nhận FULL raw_input + project context/rules, giữ Scope in/out + bước verb-first + AC objectively-verifiable. Strict output v1.1 bắt buộc `spec_clarity` + `open_questions`; retry 1 lần khi JSON sai. Còn câu hỏi hoặc clarity != high → `spec_questions_pending`, task escalation và approval prompt liệt kê đủ câu hỏi. High + rỗng → clear escalation, `spec_plan_generated`. Mỗi generate ghi metric clarity + question count. |
-| `dispatch_task` | `{task_id, agent_id?}` — đòi status todo + có AC (hoặc legacy_no_ac), đồng thời chặn execute khi `open_questions` còn phần tử. Supervised → gate pending. agent_id bị matcher ghi đè khi approve (CTV2-228). |
+| `generate_spec_plan` | `{task_id, agent_id?, critic_id?}` — planner và critic đều là CLI độc lập. Planner xuất strict v2.0 gồm acceptance, constraints, evidence có nguồn tái lập, prior_art, ruled_out và limits; critic chạy ngay sau đó với trần 50k, không nhận diff, chỉ được reject bằng dẫn chứng. Critic reject → `spec_plan_critic_rejected`; accept nhưng còn câu hỏi/clarity != high → `spec_questions_pending`; đủ rõ → `spec_plan_generated`. |
+| `dispatch_task` | `{task_id, agent_id?}` — đòi status todo + có ít nhất một mục trong `acceptance_criteria ++ constraints` (hoặc legacy_no_ac), chặn khi còn open_questions hoặc plan generated chưa có critic accept hiện hành. Supervised → gate pending. |
 | `request_review` | Chỉ khi awaiting-review VÀ chưa có gate review_order mở (driver thường tạo sẵn — approve cái đó thay vì gọi tool này). Reviewer chỉ định được giữ nguyên; nếu không tồn tại/disabled/trùng executor thì fail kèm 2–3 gợi ý hợp lệ, không âm thầm thay. |
 | `record_verdict` | CHỈ reviewer của review run thành công mới được gọi; coordinator không tự verdict hộ. |
 | `approve_gate` | `{gate_record_id | task_id | "admin:<id>", decision: approved|rejected}` — xem 03. |
@@ -43,7 +43,7 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 | `manage_project` / `manage_agent` | create/update/archive/disable qua admin gate. Update nhận `{id, patch}`. API agent đòi api_key khi approve create. Agent roles: `executor`/`reviewer`/`coordinator`/`spec_plan` — truyền `role` (singular, legacy) hoặc `roles` (array, preferred). Capabilities: ~50 giá trị ENUM (code, backend, review, architecture...) — xem `capability_types` table. |
 | `update_settings` | `{key, value}` trong SETTINGS_WHITELIST → admin gate. |
 | `query_db` | Raw SQL read-only (1 câu SELECT/WITH), chạy bằng `ct_readonly_user`, cap 500 rows + statement timeout. Bảng mới phải được GRANT (đã có default privileges). |
-| `get_stats` | Token/cost/run stats từ LLMUsage. |
+| `get_stats` | Token/cost/run stats từ LLMUsage, cộng tỷ lệ plan bị critic trả và số vòng execute thừa của cohort trước/sau critic. |
 | (bảng `tool_metrics`) | Telemetry công cụ tiết-kiệm-token: graph calls + review results (findings, AC pass/fail, tests). Truy vấn qua query_db. Reviewer được prompt chạy `.claude/review-toolchain.md` (ocr...) — thiếu binary = ghi chú và đi tiếp, không phải lỗi. |
 | `suggest_agents` | AgentSuggester — xếp hạng theo capabilities/success_rate. |
 

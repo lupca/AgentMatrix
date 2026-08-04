@@ -14,7 +14,7 @@ from app.services import spec_plan_generator
 from app.services.agent_suggester import AgentSuggester
 from app.services.context_hierarchy import ContextHierarchy
 from app.services.llm_service import ConfigurationError
-from app.services.spec_plan_generator import SpecPlanGenerationError
+from app.services.spec_plan_generator import PlanCriticError, SpecPlanGenerationError
 
 
 def _get_graph_get_impact_radius():
@@ -281,6 +281,7 @@ class ContextHandlersMixin:
             return {'error': f'Task {task_id} not found'}
 
         agent_id = parts[1] if len(parts) > 1 else None
+        critic_id = parts[2] if len(parts) > 2 else None
         if agent_id:
             agent = self.db.get(Agent, agent_id)
             if agent is None:
@@ -290,6 +291,33 @@ class ContextHandlersMixin:
             if not suggestions:
                 return {'error': 'No suitable agent found for spec/plan generation'}
             agent = self.db.get(Agent, suggestions[0].agent_id)
+
+        if critic_id:
+            critic_agent = self.db.get(Agent, critic_id)
+            if critic_agent is None:
+                return {'error': f'Critic agent {critic_id} not found'}
+            critic_type = getattr(
+                getattr(critic_agent, "agent_type", None), "value", None
+            ) or getattr(critic_agent, "agent_type", "")
+            if str(critic_agent.id).strip().casefold() == str(agent.id).strip().casefold():
+                return {'error': 'Plan critic must differ from the planner (four-eyes).'}
+            if str(critic_type).strip().lower() == 'api':
+                return {'error': 'Plan criticism requires a CLI agent'}
+        else:
+            critic_agent = None
+            suggestions = AgentSuggester(self.db).suggest(
+                task, role="reviewer", top_n=10, exclude_agent_id=agent.id
+            )
+            for suggestion in suggestions:
+                candidate = self.db.get(Agent, suggestion.agent_id)
+                candidate_type = getattr(getattr(candidate, "agent_type", None), "value", None) or getattr(
+                    candidate, "agent_type", ""
+                )
+                if candidate is not None and str(candidate_type).lower() != "api":
+                    critic_agent = candidate
+                    break
+            if critic_agent is None:
+                return {'error': 'No independent CLI plan critic is available'}
 
         project = self.db.get(Project, task.project) if task.project else None
         repo_root = os.path.abspath(project.repo_root) if project and project.repo_root else None
@@ -307,7 +335,15 @@ class ContextHandlersMixin:
             result, flows = await spec_plan_generator.generate_spec_plan(
                 task, repo_root, agent, project_context=project_context
             )
-        except (SpecPlanGenerationError, ConfigurationError) as exc:
+            critic_result, critic_tokens = await spec_plan_generator.criticize_spec_plan(
+                task,
+                result,
+                repo_root,
+                agent,
+                critic_agent,
+                project_context=project_context,
+            )
+        except (SpecPlanGenerationError, PlanCriticError, ConfigurationError) as exc:
             return {'error': str(exc)}
 
         record_metric_fn = _get_record_tool_metric()
@@ -319,6 +355,21 @@ class ContextHandlersMixin:
             result_count=len(result.open_questions),
             payload={'spec_clarity': result.spec_clarity, 'task_id': task_id},
         )
+        record_metric_fn(
+            tool='plan_critic',
+            source='spec_plan_generator',
+            ok=True,
+            task_id=task_id,
+            result_count=len(critic_result.findings),
+            payload={
+                'verdict': critic_result.verdict,
+                'critic': critic_agent.id,
+                'planner': agent.id,
+                'tokens_used': critic_tokens,
+                'token_budget': spec_plan_generator.PLAN_CRITIC_TOKEN_BUDGET,
+                'diff_provided': False,
+            },
+        )
 
         service = TaskOrchestrationService(self.db)
 
@@ -327,6 +378,11 @@ class ContextHandlersMixin:
                 task_id=task_id,
                 actor=f"chat:{session_id or 'anonymous'}",
                 acceptance_criteria=result.acceptance_criteria,
+                constraints=result.constraints,
+                evidence=[item.model_dump(mode='json') for item in result.evidence],
+                prior_art=result.prior_art,
+                ruled_out=[item.model_dump(mode='json') for item in result.ruled_out],
+                limits=result.limits.model_dump(mode='json') if result.limits else None,
                 plan=result.plan,
                 files=result.files,
                 tests=result.tests,
@@ -334,15 +390,31 @@ class ContextHandlersMixin:
                 flows=flows,
                 spec_clarity=result.spec_clarity,
                 open_questions=result.open_questions,
+                planner=agent.id,
+                critic=critic_agent.id,
+                critic_verdict=critic_result.verdict,
+                critic_findings=[item.model_dump(mode='json') for item in critic_result.findings],
+                critic_summary=critic_result.summary,
+                critic_tokens=critic_tokens,
             )
         except OrchestrationError as exc:
             return {'error': str(exc)}
 
+        critic_rejected = updated.plan_critic_status == 'reject'
         questions_pending = bool(updated.open_questions) or updated.spec_clarity != 'high'
         return {
-            'action': 'spec_questions_pending' if questions_pending else 'spec_plan_generated',
+            'action': (
+                'spec_plan_critic_rejected'
+                if critic_rejected
+                else ('spec_questions_pending' if questions_pending else 'spec_plan_generated')
+            ),
             'task_id': task_id,
             'acceptance_criteria': updated.acceptance_criteria,
+            'constraints': updated.constraints,
+            'evidence': updated.evidence,
+            'prior_art': updated.prior_art,
+            'ruled_out': updated.ruled_out,
+            'limits': updated.limits,
             'plan': updated.plan,
             'files': updated.files,
             'tests': updated.tests,
@@ -353,6 +425,10 @@ class ContextHandlersMixin:
             'open_questions': updated.open_questions or [],
             'awaiting_approval': bool(updated.awaiting_approval),
             'approval_prompt': updated.approval_prompt,
+            'planner': updated.planner,
+            'plan_critic': updated.plan_critic,
+            'plan_critic_status': updated.plan_critic_status,
+            'plan_critic_findings': updated.plan_critic_findings,
         }
 
     async def _handle_compact_context(self, args: str, session_id: str) -> dict:

@@ -91,7 +91,26 @@ def test_review_prompt_requires_versioned_json_result(tmp_path):
 
     assert ".ct/review-REV-001.json" in prompt
     assert "verdict (only \"pass\" or \"fail\")" in prompt
-    assert "one item per acceptance criterion" in prompt
+    assert "one item per review criterion" in prompt
+
+
+def test_review_prompt_flattens_acceptance_and_constraints(tmp_path):
+    task = Task(
+        id="REV-CONSTRAINTS",
+        project="p",
+        title="Review boundaries",
+        acceptance_criteria=["Endpoint returns 200"],
+        constraints=["Do not add a migration"],
+    )
+    agent = Agent(id="@reviewer", name="Reviewer", role="reviewer", cli="codex")
+    project = Project(id="p", name="Project", repo_root=str(tmp_path))
+
+    command, _, _ = build_review_command(task, agent, project, "base", "head")
+    prompt = shlex.split(command)[-1]
+
+    assert "Review criteria (acceptance outcomes first, then constraints" in prompt
+    assert prompt.index("Endpoint returns 200") < prompt.index("Do not add a migration")
+    assert "exactly 2 ac_results slots" in prompt
 
 
 def test_task_prompt_includes_findings_on_changes_requested(tmp_path):

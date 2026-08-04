@@ -75,6 +75,28 @@ def test_prepare_review_artifact_generates_template(tmp_path):
     assert template["ac_results"][2]["criterion_id"] == "ac-3"
 
 
+def test_prepare_review_artifact_appends_constraints_to_review_contract(tmp_path):
+    from app.workers.cli_executor import _prepare_review_artifact
+    from app.services.command_builder import review_result_path
+    import json
+
+    repo_root = str(tmp_path)
+    _prepare_review_artifact(
+        repo_root,
+        "TEST-CONSTRAINTS",
+        ["Endpoint returns 200"],
+        ["Do not add a migration", "Preserve stream-json"],
+    )
+    template_path = review_result_path(repo_root, "TEST-CONSTRAINTS").replace(
+        ".json", ".template.json"
+    )
+    with open(template_path) as result_file:
+        template = json.load(result_file)
+    assert [item["criterion_id"] for item in template["ac_results"]] == [
+        "ac-1", "ac-2", "ac-3"
+    ]
+
+
 def test_prepare_review_artifact_no_template_without_ac(tmp_path):
     """No template if no acceptance criteria."""
     from app.workers.cli_executor import _prepare_review_artifact

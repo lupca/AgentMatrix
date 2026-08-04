@@ -8,8 +8,11 @@ from app.db.models import Task
 from app.services.llm_service import ConfigurationError
 from app.services.providers import ProviderResponse
 from app.services.spec_plan_generator import (
+    PLAN_CRITIC_TOKEN_BUDGET,
     SPEC_PLAN_RESULT_SCHEMA_VERSION,
+    PlanCriticError,
     SpecPlanGenerationError,
+    criticize_spec_plan,
     generate_spec_plan,
 )
 
@@ -28,6 +31,16 @@ def _agent():
     )
 
 
+def _critic_agent():
+    return SimpleNamespace(
+        id="critic-agent",
+        agent_type="cli",
+        provider="anthropic",
+        cli="claude",
+        model="claude-sonnet",
+    )
+
+
 def _response(content: str) -> ProviderResponse:
     return ProviderResponse(provider="openai", model="gpt-4o", text=content)
 
@@ -36,6 +49,16 @@ def _valid_payload(**overrides) -> dict:
     payload = {
         "schema_version": SPEC_PLAN_RESULT_SCHEMA_VERSION,
         "acceptance_criteria": ["Widget renders", "Widget has tests"],
+        "constraints": ["Do not add a database migration"],
+        "evidence": [{
+            "fact": "Widget module exists",
+            "source_type": "file",
+            "source": "backend/app/widget.py:1",
+            "result": "module docstring declares widget support",
+        }],
+        "prior_art": ["Existing widget rendering helper"],
+        "ruled_out": [{"approach": "Replace renderer", "reason": "Breaks callers"}],
+        "limits": None,
         "plan": "1. Build widget. 2. Test widget.",
         "files": ["backend/app/widget.py", "backend/app/made_up.py"],
         "tests": ["backend/tests/test_widget.py"],
@@ -107,10 +130,23 @@ async def test_generate_spec_plan_raises_after_repeated_schema_failures():
 
 
 @pytest.mark.asyncio
-async def test_generate_spec_plan_rejects_empty_acceptance_criteria():
+async def test_generate_spec_plan_allows_constraints_only():
     with patch(
         "app.services.spec_plan_generator.LLMService.complete",
         new=AsyncMock(return_value=_response(json.dumps(_valid_payload(acceptance_criteria=[])))),
+    ):
+        result, _ = await generate_spec_plan(_task(), "/tmp/repo", _agent())
+    assert result.acceptance_criteria == []
+    assert result.constraints
+
+
+@pytest.mark.asyncio
+async def test_generate_spec_plan_rejects_empty_acceptance_and_constraints():
+    with patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(_valid_payload(
+            acceptance_criteria=[], constraints=[]
+        )))),
     ), pytest.raises(SpecPlanGenerationError):
         await generate_spec_plan(_task(), "/tmp/repo", _agent())
 
@@ -156,8 +192,11 @@ async def test_generate_spec_plan_rejects_api_agent_before_llm_call():
     mock_complete.assert_not_awaited()
 
 
-@pytest.mark.parametrize("missing", ["spec_clarity", "open_questions"])
-def test_spec_plan_result_v11_requires_clarity_fields(missing):
+@pytest.mark.parametrize("missing", [
+    "constraints", "evidence", "prior_art", "ruled_out", "limits",
+    "spec_clarity", "open_questions",
+])
+def test_spec_plan_result_v2_requires_contract_fields(missing):
     payload = _valid_payload()
     payload.pop(missing)
     with pytest.raises(ValidationError):
@@ -166,11 +205,11 @@ def test_spec_plan_result_v11_requires_clarity_fields(missing):
         SpecPlanResult.model_validate(payload)
 
 
-def test_spec_plan_result_v11_accepts_complete_strict_payload():
+def test_spec_plan_result_v2_accepts_complete_strict_payload():
     from app.schemas.task import SpecPlanResult
 
     result = SpecPlanResult.model_validate(_valid_payload())
-    assert result.schema_version == "1.1"
+    assert result.schema_version == "2.0"
     assert result.spec_clarity == "high"
     assert result.open_questions == []
 
@@ -209,6 +248,90 @@ def test_prompt_includes_description_context_and_quality_bars():
     assert "ĐỌC (read-only, không sửa gì)" in prompt
     assert '"spec_clarity"' in prompt
     assert '"open_questions"' in prompt
+    assert '"constraints"' in prompt
+    assert '"evidence"' in prompt
+    assert "exact command plus its observed output" in prompt
+
+
+def test_high_risk_plan_requires_enforced_limits():
+    from app.schemas.task import SpecPlanResult
+
+    with pytest.raises(ValidationError, match="limits are required"):
+        SpecPlanResult.model_validate(_valid_payload(risk="high", limits=None))
+    result = SpecPlanResult.model_validate(_valid_payload(
+        risk="high",
+        limits={"max_execution_rounds": 2, "max_tokens": 100_000, "max_cost_usd": 5.0},
+    ))
+    assert result.limits.max_execution_rounds == 2
+
+
+@pytest.mark.asyncio
+async def test_plan_critic_is_independent_focused_and_budgeted():
+    critic_payload = {
+        "schema_version": "1.0",
+        "verdict": "accept",
+        "findings": [],
+        "summary": "Citations reproduced.",
+    }
+    with patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(critic_payload))),
+    ) as complete:
+        result, tokens = await criticize_spec_plan(
+            _task(),
+            __import__("app.schemas.task", fromlist=["SpecPlanResult"]).SpecPlanResult.model_validate(
+                _valid_payload()
+            ),
+            "/tmp/repo",
+            _agent(),
+            _critic_agent(),
+        )
+    assert result.verdict == "accept"
+    assert tokens < PLAN_CRITIC_TOKEN_BUDGET
+    prompt = complete.call_args.args[1][0]["content"]
+    assert "MUST NOT run git diff" in prompt
+    assert "spec_item/spec_task_link" in prompt
+    assert complete.call_args.kwargs["max_tokens"] <= 4096
+
+
+@pytest.mark.asyncio
+async def test_plan_critic_cannot_reject_without_evidence():
+    invalid = {
+        "schema_version": "1.0",
+        "verdict": "reject",
+        "findings": [],
+        "summary": "Looks wrong.",
+    }
+    with patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(json.dumps(invalid))),
+    ), pytest.raises(PlanCriticError):
+        await criticize_spec_plan(
+            _task(),
+            __import__("app.schemas.task", fromlist=["SpecPlanResult"]).SpecPlanResult.model_validate(
+                _valid_payload()
+            ),
+            "/tmp/repo",
+            _agent(),
+            _critic_agent(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_plan_critic_enforces_four_eyes_before_calling_model():
+    with patch(
+        "app.services.spec_plan_generator.LLMService.complete", new=AsyncMock()
+    ) as complete, pytest.raises(ConfigurationError, match="four-eyes"):
+        await criticize_spec_plan(
+            _task(),
+            __import__("app.schemas.task", fromlist=["SpecPlanResult"]).SpecPlanResult.model_validate(
+                _valid_payload()
+            ),
+            "/tmp/repo",
+            _agent(),
+            _agent(),
+        )
+    complete.assert_not_awaited()
 
 
 def test_prompt_without_description_or_context_still_valid():

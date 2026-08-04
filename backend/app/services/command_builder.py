@@ -13,20 +13,11 @@ from sqlalchemy.orm import Session
 from app.db.models import Agent, Project, Task
 from app.core.config import settings
 from app.services.cli_dispatcher import build_mcp_config
+from app.services.review_criteria import merged_review_criteria
 
 SUPPORTED_CLIS = {"agy", "codex", "claude", "qwen"}
 _EFFORT_SUFFIXES = ("-low", "-medium", "-high", "-extra-high", "-max", "-ultra")
 _AGY_PRINT_TIMEOUT_FALLBACK_SECONDS = 1_800
-
-
-def _normalize_acceptance_criteria(ac: list | str | None) -> list[str]:
-    """Convert acceptance_criteria to a list, handling string format."""
-    if ac is None:
-        return []
-    if isinstance(ac, list):
-        return ac
-    # String format: "AC1: ...\nAC2: ..." - split by newline
-    return [line.strip() for line in ac.split("\n") if line.strip()]
 
 
 def _model_has_effort_suffix(model: str | None) -> bool:
@@ -236,10 +227,10 @@ def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -
         "that is not installed or exits with an error is NOT a review "
         "failure: note it in evidence and continue without it.",
     ]
-    ac_list = _normalize_acceptance_criteria(task.acceptance_criteria)
+    ac_list = merged_review_criteria(task.acceptance_criteria, task.constraints)
     if ac_list:
         sections.append(
-            "Acceptance criteria:\n"
+            "Review criteria (acceptance outcomes first, then constraints; check every item):\n"
             + "\n".join(f"- {criterion}" for criterion in ac_list)
         )
     template_path = result_path.replace(".json", ".template.json")
@@ -247,7 +238,7 @@ def _review_prompt(task: Task, base_ref: str, head_ref: str, result_path: str) -
     sections.append(
         "Code review result contract:\n"
         f"A template file has been generated at {template_path} with exactly "
-        f"{ac_count} ac_results slots matching the {ac_count} acceptance criteria. "
+        f"{ac_count} ac_results slots matching the {ac_count} review criteria. "
         f"Read the template, fill in the values, and write the final result to {result_path}. "
         "Replace FILL_* placeholders with actual values. For each ac_results item: "
         "set status to \"pass\" or \"fail\", fill evidence array with strings explaining "
@@ -330,6 +321,11 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
             "Acceptance criteria:\n"
             + "\n".join(f"- {criterion}" for criterion in task.acceptance_criteria)
         )
+    if task.constraints:
+        sections.append(
+            "Constraints (must not be violated):\n"
+            + "\n".join(f"- {constraint}" for constraint in task.constraints)
+        )
     if task.files:
         sections.append("Relevant files:\n" + "\n".join(f"- {path}" for path in task.files))
     if task.tests:
@@ -353,7 +349,7 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
             "ac_index/ac_text metadata is optional; verdict is the legacy name "
             "for status. Each finding must contain id, "
             "severity, category, file, line, and description. Ensure ac_results "
-            "has one item per acceptance criterion. Reviewer execution is "
+            "has one item per review criterion (acceptance + constraints). Reviewer execution is "
             "read-only: do not create commits or alter refs."
         )
     tags = [str(tag).lower() for tag in (task.tags or [])]
@@ -365,7 +361,8 @@ def _task_prompt(task: Task, result_path: str | None = None) -> str:
         )
     else:
         sections.append(
-            "Complete every acceptance criterion, run the relevant tests, and commit the changes. "
+            "Complete every acceptance criterion without violating any constraint, "
+            "run the relevant tests, and commit the changes. "
             "When done, print the resulting commit hash on its own final line as 'RESULT_REF: <hash>'. "
             "A task with no commit has no result-ref and cannot be reviewed."
         )

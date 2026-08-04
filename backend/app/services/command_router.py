@@ -211,7 +211,12 @@ class CommandRouter(
             if not task_id:
                 return {'error': 'task_id is required'}
             agent_id = str(args.get('agent_id', '') or '').strip()
-            command_args = ' '.join(part for part in (task_id, agent_id) if part)
+            critic_id = str(args.get('critic_id', '') or '').strip()
+            if critic_id and not agent_id:
+                return {'error': 'agent_id is required when critic_id is provided'}
+            command_args = ' '.join(
+                part for part in (task_id, agent_id, critic_id) if part
+            )
         elif canonical_name == 'approve_gate':
             gate_id = args.get('gate_record_id', args.get('task_id'))
             if gate_id is None:
