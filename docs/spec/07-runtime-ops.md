@@ -17,8 +17,8 @@
 
 ## Hạ tầng
 
-- Postgres: container **`control_tower_db`**, port 5433, user `ct`.
-  `docker exec -i control_tower_db psql -U ct -d control_tower`.
+- Postgres: container **`agmx_db`**, port 5433, user `ct`.
+  `docker exec -i agmx_db psql -U ct -d control_tower`.
 - Role đọc `ct_readonly_user` cho query_db — bảng mới cần GRANT (đã đặt
   default privileges; script `create-readonly-role.sh` nên được cập nhật).
 - Redis :6380 — broker dramatiq. Queue `default`; XQ (dead-letter) ĐÃ có
