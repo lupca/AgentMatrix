@@ -151,7 +151,7 @@ def test_build_review_command_embeds_explicit_from_to_range(tmp_path):
 
 
 @pytest.mark.parametrize("cli", ["claude", "qwen", "agy"])
-def test_dispatch_json_output_flags_preserve_prompt_contract(cli, tmp_path):
+def test_dispatch_stream_json_output_flags_preserve_prompt_contract(cli, tmp_path):
     task = Task(id="CMD-JSON", project="p", title="Task")
     agent = Agent(id="@agent", name="Agent", role="executor", cli=cli, model="model")
     project = Project(id="p", name="Project", repo_root=str(tmp_path))
@@ -160,7 +160,7 @@ def test_dispatch_json_output_flags_preserve_prompt_contract(cli, tmp_path):
     argv = shlex.split(command)
 
     format_index = argv.index("--output-format")
-    expected_format = "stream-json" if cli == "claude" else "json"
+    expected_format = "stream-json"
     assert argv[format_index : format_index + 2] == ["--output-format", expected_format]
     if cli == "agy":
         assert argv[format_index + 2] == "--print"
@@ -185,7 +185,7 @@ def test_codex_receives_json_output_flag(tmp_path):
 
 
 @pytest.mark.parametrize("cli", ["claude", "qwen", "agy", "codex"])
-def test_review_command_json_output_flags_match_cli_contract(cli, tmp_path):
+def test_review_command_output_flags_match_cli_contract(cli, tmp_path):
     task = Task(id="REV-JSON", project="p", title="Review task")
     agent = Agent(id="@reviewer", name="Reviewer", role="reviewer", cli=cli)
     project = Project(id="p", name="Project", repo_root=str(tmp_path))
@@ -198,7 +198,7 @@ def test_review_command_json_output_flags_match_cli_contract(cli, tmp_path):
         return
 
     format_index = argv.index("--output-format")
-    expected_format = "stream-json" if cli == "claude" else "json"
+    expected_format = "stream-json"
     assert argv[format_index : format_index + 2] == ["--output-format", expected_format]
     if cli == "claude":
         assert "--verbose" in argv
@@ -246,4 +246,3 @@ def test_task_prompt_includes_graph_tool_guidance(tmp_path):
         line for line in prompt.split("\n\n") if "get_impact_radius" in line
     ][0]
     assert len(graph_section) < 400
-

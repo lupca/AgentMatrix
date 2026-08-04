@@ -81,6 +81,40 @@ AGY_OUTPUT = json.dumps(
     }
 )
 
+AGY_STREAM_OUTPUT = "\n".join(
+    [
+        json.dumps({"type": "response", "text": "working"}),
+        json.dumps(
+            {
+                "type": "complete",
+                "usage": {
+                    "input_tokens": 10249,
+                    "output_tokens": 79,
+                    "cache_read_tokens": 8142,
+                },
+                "result": "done\nRESULT_REF: agy-stream-ref",
+            }
+        ),
+    ]
+)
+
+QWEN_STREAM_OUTPUT = "\n".join(
+    [
+        json.dumps({"type": "response", "text": "working"}),
+        json.dumps(
+            {
+                "type": "complete",
+                "usage": {
+                    "input_tokens": 49714,
+                    "output_tokens": 165,
+                    "cache_read_input_tokens": 0,
+                },
+                "result": "done\nRESULT_REF: qwen-stream-ref",
+            }
+        ),
+    ]
+)
+
 CODEX_OUTPUT = "\n".join(
     [
         json.dumps({"type": "thread.started", "thread_id": "thr-123"}),
@@ -153,6 +187,30 @@ def test_parse_cli_token_usage_accepts_jsonl_result_as_last_object():
     )
 
     assert parse_cli_token_usage("claude", output)["cost_usd"] == 0.139
+
+
+@pytest.mark.parametrize(
+    ("cli", "output", "expected_ref", "expected_usage"),
+    [
+        (
+            "agy",
+            AGY_STREAM_OUTPUT,
+            "agy-stream-ref",
+            {"input_tokens": 10249, "output_tokens": 79, "cached_tokens": 8142},
+        ),
+        (
+            "qwen",
+            QWEN_STREAM_OUTPUT,
+            "qwen-stream-ref",
+            {"input_tokens": 49714, "output_tokens": 165, "cached_tokens": 0},
+        ),
+    ],
+)
+def test_stream_json_usage_and_result_ref_paths_remain_readable(
+    cli, output, expected_ref, expected_usage
+):
+    assert parse_cli_token_usage(cli, output) == expected_usage
+    assert _extract_explicit_result_ref(output.splitlines()[-1]) == expected_ref
 
 
 def test_parse_claude_cost_has_same_session_scope_as_total_usage():
