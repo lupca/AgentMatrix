@@ -1,4 +1,4 @@
-# Control Tower V2
+# AGENTMATRIX (AGMX) V2
 
 Hệ thống điều phối coding agent với gate-based workflow, four-eyes review, và autonomy controls.
 

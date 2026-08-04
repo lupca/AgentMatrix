@@ -28,7 +28,7 @@ The coordinator now runs on exactly two paths:
 - **API mode** — OpenAI-compatible Chat Completions (`OpenAIAdapter`), with native
   function calling and the tool-execution loop in `CoordinatorService` (max 20 iterations).
 - **CLI mode** — external CLIs (`claude`, `agy`, `codex`) spawned per turn with the
-  session history formatted as a single prompt. No Control Tower tools are passed.
+  session history formatted as a single prompt. No AGENTMATRIX tools are passed.
 
 Goals of this ADR:
 
@@ -227,7 +227,7 @@ There are **two distinct CLI paths** and only one of them is in scope here:
 
 1. **Executor dispatch CLI** (`agent_runner` → CLI process in the *target repo*):
    writes code, uses the CLI's own built-in tools (Bash/Read/Write). It must NOT get
-   Control Tower CRUD tools — its contract stays "do the work, report a result-ref".
+   AGENTMATRIX CRUD tools — its contract stays "do the work, report a result-ref".
    Unchanged by this ADR.
 2. **Coordinator chat CLI** (chat UI turn routed to a CLI instead of the OpenAI API):
    needs the same CT tools as API mode (create task, query DB, dispatch, ...). This is

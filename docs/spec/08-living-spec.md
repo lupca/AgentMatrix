@@ -94,14 +94,14 @@ Attribution đã sửa ở CTV2-1338.
 > | claude | ✅ | ✅ creation + read | ✅ **có sẵn** |
 > | qwen | ✅ | ✅ read | ❌ (phải tự tính từ bảng giá) |
 > | agy | ✅ (+ thinking) | ✅ read | ❌ |
-> | codex | ❌ chỉ có tổng trong text | ❌ | ❌ |
+> | codex | ✅ (+ reasoning_output) | ✅ cached_input | ❌ (chưa quy đổi) |
 >
 > Đo lúc 2026-08-04: `claude -p "say ok" --output-format json` → `in:2 out:4
 > cache_read:15273 cost_usd:0.1366`. `agy --output-format json` → `in:18397
-> out:35 thinking:28`. Việc nối dây: **CTV2-1350**.
+> out:35 thinking:28`. `codex exec --json` → `in:15134 cached_input:9984 out:5 reasoning_output:0`. Nối dây token: **CTV2-1350** (claude/qwen/agy) & **CTV2-1360** (codex).
 >
 > Bài học lặp lại lần thứ tư trong cùng phiên: **đừng suy từ mô hình kinh doanh
-> (subscription ⇒ không có token) — hãy gõ lệnh thử.**
+> (subscription ⇒ không có token) — hãy gõ lệnh thử `--help`.**
 
 Cho tới khi CTV2-1350 xong, đại lượng tiêu hao đo được vẫn là **số vòng ×
 thời lượng run**, và **không được hứa "giảm cost"** bằng đô-la.

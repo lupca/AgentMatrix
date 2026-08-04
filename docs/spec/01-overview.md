@@ -1,6 +1,6 @@
 # 01 — Tổng quan hệ thống
 
-> Control Tower V2 (repo `agenticmatix`): hệ điều phối coding agent qua MCP native,
+> AGENTMATRIX V2 (AGMX, repo `agenticmatix`): hệ điều phối coding agent qua MCP native,
 > với gate-based workflow, four-eyes review, và autonomy brakes.
 > Cập nhật: 2026-08-01, sau GĐ4-P1 (đã xóa hẳn lớp FastAPI/REST — MCP native là surface duy nhất).
 
@@ -56,7 +56,7 @@ Coordinator CLI (claude/agy/codex, chạy từ WORKDIR NGOÀI repo này)
    branch `ct-run/<run_id>`; coordinator KHÔNG BAO GIỜ merge các branch này.
 4. **MCP native là surface duy nhất** — không còn REST/FastAPI.
 5. **Coordinator workdir nằm ngoài repo** (init bằng `scripts/init-coordinator-workdir.sh`);
-   coordinator không đọc source CT, không đụng DB trực tiếp ngoài `query_db`.
+   coordinator không đọc source AGMX, không đụng DB trực tiếp ngoài `query_db`.
 6. **Root `.env` là env chuẩn** — `start-backend.sh` source nó với `set -a`.
 7. **Không nới lỏng schema strict/extra** — sai lệch giữa prompt và schema thì sửa
    prompt hoặc sửa schema CÓ CHỦ ĐÍCH kèm test, không nới validation.
