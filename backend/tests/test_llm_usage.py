@@ -131,6 +131,63 @@ async def test_cli_provider_extracts_final_agent_message_from_codex_jsonl():
     assert response.text == '{"ok":true}'
 
 
+@pytest.mark.asyncio
+async def test_cli_provider_extracts_agy_response_nested_under_result():
+    """agy puts the answer at result.response, not at a top-level key.
+
+    The extractor only matched a *string* "result", so agy fell through to
+    "return stdout" and the planner received raw JSONL. It then parsed the
+    first envelope line instead of the answer: every agy plan critic run
+    failed (12/12 over two days) while claude critics on the same prompts
+    passed, which made it look like an agy outage rather than a parsing bug.
+    """
+    class FakeDispatcher:
+        async def spawn(self, cli, model, prompt, **kwargs):
+            del cli, model, prompt, kwargs
+            yield json.dumps({"event": "init", "conversation_id": "abc"}) + "\n"
+            yield json.dumps({"event": "step_update", "step_update": {"state": "DONE"}}) + "\n"
+            yield json.dumps({
+                "event": "result",
+                "result": {"status": "SUCCESS", "response": '{"verdict":"accept"}'},
+            }) + "\n"
+
+    agent = SimpleNamespace(
+        id="agy-agent", agent_type="cli", provider="google",
+        cli="agy", model="gemini-3.1-pro", effort="high",
+    )
+    response = await LLMService(
+        cli_provider=CLIProvider(dispatcher=FakeDispatcher())
+    ).complete(agent, [{"role": "user", "content": "criticize"}])
+
+    assert response.text == '{"verdict":"accept"}'
+
+
+@pytest.mark.asyncio
+async def test_cli_provider_keeps_agy_failure_loud_instead_of_empty_text():
+    """An errored agy run reports response:"" — that must not become the answer.
+
+    Returning "" would hand the caller a silent empty result; falling through
+    to the raw stdout keeps the failure visible to schema validation.
+    """
+    class FakeDispatcher:
+        async def spawn(self, cli, model, prompt, **kwargs):
+            del cli, model, prompt, kwargs
+            yield json.dumps({
+                "event": "result",
+                "result": {"status": "ERROR", "response": "", "error": "invalid model selection"},
+            }) + "\n"
+
+    agent = SimpleNamespace(
+        id="agy-agent", agent_type="cli", provider="google",
+        cli="agy", model="gemini-3.1-pro", effort="high",
+    )
+    response = await LLMService(
+        cli_provider=CLIProvider(dispatcher=FakeDispatcher())
+    ).complete(agent, [{"role": "user", "content": "criticize"}])
+
+    assert "invalid model selection" in response.text
+
+
 def test_usage_extraction_normalizes_anthropic_cache_tokens():
     usage = extract_usage(
         {

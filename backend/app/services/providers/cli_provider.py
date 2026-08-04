@@ -40,6 +40,25 @@ def _extract_cli_text(stdout: str) -> str:
     for value in objects:
         if isinstance(value.get("result"), str):
             candidates.append(value["result"])
+        elif isinstance(value.get("result"), dict):
+            # agy nests the answer one level down:
+            #   {"event":"result","result":{...,"response":"<model text>"}}
+            # Matching only a *string* "result" skipped agy entirely, so this
+            # function fell through to `return stdout` and handed the caller the
+            # raw JSONL. The planner then parsed the first envelope line instead
+            # of the answer — observed as "Extra data: line 2 column 1" and, once
+            # the parser tolerated trailing lines, as a SpecPlanResult validation
+            # error whose input was {"event":"init",...}. Every agy plan critic
+            # run failed this way (12/12) while claude critics passed.
+            #
+            # Empty strings are deliberately not accepted: an agy run that errors
+            # reports response:"" plus an "error" field, and falling through to
+            # the raw stdout keeps that failure loud instead of turning it into a
+            # silent empty answer.
+            nested = value["result"]
+            for key in ("response", "text"):
+                if isinstance(nested.get(key), str) and nested[key].strip():
+                    candidates.append(nested[key])
         if isinstance(value.get("response"), str):
             candidates.append(value["response"])
         if isinstance(value.get("text"), str):
