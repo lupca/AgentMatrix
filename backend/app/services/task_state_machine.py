@@ -1151,7 +1151,12 @@ class TaskStateMachine:
                     self.record_verdict_on_round(task, verdict=verdict, now=now)
                     self._deferred_landing_event = (
                         "landing_failed",
-                        {"result_ref": task.result_ref, "error": landing.error},
+                        {
+                            "result_ref": task.result_ref,
+                            "error": landing.error,
+                            "why": f"land hỏng: {landing.error}",
+                            "next": "áp diff tay hoặc rebase rồi gọi land_task lại",
+                        },
                     )
                     self._update_verdict_agent_success_rates(task, verdict)
                     return None, verdict
@@ -1788,6 +1793,7 @@ class TaskStateMachine:
                 event_type=landing_event[0],
                 payload=landing_event[1],
                 db=self.db,
+                kind="decision" if landing_event[0] == "landing_failed" else None,
             )
         emit_task_event(
             task_id=task.id,
@@ -2717,6 +2723,18 @@ class TaskStateMachine:
             )
             task.error = f"landing_failed: {landing.error}"
             self.sync_awaiting_approval(task)
+            emit_task_event(
+                task_id=task.id,
+                event_type="landing_failed",
+                payload={
+                    "result_ref": task.result_ref,
+                    "error": landing.error,
+                    "why": f"land hỏng: {landing.error}",
+                    "next": "áp diff tay hoặc rebase rồi gọi land_task lại",
+                },
+                db=self.db,
+                kind="decision",
+            )
             self.db.commit()
             return {"action": "landing_failed", "task_id": task.id, "error": landing.error}
 

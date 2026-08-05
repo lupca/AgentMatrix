@@ -414,6 +414,16 @@ def _dispatch_execute(db: Session, service: TaskOrchestrationService, task: Task
         return "gate_pending"
     run = result.agent_run
     if run is None:
+        _emit_decision_event(
+            db,
+            task_id=task.id,
+            event_type="dispatch_no_run",
+            payload={
+                "agent_id": agent_id,
+                "why": "dispatch_task áp dụng nhưng không tạo được AgentRun",
+                "next": "gọi dispatch_task lại, hoặc kiểm tra agent/worker",
+            },
+        )
         return "dispatch_no_run"
     _enqueue_run(service, run, result.context or {}, task_id=task.id)
     return "dispatched"

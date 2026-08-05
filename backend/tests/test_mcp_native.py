@@ -15,7 +15,15 @@ from sqlalchemy.pool import StaticPool
 import app.mcp_native as mcp_native
 from app.core.runtime_version import RuntimeVersionMonitor
 from app.db.base import Base
-from app.db.models import Agent, InboxItem, Project, Task
+from app.db.models import (
+    Agent,
+    InboxItem,
+    Project,
+    Session as SessionModel,
+    Task,
+    TaskEvent,
+    TaskOwner,
+)
 from app.mcp_native import (
     _task_scope_arguments,
     _task_scope_ok,
@@ -859,3 +867,242 @@ async def test_manage_inbox_crud_mapping_and_promote_end_to_end(monkeypatch):
         second_id = json.loads(second.content[0].text)["data"]["item"]["id"]
         deleted = await client.call_tool("manage_inbox", {"action": "delete", "id": second_id})
         assert json.loads(deleted.content[0].text)["data"]["action"] == "deleted"
+
+
+# --- CTV2-1399: đắc chủ + đẩy việc-hỏng/việc-xong -----------------------
+
+
+@pytest.mark.asyncio
+async def test_two_http_connections_get_distinct_session_ids(monkeypatch):
+    """Two terminals sharing one token must still be told apart (VIỆC 1).
+
+    ``_ensure_session`` must key off the transport's ``Mcp-Session-Id``
+    header rather than the token's claims -- otherwise every terminal in the
+    same repo dir (same ``.mcp.json``, same token) collapses onto one row.
+    """
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    app = mcp_native.build_http_app()
+
+    def httpx_client_factory(**kwargs):
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://testserver",
+            **kwargs,
+        )
+
+    token = issue_token("test-secret", role="coordinator")
+    session_ids: list[str] = []
+    async with app.router.lifespan_context(app):
+        for _ in range(2):
+            transport = StreamableHttpTransport(
+                "http://testserver/mcp",
+                auth=token,
+                httpx_client_factory=httpx_client_factory,
+            )
+            async with Client(transport) as client:
+                await client.call_tool("get_status", {})
+                session_ids.append(transport.get_session_id())
+
+    assert session_ids[0] != session_ids[1]
+
+
+def test_registering_tool_assigns_owner_and_last_writer_wins(db_session):
+    """VIỆC 2: A creates, B approves the gate -> B owns it; A acts again ->
+    A takes it back."""
+    db_session.add(Project(id="own-proj", name="P", repo_root="/tmp"))
+    db_session.add_all([
+        Agent(id="@own-executor", name="Executor", role="executor", cli="codex"),
+        Agent(id="@own-reviewer", name="Reviewer", role="reviewer", cli="codex"),
+    ])
+    db_session.add(Task(
+        id="OWN-1", title="t", project="own-proj", status="in-review",
+        mode="bypass", executor="@own-executor", reviewer="@own-reviewer",
+        result_ref="base..head", current_gate="verdict",
+    ))
+    db_session.commit()
+
+    result = {"task": {"id": "OWN-1", "status": "in-review"}}
+    mcp_native._register_task_ownership(db_session, "create_task", {}, result, "session-A")
+    owner = db_session.get(TaskOwner, "OWN-1")
+    assert owner.session_id == "session-A"
+
+    mcp_native._register_task_ownership(
+        db_session, "approve_gate", {"gate_id": "OWN-1"}, result, "session-B"
+    )
+    owner = db_session.get(TaskOwner, "OWN-1")
+    assert owner.session_id == "session-B"
+
+    mcp_native._register_task_ownership(db_session, "update_task", {"task_id": "OWN-1"}, result, "session-A")
+    owner = db_session.get(TaskOwner, "OWN-1")
+    assert owner.session_id == "session-A"
+
+
+def test_read_only_tools_never_register_ownership(db_session):
+    db_session.add(Project(id="ro-proj", name="P", repo_root="/tmp"))
+    db_session.add(Task(id="RO-1", title="t", project="ro-proj", status="todo"))
+    db_session.commit()
+
+    result = {"task": {"id": "RO-1", "status": "todo"}}
+    for tool_name in ("get_status", "query_db", "get_run_output", "get_task_events", "wait_for_task", "spec_get"):
+        mcp_native._register_task_ownership(db_session, tool_name, {"task_id": "RO-1"}, result, "session-X")
+        assert db_session.get(TaskOwner, "RO-1") is None
+
+
+def test_stale_owner_task_reappears_for_everyone(db_session):
+    """VIỆC 2: an owner whose session has gone quiet no longer hides the
+    task -- a dead connection must never make work vanish."""
+    db_session.add(Project(id="stale-proj", name="P", repo_root="/tmp"))
+    db_session.add(Agent(id="@stale-exec", name="E", role="executor", cli="codex"))
+    db_session.add(Task(
+        id="STALE-1", title="t", project="stale-proj", status="todo",
+        mode="supervised", current_gate="dispatch", legacy_no_ac=True,
+    ))
+    db_session.commit()
+    from datetime import datetime, timedelta, timezone
+
+    stale_owner = SessionModel(
+        id="owner-session", thread_id="owner-session", title="MCP coordinator",
+        context_level="global", messages=[], status="active",
+        last_activity_at=datetime.now(timezone.utc) - timedelta(seconds=mcp_native.OWNER_STALE_SECONDS + 60),
+    )
+    other_session = SessionModel(
+        id="other-session", thread_id="other-session", title="MCP coordinator",
+        context_level="global", messages=[], status="active",
+    )
+    db_session.add_all([stale_owner, other_session])
+    db_session.add(TaskOwner(task_id="STALE-1", session_id="owner-session"))
+    db_session.commit()
+
+    # A gate that would otherwise be filtered out by ownership...
+    from app.services.task_orchestration import TaskOrchestrationService
+    TaskOrchestrationService(db_session).request_dispatch(
+        task_id="STALE-1", agent_id="@stale-exec", actor="system:test",
+        idempotency_key="stale-dispatch-1",
+    )
+
+    visible = mcp_native._pending_approvals(db_session, session_id="other-session")
+    assert any(entry.get("id") == "STALE-1" for entry in visible)
+
+
+def test_active_other_owner_hides_gate_from_third_session(db_session):
+    db_session.add(Project(id="active-proj", name="P", repo_root="/tmp"))
+    db_session.add(Agent(id="@active-exec", name="E", role="executor", cli="codex"))
+    db_session.add(Task(
+        id="ACTIVE-1", title="t", project="active-proj", status="todo",
+        mode="supervised", current_gate="dispatch", legacy_no_ac=True,
+    ))
+    db_session.add(SessionModel(
+        id="active-owner", thread_id="active-owner", title="MCP", context_level="global",
+        messages=[], status="active",
+    ))
+    db_session.commit()
+    db_session.add(TaskOwner(task_id="ACTIVE-1", session_id="active-owner"))
+    db_session.commit()
+
+    from app.services.task_orchestration import TaskOrchestrationService
+    TaskOrchestrationService(db_session).request_dispatch(
+        task_id="ACTIVE-1", agent_id="@active-exec", actor="system:test",
+        idempotency_key="active-dispatch-1",
+    )
+
+    hidden_from_third = mcp_native._pending_approvals(db_session, session_id="third-session")
+    assert not any(entry.get("id") == "ACTIVE-1" for entry in hidden_from_third)
+
+    visible_to_owner = mcp_native._pending_approvals(db_session, session_id="active-owner")
+    assert any(entry.get("id") == "ACTIVE-1" for entry in visible_to_owner)
+
+
+def test_project_scope_filters_pending_approvals(db_session):
+    """VIỆC 4: a coordinator scoped to project A never sees project B."""
+    db_session.add_all([
+        Project(id="proj-a", name="A", repo_root="/tmp"),
+        Project(id="proj-b", name="B", repo_root="/tmp"),
+        Agent(id="@scope-exec", name="E", role="executor", cli="codex"),
+    ])
+    db_session.add_all([
+        Task(id="A-1", title="t", project="proj-a", status="todo", mode="supervised", current_gate="dispatch", legacy_no_ac=True),
+        Task(id="B-1", title="t", project="proj-b", status="todo", mode="supervised", current_gate="dispatch", legacy_no_ac=True),
+    ])
+    db_session.commit()
+
+    from app.services.task_orchestration import TaskOrchestrationService
+    svc = TaskOrchestrationService(db_session)
+    svc.request_dispatch(task_id="A-1", agent_id="@scope-exec", actor="system:test", idempotency_key="scope-a")
+    svc.request_dispatch(task_id="B-1", agent_id="@scope-exec", actor="system:test", idempotency_key="scope-b")
+
+    scoped = mcp_native._pending_approvals(db_session, project_scope="proj-a")
+    ids = {entry.get("id") for entry in scoped}
+    assert "A-1" in ids
+    assert "B-1" not in ids
+
+
+def test_failed_events_persist_until_task_leaves_failed_state(db_session):
+    """VIỆC 3 group B: run_failed/landing_failed carry why+next and stay
+    until acted on."""
+    db_session.add(Project(id="fail-proj", name="P", repo_root="/tmp"))
+    db_session.add(Task(id="FAIL-1", title="t", project="fail-proj", status="failed"))
+    db_session.commit()
+    from app.services.task_event_service import emit_task_event
+    emit_task_event(
+        task_id="FAIL-1", event_type="run_failed",
+        payload={"error": "boom", "next": "sửa rồi dispatch lại"}, db=db_session,
+        kind="decision",
+    )
+
+    broken, done, hidden = mcp_native._task_broken_and_done(db_session, "some-session", None)
+    assert len(broken) == 1
+    assert broken[0]["id"] == "FAIL-1"
+    assert broken[0]["kind"] == "failed:run_failed"
+    assert broken[0]["why"] == "boom"
+    assert broken[0]["next"] == "sửa rồi dispatch lại"
+    assert done == []
+    assert hidden == 0
+
+
+def test_done_events_are_read_once_then_vanish(db_session):
+    """VIỆC 3 group C: read once, then gone -- unlike group A/B."""
+    db_session.add(Project(id="done-proj", name="P", repo_root="/tmp"))
+    db_session.add(Task(id="DONE-1", title="t", project="done-proj", status="todo"))
+    db_session.commit()
+    from app.services.task_event_service import emit_task_event
+    emit_task_event(task_id="DONE-1", event_type="landed", payload={}, db=db_session)
+
+    _, done_first, _ = mcp_native._task_broken_and_done(db_session, "reader-session", None)
+    assert any(e["id"] == "DONE-1" for e in done_first)
+
+    _, done_second, _ = mcp_native._task_broken_and_done(db_session, "reader-session", None)
+    assert done_second == []
+
+
+def test_no_new_events_adds_no_noise(db_session):
+    """VIỆC 3: nothing new -> nothing added."""
+    db_session.add(Project(id="quiet-proj", name="P", repo_root="/tmp"))
+    db_session.commit()
+    broken, done, hidden = mcp_native._task_broken_and_done(db_session, "quiet-session", None)
+    assert broken == []
+    assert done == []
+    assert hidden == 0
+
+
+def test_truncated_pending_approvals_reports_hidden_count(db_session):
+    """VIỆC 4: cutting the list must say how much is hidden, not go quiet."""
+    db_session.add(Project(id="many-proj", name="P", repo_root="/tmp"))
+    db_session.add(Agent(id="@many-exec", name="E", role="executor", cli="codex"))
+    db_session.add_all([
+        Task(id=f"MANY-{i}", title="t", project="many-proj", status="todo", mode="supervised", current_gate="dispatch", legacy_no_ac=True)
+        for i in range(7)
+    ])
+    db_session.commit()
+    from app.services.task_orchestration import TaskOrchestrationService
+    svc = TaskOrchestrationService(db_session)
+    for i in range(7):
+        svc.request_dispatch(
+            task_id=f"MANY-{i}", agent_id="@many-exec", actor="system:test",
+            idempotency_key=f"many-{i}",
+        )
+
+    pending = mcp_native._pending_approvals(db_session)
+    hidden_entries = [e for e in pending if e.get("kind") == "meta:hidden"]
+    assert hidden_entries and hidden_entries[0]["hidden_count"] >= 2
+    note = mcp_native._pending_approvals_note(pending)
+    assert "bị ẩn" in note

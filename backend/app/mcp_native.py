@@ -19,18 +19,27 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 from fastmcp import FastMCP
 from fastmcp.server.dependencies import get_http_headers
 from fastmcp.tools.function_tool import FunctionTool
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.core.runtime_version import RuntimeVersionMonitor
 from app.db.base import SessionLocal
-from app.db.models import AdminGateRecord, GateRecord, Session as SessionModel, Task
+from app.db.models import (
+    AdminGateRecord,
+    GateRecord,
+    Session as SessionModel,
+    Task,
+    TaskEvent,
+    TaskOwner,
+)
 from app.graph.context import invalidate_context_snapshot
 from app.services.command_router import CommandRouter
 from app.services.task_state_machine import (
@@ -42,6 +51,7 @@ from app.services.tool_argument_validator import (
     describe_problems,
     validate_tool_arguments,
 )
+from app.services.task_event_service import TaskEventService
 from app.services.tool_registry import ToolSpec, get_mcp_tool_specs
 
 # Injected into every connecting CLI's system prompt at initialize (Claude
@@ -75,6 +85,38 @@ SERVER_INSTRUCTIONS = (
 TOKEN_PREFIX = "ct1"
 ROLES = {"coordinator", "executor"}
 TOKEN_PATTERN = re.compile(r"^ct1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$")
+
+# VIỆC 2 (CTV2-1399): only tools that CHANGE a task's state register the
+# calling session as its owner. Read-only tools (get_status, query_db, ...)
+# never do -- looking at a task must not steal it from whoever is working it.
+REGISTERING_TOOLS = frozenset({
+    "create_task", "update_task", "dispatch_task", "request_review",
+    "approve_gate", "record_verdict", "land_task", "reopen_task",
+    "cancel_task", "spec_write",
+})
+
+# A session that hasn't been seen in this long no longer counts as an owner:
+# its claim is orphaned and the task must be visible to every session again
+# (VIỆC 2, "kết nối là phù du").
+OWNER_STALE_SECONDS = 900
+
+# VIỆC 3: event types that belong in the "việc hỏng" (broken work) group --
+# they persist until someone acts on them, unlike "việc xong" which is
+# read-once. Kept local to this module (not DECISION_EVENT_TYPES in
+# task_event_service) so it does not change what notification_dispatcher
+# sends over Telegram -- that channel is untouched by this change.
+FAILED_EVENT_TYPES = frozenset({"run_failed", "landing_failed", "dispatch_no_run"})
+DONE_EVENT_TYPES = frozenset({"done", "landed", "spec_plan_completed", "plan_critic_completed"})
+
+_NEXT_BY_EVENT_TYPE = {
+    "run_failed": "xem get_run_output rồi dispatch_task lại sau khi sửa, hoặc reopen_task",
+    "landing_failed": "áp diff tay hoặc rebase rồi gọi land_task lại",
+    "dispatch_no_run": "gọi dispatch_task lại, hoặc kiểm tra agent/worker",
+}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -150,6 +192,20 @@ def authenticate_token(
     )
 
 
+def _current_http_headers() -> Mapping[str, str]:
+    """Read the active request's headers, ``authorization`` and
+    ``mcp-session-id`` included — both are stripped by default.
+
+    Outside an HTTP request (in-process transport, tests) this returns
+    ``{}``.
+    """
+
+    try:
+        return get_http_headers(include={"authorization", "mcp-session-id"}) or {}
+    except Exception:
+        return {}
+
+
 def _claims_from_request(default_token: str = "") -> TokenClaims | None:
     """Resolve token claims for the current tool call.
 
@@ -161,13 +217,7 @@ def _claims_from_request(default_token: str = "") -> TokenClaims | None:
     ``default_token`` fallback applies.
     """
 
-    headers: Mapping[str, str] = {}
-    try:
-        # get_http_headers() strips `authorization` by default; it must be
-        # explicitly included — it is the whole point of this call.
-        headers = get_http_headers(include={"authorization"}) or {}
-    except Exception:
-        headers = {}
+    headers = _current_http_headers()
     authorization = headers.get("authorization")
     return authenticate_token(
         authorization or default_token,
@@ -465,17 +515,54 @@ def _pending_approvals_note(pending: list[dict[str, Any]]) -> str:
         if checks:
             note += " Worth checking here: " + "; ".join(checks) + "."
         parts.append(note)
+    hidden = sum(
+        int(entry.get("hidden_count") or 0)
+        for entry in pending
+        if entry.get("kind") == "meta:hidden"
+    )
+    if hidden:
+        parts.append(f"({hidden} mục khác đang bị ẩn do giới hạn hiển thị.)")
     return " ".join(parts)
 
 
-def _pending_approvals(db) -> list[dict[str, Any]]:
+def _owner_visible_filter(db, session_id: str | None):
+    """Task-id filter: owned by nobody, owned by a stale session, or owned by me.
+
+    A task claimed by an ACTIVE other session is hidden here -- its news goes
+    to its owner (VIỆC 2). Everything else (no owner, or the owner has not
+    been seen in ``OWNER_STALE_SECONDS``) stays visible to everyone, because
+    a connection is ephemeral and an orphaned claim must never make a task
+    disappear (VIỆC 2, "lưới an toàn bắt buộc").
+    """
+    stale_before = _utcnow() - timedelta(seconds=OWNER_STALE_SECONDS)
+    active_other_owner = (
+        db.query(TaskOwner.task_id)
+        .join(SessionModel, SessionModel.id == TaskOwner.session_id)
+        .filter(
+            TaskOwner.session_id.isnot(None),
+            TaskOwner.session_id != (session_id or ""),
+            SessionModel.last_activity_at >= stale_before,
+        )
+    )
+    return Task.id.notin_(active_other_owner)
+
+
+def _pending_approvals(
+    db, *, session_id: str | None = None, project_scope: str | None = None
+) -> list[dict[str, Any]]:
     """Every open human decision, attached to every tool result.
 
     A pending gate mentioned once and then buried under later reports gets
     forgotten — the human never learns they owe a decision. Surfacing the
     open set server-side means the coordinator cannot drop it.
+
+    Filtered by PROJECT (the outer layer, VIỆC 4: a session scoped to
+    agenticmatix never sees VOMA-008) and by ownership (VIỆC 2). Newest
+    first, not oldest-first -- one gate stuck for hours must not bury
+    everything that happened since (VIỆC 4).
     """
     pending: list[dict[str, Any]] = []
+    hidden = 0
     try:
         # Both ledgers are append-only: a decision is a CHILD row pointing at
         # the pending row via parent_id, the parent keeps status="pending"
@@ -483,7 +570,7 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
         decided_task = db.query(GateRecord.parent_id).filter(
             GateRecord.parent_id.isnot(None)
         )
-        for row in (
+        gate_query = (
             db.query(GateRecord)
             .join(Task, Task.id == GateRecord.task_id)
             .filter(
@@ -494,10 +581,15 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
                 # auto re-dispatch gate orphaned when the replan went a
                 # different way and the task still reached done (CTV2-246).
                 Task.status.notin_(["done", "cancelled"]),
+                _owner_visible_filter(db, session_id),
             )
-            .order_by(GateRecord.created_at.asc())
-            .limit(5)
-        ):
+        )
+        if project_scope:
+            gate_query = gate_query.filter(Task.project == project_scope)
+        total_gates = gate_query.count()
+        gate_rows = list(gate_query.order_by(GateRecord.created_at.desc()).limit(5))
+        hidden += max(0, total_gates - len(gate_rows))
+        for row in gate_rows:
             decided_by, unknown_reason = _gate_decider(db, row)
             entry = {
                 "id": row.task_id,
@@ -525,15 +617,15 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
         decided_admin = db.query(AdminGateRecord.parent_id).filter(
             AdminGateRecord.parent_id.isnot(None)
         )
-        for row in (
-            db.query(AdminGateRecord)
-            .filter(
-                AdminGateRecord.status == "pending",
-                AdminGateRecord.id.notin_(decided_admin),
-            )
-            .order_by(AdminGateRecord.created_at.asc())
-            .limit(5)
-        ):
+        # Admin gates aren't task/project-scoped -- always shown, unfiltered.
+        admin_query = db.query(AdminGateRecord).filter(
+            AdminGateRecord.status == "pending",
+            AdminGateRecord.id.notin_(decided_admin),
+        )
+        total_admin = admin_query.count()
+        admin_rows = list(admin_query.order_by(AdminGateRecord.created_at.desc()).limit(5))
+        hidden += max(0, total_admin - len(admin_rows))
+        for row in admin_rows:
             pending.append({
                 "id": f"admin:{row.id}",
                 "kind": f"admin:{row.entity}/{row.action}",
@@ -544,17 +636,20 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
         # these are the only human decisions there are — without this branch
         # the reminder list stays empty exactly when a human is needed most.
         gated_tasks = {p["id"] for p in pending}
-        for row in (
-            db.query(Task)
-            .filter(
-                Task.awaiting_approval.is_(True),
-                Task.archived_at.is_(None),
-            )
-            .order_by(Task.updated_at.asc())
-            .limit(5)
-        ):
-            if row.id in gated_tasks:
-                continue
+        esc_query = db.query(Task).filter(
+            Task.awaiting_approval.is_(True),
+            Task.archived_at.is_(None),
+            _owner_visible_filter(db, session_id),
+        )
+        if project_scope:
+            esc_query = esc_query.filter(Task.project == project_scope)
+        total_esc = esc_query.count()
+        esc_rows = [
+            row for row in esc_query.order_by(Task.updated_at.desc()).limit(5 + len(gated_tasks))
+            if row.id not in gated_tasks
+        ][:5]
+        hidden += max(0, total_esc - len(gated_tasks) - len(esc_rows))
+        for row in esc_rows:
             pending.append({
                 "id": row.id,
                 "kind": "task:escalation",
@@ -563,13 +658,154 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
             })
     except Exception:  # a broken reminder must never break the tool call
         return []
+    if hidden:
+        pending.append({"id": None, "kind": "meta:hidden", "hidden_count": hidden})
     return pending
 
 
+def _register_task_ownership(
+    db, spec_name: str, scoped_kwargs: Mapping[str, Any], result: Mapping[str, Any], session_id: str
+) -> None:
+    """VIỆC 2: whoever changes a task's state owns its future notifications.
+
+    Registered at this ONE boundary (not inside every handler) so no tool
+    can forget to claim the task it just changed. Last writer wins: a second
+    session touching the same task simply overwrites the row.
+    """
+    if spec_name not in REGISTERING_TOOLS or result.get("error"):
+        return
+    task_id = None
+    task_payload = result.get("task")
+    if isinstance(task_payload, Mapping):
+        task_id = task_payload.get("id")
+    if not task_id:
+        task_id = result.get("task_id") or scoped_kwargs.get("task_id")
+    if not task_id:
+        return
+    task_id = str(task_id)
+    row = db.get(TaskOwner, task_id)
+    now = _utcnow()
+    if row is None:
+        db.add(TaskOwner(task_id=task_id, session_id=session_id, updated_at=now))
+    else:
+        row.session_id = session_id
+        row.updated_at = now
+    db.commit()
+
+
+def _session_project_scope(db, session_id: str) -> str | None:
+    """PROJECT is the outer scoping layer (VIỆC 4): a session that owns tasks
+    only in project X never sees inbox items from project Y.
+
+    Derived from the most recently touched owned task rather than stored on
+    the ``Session`` row itself -- ``sessions.project_id`` is constrained by
+    ``context_level`` (a global-level session must keep it NULL), and this
+    avoids fighting that invariant.
+    """
+    latest = (
+        db.query(TaskOwner)
+        .filter(TaskOwner.session_id == session_id)
+        .order_by(TaskOwner.updated_at.desc())
+        .first()
+    )
+    if latest is None:
+        return None
+    task = db.get(Task, latest.task_id)
+    return task.project if task is not None else None
+
+
+def _task_broken_and_done(
+    db, session_id: str, project_scope: str | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """VIỆC 3 groups B (việc hỏng) and C (việc xong).
+
+    B persists until the owning session acts on the task again (its
+    ``TaskEvent`` stays the newest one for that task). C is read-once: the
+    session's ``SessionEventCursor`` is advanced past everything returned,
+    so it never repeats (VIỆC 3, "đọc rồi thì biến mất").
+    """
+    broken: list[dict[str, Any]] = []
+    hidden = 0
+    try:
+        latest_per_task = (
+            db.query(TaskEvent.task_id, func.max(TaskEvent.id).label("max_id"))
+            .filter(TaskEvent.event_type.in_(FAILED_EVENT_TYPES))
+            .group_by(TaskEvent.task_id)
+            .subquery()
+        )
+        broken_query = (
+            db.query(TaskEvent)
+            .join(latest_per_task, TaskEvent.id == latest_per_task.c.max_id)
+            .join(Task, Task.id == TaskEvent.task_id)
+            .filter(
+                Task.archived_at.is_(None),
+                Task.status.notin_(["done", "cancelled"]),
+                _owner_visible_filter(db, session_id),
+            )
+        )
+        if project_scope:
+            broken_query = broken_query.filter(Task.project == project_scope)
+        total_broken = broken_query.count()
+        rows = list(broken_query.order_by(TaskEvent.id.desc()).limit(10))
+        hidden += max(0, total_broken - len(rows))
+        for event in rows:
+            payload = event.payload or {}
+            broken.append({
+                "id": event.task_id,
+                "kind": f"failed:{event.event_type}",
+                "why": payload.get("why") or payload.get("error") or payload.get("reason") or "",
+                "next": payload.get("next") or _NEXT_BY_EVENT_TYPE.get(event.event_type, "gọi get_status để xem chi tiết"),
+                "waiting_since": event.created_at.isoformat() if event.created_at else None,
+            })
+    except Exception:
+        broken = []
+
+    done: list[dict[str, Any]] = []
+    try:
+        info_events = TaskEventService(db).get_digest(session_id, limit=50)
+        relevant = [e for e in info_events if e.event_type in DONE_EVENT_TYPES]
+        if project_scope and relevant:
+            task_ids = {e.task_id for e in relevant}
+            projects = {
+                row.id: row.project
+                for row in db.query(Task.id, Task.project).filter(Task.id.in_(task_ids))
+            }
+            relevant = [e for e in relevant if projects.get(e.task_id) == project_scope]
+        for event in relevant[:10]:
+            done.append({
+                "id": event.task_id,
+                "kind": f"done:{event.event_type}",
+                "waiting_since": event.created_at.isoformat() if event.created_at else None,
+            })
+        # Advance the cursor past EVERY digested info event, not just the
+        # DONE_EVENT_TYPES subset -- get_digest() does not move the cursor
+        # itself, and a cursor that never moves would replay the same batch
+        # forever, the opposite of "đọc rồi thì biến mất" (VIỆC 3).
+        if info_events:
+            TaskEventService(db).advance_cursor(
+                session_id, max(e.id for e in info_events)
+            )
+    except Exception:
+        done = []
+    return broken, done[:10], hidden
+
+
 def _ensure_session(db, claims: TokenClaims) -> str:
-    """Give every native token a real router session, including executor tokens."""
-    session_id = claims.session_id or claims.token_id or "mcp"
-    if db.get(SessionModel, session_id) is not None:
+    """Give every native token a real router session, including executor tokens.
+
+    Identity follows the CONNECTION, not the token: several terminals opened
+    in the same repo dir share one ``.mcp.json`` and therefore one token, but
+    each opens its own HTTP connection and gets its own ``Mcp-Session-Id``
+    from the transport. Prefer that header so the server can tell them apart;
+    fall back to the token's claims only when no HTTP request is active (the
+    in-process transport used by tests).
+    """
+    header_session_id = _current_http_headers().get("mcp-session-id")
+    session_id = header_session_id or claims.session_id or claims.token_id or "mcp"
+    row = db.get(SessionModel, session_id)
+    if row is not None:
+        row.last_activity_at = _utcnow()
+        db.commit()
         return session_id
     task = db.get(Task, claims.task_id) if claims.task_id else None
     db.add(SessionModel(
@@ -632,6 +868,7 @@ def make_tool_handler(
                     return blocked
             result = await CommandRouter(db).execute_tool(spec.name, scoped_kwargs, session_id)
             _persist_verdict_evidence(db, spec.name, scoped_kwargs, result)
+            _register_task_ownership(db, spec.name, scoped_kwargs, result, session_id)
             if (
                 runtime_version is not None
                 and spec.name in {
@@ -650,10 +887,18 @@ def make_tool_handler(
             invalidate_context_snapshot(db, project_id=None)
             response = envelope(result, next_step=_next_step(result))
             _attach_gate_brief(db, spec.name, result, response)
-            pending = _pending_approvals(db)
+            project_scope = _session_project_scope(db, session_id)
+            pending = _pending_approvals(db, session_id=session_id, project_scope=project_scope)
             if pending:
                 response["pending_approvals"] = pending
                 response["pending_approvals_note"] = _pending_approvals_note(pending)
+            broken, done, inbox_hidden = _task_broken_and_done(db, session_id, project_scope)
+            if broken:
+                response["failed_work"] = broken
+            if done:
+                response["completed_work"] = done
+            if inbox_hidden:
+                response["failed_or_completed_hidden_count"] = inbox_hidden
             return response
         except Exception as exc:  # boundary: MCP must always return structured JSON
             return {"ok": False, "data": None, "error": {"code": "internal_error", "message": str(exc)}}

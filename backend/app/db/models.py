@@ -1579,6 +1579,28 @@ class TaskEvent(Base):
     )
 
 
+class TaskOwner(Base):
+    """Who last touched a task via a state-changing MCP tool (CTV2-1399).
+
+    Last writer wins: one row per task, overwritten whenever a registered
+    (mutating) tool call succeeds against it. ``session_id`` NULL, or a
+    session whose ``last_activity_at`` has gone stale, reads as "vô chủ" --
+    the task is then surfaced to every session instead of nobody.
+    """
+
+    __tablename__ = "task_owners"
+
+    task_id = Column(
+        String(20), ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True
+    )
+    session_id = Column(
+        String(36), ForeignKey("sessions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    updated_at = Column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class SessionEventCursor(Base):
     """Per-session cursor for digesting informational task events."""
 
