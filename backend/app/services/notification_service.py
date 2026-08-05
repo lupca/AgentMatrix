@@ -21,11 +21,22 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.db.base import SessionLocal
 from app.db.models import NotificationDelivery, Task, TaskEvent
-from app.services.task_event_service import DECISION_EVENT_TYPES
 
 logger = logging.getLogger(__name__)
 
 _MAX_MESSAGE_LEN = 4096
+
+# CTV2-1400: Telegram is a whitelist, not a blacklist -- adding a new event
+# type here requires a spec change (e6ee1eb0), not just a code change.
+# Decoupled from TaskEvent.kind ("decision" vs "info"), which drives an
+# unrelated coordinator-side digest/claim mechanism (task_event_service.
+# DECISION_EVENT_TYPES) with its own, wider membership.
+TELEGRAM_EVENT_TYPES = frozenset({
+    "human_question",
+    "task_done",
+    "cost_brake",
+    "deadman",
+})
 
 
 @dataclass(frozen=True)
@@ -48,7 +59,7 @@ def select_pending_events(db: Session, limit: int = 50) -> list[TaskEvent]:
     """Return TaskEvents eligible for notification but not yet delivered.
 
     Criteria:
-    - event_type IN DECISION_EVENT_TYPES
+    - event_type IN TELEGRAM_EVENT_TYPES
     - no matching notification_deliveries row
     - created_at within TELEGRAM_MAX_EVENT_AGE_SECONDS
     - ORDER BY id ASC, LIMIT 50
@@ -60,7 +71,7 @@ def select_pending_events(db: Session, limit: int = 50) -> list[TaskEvent]:
     return (
         db.query(TaskEvent)
         .filter(
-            TaskEvent.event_type.in_(DECISION_EVENT_TYPES),
+            TaskEvent.event_type.in_(TELEGRAM_EVENT_TYPES),
             TaskEvent.created_at >= cutoff,
             ~TaskEvent.id.in_(already_claimed.select()),
         )
@@ -79,7 +90,7 @@ def select_stale_events(db: Session, limit: int = 50) -> list[TaskEvent]:
     return (
         db.query(TaskEvent)
         .filter(
-            TaskEvent.event_type.in_(DECISION_EVENT_TYPES),
+            TaskEvent.event_type.in_(TELEGRAM_EVENT_TYPES),
             TaskEvent.created_at < cutoff,
             ~TaskEvent.id.in_(already_claimed.select()),
         )
@@ -147,16 +158,18 @@ def mark_skipped(db: Session, event: TaskEvent) -> DeliveryClaim | None:
     )
 
 
-def format_message(task: Task, event: TaskEvent, token: str) -> str:
-    """Build the Telegram message body for a decision event.
+def format_message(task: Task | None, event: TaskEvent, token: str) -> str:
+    """Build the Telegram message body for a whitelisted event.
 
     Contains: task id, task title, event type, event-specific fields,
     and the correlation token.  Truncated to <= 4096 chars.
+
+    ``task`` is ``None`` for ``human_question`` events not tied to any task
+    (``ask_human`` was called with no ``task_id``).
     """
-    lines = [
-        f"🔔 {event.event_type}",
-        f"Task: {task.id} — {task.title}",
-    ]
+    lines = [f"🔔 {event.event_type}"]
+    if task is not None:
+        lines.append(f"Task: {task.id} — {task.title}")
     payload: dict[str, Any] = event.payload or {}
 
     if event.event_type == "gate_pending":
@@ -174,6 +187,22 @@ def format_message(task: Task, event: TaskEvent, token: str) -> str:
     elif event.event_type == "escalated":
         reason = payload.get("reason", "unknown")
         lines.append(f"Reason: {reason}")
+    elif event.event_type == "human_question":
+        lines.append(f"Question: {payload.get('question', '?')}")
+        lines.append(f"Why human: {payload.get('why_human', '?')}")
+        options = payload.get("options") or []
+        if options:
+            lines.append(f"Options: {', '.join(str(o) for o in options)}")
+        lines.append("Answer in the coordinator chat -- this tool cannot receive a reply.")
+    elif event.event_type == "task_done":
+        lines.append(f"Executor: {payload.get('executor', '?')}")
+        lines.append(f"Commit: {payload.get('commit') or '(no commit)'}")
+    elif event.event_type == "cost_brake":
+        lines.append(f"Cost: ${payload.get('cost_usd', '?')} >= ${payload.get('max_cost_usd_per_task', '?')}")
+        lines.append("Autonomy stopped this task -- spending needs a human decision.")
+    elif event.event_type == "deadman":
+        lines.append(f"No progress for {payload.get('no_progress_minutes', '?')} min.")
+        lines.append(str(payload.get("reason", "")))
 
     lines.append(f"\n🔑 {token}")
     text = "\n".join(lines)

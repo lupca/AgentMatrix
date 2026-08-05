@@ -413,7 +413,7 @@ async def test_loaded_tool_group_persists_across_turns(db_session):
     assert turn2_names == baseline_names | {
         "dispatch_task", "record_verdict", "approve_gate", "cancel_task", "reopen_task",
         "attach_result", "request_review", "generate_spec_plan", "critique_spec_plan", "update_task", "archive_task",
-        "save_project_context", "land_task",
+        "save_project_context", "land_task", "ask_human",
     }
     tool_messages = [m for m in session.messages if m.get("name") == "approve_gate"]
     assert len(tool_messages) == 1
@@ -505,7 +505,7 @@ async def test_stream_turn_loaded_tools_persist_across_turns(db_session):
     assert turn2_names == baseline_names | {
         "dispatch_task", "record_verdict", "approve_gate", "cancel_task", "reopen_task",
         "attach_result", "request_review", "generate_spec_plan", "critique_spec_plan", "update_task", "archive_task",
-        "save_project_context", "land_task",
+        "save_project_context", "land_task", "ask_human",
     }
 
 

@@ -156,6 +156,54 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             slash_alias=None, group="task_lifecycle",
         ),
         ToolSpec(
+            name="ask_human",
+            description=(
+                "Use this when you need a HUMAN, specifically, to decide "
+                "something -- an irreversible choice, a design tradeoff, "
+                "spending real money, anything outside your authority to "
+                "decide alone. This is not manage_inbox: manage_inbox parks a "
+                "note for later with no gate and no reply expected; "
+                "ask_human actively notifies a human and expects one. This is "
+                "ONE-WAY: it queues a Telegram message "
+                "and returns immediately. There is no get_answer, no "
+                "wait_for_human, and none will ever be added -- do not poll "
+                "or wait in a loop after calling this. The human answers by "
+                "typing into the coordinator chat session directly, a path "
+                "that does not go through any tool call at all; your job "
+                "after calling ask_human is to stop and let the turn end, "
+                "not to wait for a return value that will never come. "
+                "why_human is mandatory and must explain why a human, not a "
+                "machine, has to answer -- an empty or missing why_human "
+                "means this is machine escalation dressed up as a question, "
+                "and the call is rejected. task_id is optional: pass it when "
+                "the question is about one specific task (the task is then "
+                "labeled as waiting on a human, not stuck on a machine); "
+                "omit it for a question with no single task attached."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string", "description": "The question for the human, in full."},
+                    "why_human": {
+                        "type": "string",
+                        "description": (
+                            "Required, non-empty. Why only a human can answer this "
+                            "-- not a restatement of the question."
+                        ),
+                    },
+                    "task_id": {"type": ["string", "null"], "description": "Task this question is about, if any."},
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional short list of choices, if the question is multiple-choice.",
+                    },
+                },
+                "required": ["question", "why_human"],
+            },
+            handler="ask_human", tier="deferred", permission="write", entity="task_events",
+            slash_alias=None, group="task_lifecycle", required_role="executor",
+        ),
+        ToolSpec(
             name="get_run_output",
             description=(
                 "Use this when you have a specific run_id and want to read what "

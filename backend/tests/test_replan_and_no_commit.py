@@ -95,3 +95,25 @@ def test_no_commit_completion_marks_done_with_system_verdict(db_session):
     ).first()
     assert gate is not None and gate.output_ref == "pass"
     assert gate.input_payload["kind"] == "no_commit_completion"
+
+
+def test_no_commit_completion_emits_whitelisted_task_done_event(db_session):
+    """CTV2-1400: `done` used to be kind='info' and never reached Telegram.
+    task_done is now one of the four whitelisted types, carrying task,
+    executor, and commit."""
+    from app.db.models import TaskEvent
+
+    _seed(db_session, task_status="dispatched", tags=["no-commit"])
+    TaskOrchestrationService(db_session).complete_no_commit_task(
+        task_id="T-1", actor="agent:@exec-a", run_id="r1"
+    )
+
+    event = (
+        db_session.query(TaskEvent)
+        .filter_by(task_id="T-1", event_type="task_done")
+        .one()
+    )
+    assert event.kind == "decision"
+    assert event.payload["task_id"] == "T-1"
+    assert event.payload["executor"] == "@exec-a"
+    assert event.payload["reviewer"] == "@system-no-commit"

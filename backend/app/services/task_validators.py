@@ -424,6 +424,23 @@ class TaskValidator:
                     },
                 )
             )
+        if decision.code == "cost_limit":
+            # CTV2-1400: tiền là của human, máy không quyết thay được -- one
+            # of the four Telegram-whitelisted event types.
+            from app.services.task_event_service import emit_task_event
+
+            emit_task_event(
+                task_id=task.id,
+                event_type="cost_brake",
+                payload={
+                    "task_id": task.id,
+                    "cost_usd": str(decision.cost_usd),
+                    "max_cost_usd_per_task": str(self.max_cost_usd_per_task),
+                    "reason": decision.reason,
+                },
+                db=self.db,
+                kind="decision",
+            )
         self.db.commit()
         # Dependents only need waking when this task actually reached a terminal
         # state; a delivered task the brake left alone is still in flight.

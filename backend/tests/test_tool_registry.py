@@ -26,11 +26,12 @@ def db_session():
 
 
 def test_registry_has_tools_with_unique_names():
-    assert len(TOOL_REGISTRY) == 35
+    assert len(TOOL_REGISTRY) == 36
     assert list(TOOL_REGISTRY) == [
         'create_task',
         'get_status',
         'manage_inbox',
+        'ask_human',
         'get_run_output',
         'get_stats',
         'query_db',
@@ -130,6 +131,7 @@ def test_get_group_tool_definitions_returns_deferred_tools_by_group():
         'critique_spec_plan',
         'save_project_context',
         'land_task',
+        'ask_human',
     }
 
     query = get_group_tool_definitions('query')

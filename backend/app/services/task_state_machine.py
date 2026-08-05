@@ -403,6 +403,27 @@ class TaskStateMachine:
         self.validator = TaskValidator(db)
         self._deferred_landing_event: tuple[str, dict[str, Any]] | None = None
 
+    def _emit_task_done_event(self, task: Task, *, actor: str | None) -> None:
+        """Emit the one Telegram-whitelisted completion event (CTV2-1400).
+
+        Called from every path that lands a task in ``done`` so `task_done`
+        always carries task id, who did it, and which commit.
+        """
+        emit_task_event(
+            task_id=task.id,
+            event_type="task_done",
+            payload={
+                "task_id": task.id,
+                "title": task.title,
+                "executor": task.executor,
+                "reviewer": task.reviewer,
+                "actor": actor,
+                "commit": task.landed_ref or task.final_result_ref or task.result_ref,
+            },
+            db=self.db,
+            kind="decision",
+        )
+
     def cas_status(self, task: Task, new_status: str) -> None:
         """Move ``task.status`` forward with a compare-and-set UPDATE."""
         self.db.flush()
@@ -1812,6 +1833,8 @@ class TaskStateMachine:
         if run is not None:
             self.db.refresh(run)
         if pending.gate_type == "verdict" and task.status == "done":
+            self._emit_task_done_event(task, actor=actor)
+            self.db.commit()
             self.wake_dependents(task.id)
         return TransitionResult(
             task=task,
@@ -2708,6 +2731,7 @@ class TaskStateMachine:
             payload={"no_commit": True, "run_id": run_id},
             db=self.db,
         )
+        self._emit_task_done_event(task, actor=actor)
         self.db.commit()
         return {"action": "no_commit_completed", "task_id": task.id, "status": task.status}
 
@@ -2767,6 +2791,7 @@ class TaskStateMachine:
                         project.repo_root,
                         commit_sha=landing.landed_ref,
                     )
+        self._emit_task_done_event(task, actor=actor)
         self.db.commit()
         return {
             "action": "landed" if landing.landed_ref else "landing_skipped",

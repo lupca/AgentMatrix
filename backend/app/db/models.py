@@ -1541,7 +1541,7 @@ class TaskEvent(Base):
     task_id = Column(
         String(20),
         ForeignKey("tasks.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     event_type = Column(String(30), nullable=False)
@@ -1657,7 +1657,7 @@ class NotificationDelivery(Base):
     task_id = Column(
         String(20),
         ForeignKey("tasks.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
     task_event_id = Column(

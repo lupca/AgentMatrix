@@ -901,6 +901,38 @@ def test_cost_cap_exceeded_stops_task_and_escalates(orchestration, db_session):
     assert audit.task_id == task.id
 
 
+def test_cost_cap_exceeded_emits_whitelisted_cost_brake_event(orchestration, db_session):
+    """CTV2-1400: cost_brake is one of the four Telegram-whitelisted event
+    types -- tiền là của human, máy không quyết thay được."""
+    from app.db.models import TaskEvent
+
+    task = _task(db_session, "GATE-BRAKE-COST-EVENT", mode="bypass")
+    db_session.add(Setting(key="max_cost_usd_per_task", value="1.0"))
+    db_session.add(
+        LLMUsage(
+            task_id=task.id, model="test-model", provider="test",
+            operation="chat", cost_usd="5.0",
+        )
+    )
+    db_session.commit()
+
+    with pytest.raises(BrakeViolationError):
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id="@executor",
+            actor="@operator",
+            idempotency_key="dispatch-cost-event",
+        )
+
+    event = (
+        db_session.query(TaskEvent)
+        .filter_by(task_id=task.id, event_type="cost_brake")
+        .one()
+    )
+    assert event.kind == "decision"
+    assert event.payload["max_cost_usd_per_task"] == "1.0"
+
+
 def test_cli_subscription_cost_does_not_trip_usd_brake_but_tokens_do(
     orchestration, db_session
 ):

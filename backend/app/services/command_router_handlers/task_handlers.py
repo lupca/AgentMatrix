@@ -753,6 +753,87 @@ class TaskHandlersMixin:
             'task': self._task_snapshot(task),
         }
 
+    async def _handle_ask_human(self, args: str, session_id: str) -> dict:
+        """CTV2-1400: the only channel from coordination out to a human.
+
+        One-way. There is no get_answer / wait_for_human / poll here, and
+        there never will be -- the human answers by typing in the chat
+        session, a path that does not go through any tool (spec
+        017d9cd4-b736-4dcb-8f8a-7880cb6f3a75). Calling this only queues the
+        Telegram-side `human_question` event; it does not block.
+        """
+        try:
+            payload = json.loads(args) if args else {}
+        except json.JSONDecodeError:
+            return {'error': 'Invalid ask_human payload'}
+        if not isinstance(payload, Mapping):
+            return {'error': 'Payload must be a JSON object'}
+
+        question = str(payload.get('question') or '').strip()
+        if not question:
+            return {'error': 'question is required and must be non-empty'}
+
+        why_human = str(payload.get('why_human') or '').strip()
+        if not why_human:
+            return {
+                'error': (
+                    "why_human is required and must be non-empty. This is not "
+                    "machine escalation -- explain why only a human can answer "
+                    "(e.g. an irreversible choice, a design tradeoff, missing "
+                    "authority to decide). If a machine can decide this, don't "
+                    "call ask_human."
+                )
+            }
+
+        task_id = payload.get('task_id')
+        task: Task | None = None
+        if task_id:
+            task_id = str(task_id).strip()
+            task = self.db.query(Task).filter(Task.id == task_id).first()
+            if not task:
+                return {'error': f'Task {task_id} not found'}
+
+        options = payload.get('options')
+        if options is not None and not (
+            isinstance(options, list) and all(isinstance(o, str) for o in options)
+        ):
+            return {'error': 'options must be an array of strings'}
+
+        from app.services.task_event_service import emit_task_event
+
+        event = emit_task_event(
+            task_id=task_id or None,
+            event_type='human_question',
+            payload={
+                'question': question,
+                'why_human': why_human,
+                'options': options or [],
+                'asked_by': f"chat:{session_id or 'anonymous'}",
+            },
+            db=self.db,
+            kind='decision',
+        )
+
+        # Label the task as waiting on a HUMAN, not on a machine, so the
+        # coordinator does not mistake the silence for a hang (spec
+        # e6ee1eb0 / 017d9cd4). Reuses `awaiting_approval` +
+        # `approval_prompt`, the same projection that already means
+        # "workflow_state == waiting_human" for gates -- skip terminal
+        # tasks, whose `awaiting_approval` is constrained to False.
+        if task is not None and task.status not in ('done', 'cancelled'):
+            task.awaiting_approval = True
+            task.approval_prompt = f"[human_question] {question}"
+            self.db.add(task)
+
+        self.db.commit()
+        return {
+            'action': 'asked',
+            'event_id': event.id,
+            'task_id': task_id,
+            'question': question,
+            'note': 'One-way: wait for the human to answer in chat, do not poll for a response.',
+        }
+
     async def _handle_verdict(self, args: str, session_id: str) -> dict:
         parts = args.strip().split(maxsplit=2)
         if len(parts) < 2:

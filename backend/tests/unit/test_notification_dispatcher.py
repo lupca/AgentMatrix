@@ -17,6 +17,7 @@ from app.db.models import (
     TaskEvent,
 )
 from app.services.notification_service import (
+    TELEGRAM_EVENT_TYPES,
     claim,
     format_message,
     mark_skipped,
@@ -34,7 +35,13 @@ from app.services.providers.telegram import send_message as tg_send
 
 @pytest.fixture
 def task_and_events(db_session):
-    """Create a project, task, and several task events."""
+    """Create a project, task, and events spanning whitelisted + non-whitelisted types.
+
+    CTV2-1400: Telegram now whitelists exactly four event types
+    (human_question, task_done, cost_brake, deadman). gate_pending/
+    run_failed/escalated are still `kind='decision'` (they still matter to
+    the coordinator's own digest), but must NOT reach Telegram any more.
+    """
     uid = str(uuid.uuid4())[:8]
     proj = Project(id=f"proj-{uid}", name=f"Proj {uid}")
     task = Task(
@@ -71,7 +78,34 @@ def task_and_events(db_session):
         kind="info",
         payload={},
     )
-    for e in [gate_event, run_failed_event, escalated_event, info_event]:
+    human_question_event = TaskEvent(
+        task_id=task.id,
+        event_type="human_question",
+        kind="decision",
+        payload={"question": "Deploy now?", "why_human": "irreversible", "options": ["yes", "no"]},
+    )
+    task_done_event = TaskEvent(
+        task_id=task.id,
+        event_type="task_done",
+        kind="decision",
+        payload={"executor": "@codex", "reviewer": "@gemini", "commit": "abc123"},
+    )
+    cost_brake_event = TaskEvent(
+        task_id=task.id,
+        event_type="cost_brake",
+        kind="decision",
+        payload={"cost_usd": "50.00000000", "max_cost_usd_per_task": "50.00000000"},
+    )
+    deadman_event = TaskEvent(
+        task_id=task.id,
+        event_type="deadman",
+        kind="decision",
+        payload={"no_progress_minutes": 45, "reason": "no progress"},
+    )
+    for e in [
+        gate_event, run_failed_event, escalated_event, info_event,
+        human_question_event, task_done_event, cost_brake_event, deadman_event,
+    ]:
         db_session.add(e)
     db_session.commit()
 
@@ -81,6 +115,10 @@ def task_and_events(db_session):
         "run_failed": run_failed_event,
         "escalated": escalated_event,
         "info": info_event,
+        "human_question": human_question_event,
+        "task_done": task_done_event,
+        "cost_brake": cost_brake_event,
+        "deadman": deadman_event,
     }
 
 
@@ -112,22 +150,47 @@ def _timeout_transport():
 
 
 # ---------------------------------------------------------------------------
-# 1. Only decision events are selected
+# 1. Only whitelisted events are selected (CTV2-1400)
 # ---------------------------------------------------------------------------
 
-def test_only_decision_events_selected(db_session, task_and_events):
-    """Info-kind events (e.g. task_created) produce zero deliveries."""
+def test_only_whitelisted_events_selected(db_session, task_and_events):
+    """Exactly the four whitelisted types are selected; nothing else."""
     events = select_pending_events(db_session)
     event_types = {e.event_type for e in events}
-    assert event_types <= {"gate_pending", "run_failed", "escalated"}
-    assert "task_created" not in event_types
-    assert len(events) == 3
+    assert event_types == TELEGRAM_EVENT_TYPES
+    assert event_types == {"human_question", "task_done", "cost_brake", "deadman"}
+    assert len(events) == 4
 
 
 def test_info_event_produces_zero_deliveries(db_session, task_and_events):
     """An info event is never selected for notification."""
     events = select_pending_events(db_session)
     assert task_and_events["info"].id not in {e.id for e in events}
+
+
+def test_gate_pending_no_longer_reaches_telegram(db_session, task_and_events):
+    """CTV2-1400: gate_pending was 553/day of the old noise -- cut."""
+    events = select_pending_events(db_session)
+    assert task_and_events["gate"].id not in {e.id for e in events}
+
+
+def test_run_failed_and_escalated_no_longer_reach_telegram_directly(db_session, task_and_events):
+    """Cut in favor of the coordinator's own `failed_work` channel (VIỆC 4
+    verifies that channel still receives these -- see test_mcp_native.py)."""
+    events = select_pending_events(db_session)
+    ids = {e.id for e in events}
+    assert task_and_events["run_failed"].id not in ids
+    assert task_and_events["escalated"].id not in ids
+
+
+def test_task_done_reaches_telegram(db_session, task_and_events):
+    """`done` used to be kind='info' and never delivered -- now whitelisted."""
+    events = select_pending_events(db_session)
+    assert task_and_events["task_done"].id in {e.id for e in events}
+
+
+def test_whitelist_is_exactly_four_types():
+    assert TELEGRAM_EVENT_TYPES == {"human_question", "task_done", "cost_brake", "deadman"}
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +254,53 @@ def test_format_message_error_truncated_in_run_failed(task_and_events):
     event.payload = {"run_id": "r1", "error": "x" * 500}
     text = format_message(task, event, "token")
     assert "..." in text
+
+
+def test_format_message_human_question(task_and_events):
+    task = task_and_events["task"]
+    event = task_and_events["human_question"]
+    text = format_message(task, event, "tok-ask-1")
+    assert "Deploy now?" in text
+    assert "irreversible" in text
+    assert "yes" in text and "no" in text
+    assert "tok-ask-1" in text
+
+
+def test_format_message_human_question_without_task():
+    """ask_human with no task_id: the message still renders, with no task line."""
+    event = TaskEvent(
+        task_id=None,
+        event_type="human_question",
+        kind="decision",
+        payload={"question": "Restart the whole cluster?", "why_human": "irreversible", "options": []},
+    )
+    text = format_message(None, event, "tok-ask-2")
+    assert "Restart the whole cluster?" in text
+    assert "Task:" not in text
+    assert "tok-ask-2" in text
+
+
+def test_format_message_task_done(task_and_events):
+    task = task_and_events["task"]
+    event = task_and_events["task_done"]
+    text = format_message(task, event, "tok-done-1")
+    assert task.id in text
+    assert "@codex" in text
+    assert "abc123" in text
+
+
+def test_format_message_cost_brake(task_and_events):
+    task = task_and_events["task"]
+    event = task_and_events["cost_brake"]
+    text = format_message(task, event, "tok-cost-1")
+    assert "50.00000000" in text
+
+
+def test_format_message_deadman(task_and_events):
+    task = task_and_events["task"]
+    event = task_and_events["deadman"]
+    text = format_message(task, event, "tok-dead-1")
+    assert "45" in text
 
 
 # ---------------------------------------------------------------------------
@@ -439,9 +549,9 @@ def test_retry_bounded_at_max_attempts(db_session, monkeypatch):
 
     event = TaskEvent(
         task_id=task.id,
-        event_type="gate_pending",
+        event_type="task_done",
         kind="decision",
-        payload={"gate": "review", "gate_record_id": 1},
+        payload={"executor": "@codex", "commit": "abc"},
     )
     db_session.add(event)
     db_session.commit()
@@ -541,9 +651,9 @@ def test_stale_events_recorded_as_skipped(db_session, monkeypatch):
 
     old_event = TaskEvent(
         task_id=task.id,
-        event_type="gate_pending",
+        event_type="task_done",
         kind="decision",
-        payload={"gate": "review", "gate_record_id": 1},
+        payload={"executor": "@codex", "commit": "abc"},
     )
     db_session.add(old_event)
     db_session.commit()
@@ -625,12 +735,12 @@ def test_select_stale_events(db_session, monkeypatch):
     db_session.commit()
 
     old = TaskEvent(
-        task_id=task.id, event_type="gate_pending", kind="decision",
-        payload={"gate": "review", "gate_record_id": 1},
+        task_id=task.id, event_type="task_done", kind="decision",
+        payload={"executor": "@codex", "commit": "abc"},
     )
     fresh = TaskEvent(
-        task_id=task.id, event_type="run_failed", kind="decision",
-        payload={"run_id": "r1", "error": "e"},
+        task_id=task.id, event_type="cost_brake", kind="decision",
+        payload={"cost_usd": "50", "max_cost_usd_per_task": "50"},
     )
     db_session.add_all([old, fresh])
     db_session.commit()

@@ -113,7 +113,7 @@ class TaskEventService:
 
 
 def emit_task_event(
-    task_id: str,
+    task_id: str | None,
     event_type: str,
     payload: dict[str, Any] | None = None,
     db: Session | None = None,

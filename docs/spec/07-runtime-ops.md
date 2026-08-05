@@ -52,8 +52,33 @@ reconcile. Mỗi tick (`NOTIFY_POLL_INTERVAL_MS`, mặc định 5s):
    ghi `status='skipped'`.
 2. **Retries**: delivery `failed` có `attempts < TELEGRAM_MAX_ATTEMPTS` → gửi
    lại, tăng attempts.
-3. **New**: TaskEvent có `event_type ∈ DECISION_EVENT_TYPES` (gate_pending,
-   run_failed, escalated) chưa có delivery row → claim → gửi → ghi outcome.
+3. **New**: TaskEvent có `event_type ∈ TELEGRAM_EVENT_TYPES` (whitelist,
+   `app/services/notification_service.py`) chưa có delivery row → claim →
+   gửi → ghi outcome.
+
+**CTV2-1400 — whitelist, không phải blacklist**: Telegram chỉ nhận đúng bốn
+loại, tách rời khỏi `TaskEvent.kind` (`decision`/`info`, dùng cho digest nội
+bộ điều phối — `DECISION_EVENT_TYPES` trong `task_event_service.py`, phạm vi
+khác và rộng hơn). Thêm loại mới vào Telegram PHẢI sửa spec này, không được
+lọt vào do quên:
+
+- **`human_question`** — do tool `ask_human` phát ra (xem dưới). Bắt buộc
+  `why_human` không rỗng.
+- **`task_done`** — task vào `done` qua bất kỳ đường nào (verdict pass tự
+  land, `land_task` retry, `complete_no_commit_task`) — phát từ
+  `TaskStateMachine._emit_task_done_event`, nội dung: task nào, executor,
+  reviewer, commit (`landed_ref`/`final_result_ref`/`result_ref`).
+- **`cost_brake`** — `TaskValidator._record_brake` khi `decision.code ==
+  "cost_limit"` (chạm `max_cost_usd_per_task`). KHÔNG bắn cho `token_limit`
+  hay các brake khác — tiền là trục duy nhất máy không tự quyết được.
+- **`deadman`** — xem mục riêng dưới.
+
+Trước đây bộ lọc là `kind='decision'` (gate_pending/run_failed/escalated —
+553+52+47 tin/ngày đo được 2026-08-05), còn `done` mang `kind='info'` nên
+KHÔNG BAO GIỜ tới human. `gate_pending`/`run_failed`/`escalated` vẫn phát ra
+(coordinator vẫn đọc qua group A/B nội bộ — `_pending_approvals` và
+`_task_broken_and_done` trong `mcp_native.py`) nhưng không còn đi Telegram
+trực tiếp nữa.
 
 **Failure policy**: Telegram chết không ảnh hưởng task flow.
 - HTTP call KHÔNG nằm trong MCP request path — chỉ chạy trong Dramatiq worker.
@@ -63,6 +88,36 @@ reconcile. Mỗi tick (`NOTIFY_POLL_INTERVAL_MS`, mặc định 5s):
 - `TELEGRAM_NOTIFY_ENABLED=false` hoặc token/chat_id trống → actor no-op.
 - Retry tối đa `TELEGRAM_MAX_ATTEMPTS` (mặc định 3) lần; sau đó row giữ
   `status='failed'` vĩnh viễn.
+
+### Tool `ask_human` (CTV2-1400)
+
+Kênh MỘT CHIỀU duy nhất từ điều phối/agent ra human — không có
+`get_answer`/`wait_for_human`/poll, và sẽ không bao giờ có: human trả lời
+bằng cách gõ thẳng vào chat của phiên điều phối, đường đó không đi qua tool
+nào cả (bất đối xứng hai chiều, xem spec 017d9cd4). Tham số: `question`,
+`why_human` (bắt buộc, rỗng → reject kèm hint), `task_id` (optional),
+`options` (optional). Có `task_id` → gắn nhãn task đó `awaiting_approval=True`
++ `approval_prompt` (bỏ qua nếu task đã terminal, vì CHECK constraint
+`ck_tasks_terminal_not_awaiting_approval`) → `workflow_state == "waiting_human"`,
+để điều phối không tưởng nhầm là bị treo. `task_id` rỗng vẫn hợp lệ (câu hỏi
+không gắn với task nào) — từ migration `057_task_events_task_id_nullable`,
+`TaskEvent.task_id`/`NotificationDelivery.task_id` đều nullable.
+
+### Deadman monitor (CTV2-1400)
+
+Actor riêng `deadman_monitor` (`app/workers/deadman_monitor.py`), tự lên lịch
+tương tự `notification_dispatcher` (`DEADMAN_POLL_INTERVAL_MS`, mặc định
+60s), khởi động cùng `_OutboxPollerBootstrap`. Logic thuần nằm ở
+`app/services/deadman_service.py` (test được không cần Dramatiq).
+
+Task chưa `done`/`cancelled` mà `Task.updated_at` không đổi quá N phút
+(Setting `deadman_no_progress_minutes`, mặc định 30, đọc qua
+`get_no_progress_minutes`) → bắn **đúng một** event `deadman`. Chống lặp:
+so `Task.updated_at` với `created_at` của event `deadman` gần nhất cho task
+đó — nếu chưa có gì đụng vào task kể từ lần bắn trước thì im; task phải có
+tiến triển (updated_at nhảy tới) rồi đứng máy lại mới bắn tiếp. Lý do tồn
+tại: 2026-08-04 server treo hai lần, im lặng lúc mọi thứ ổn và im lặng lúc
+chết trông y hệt nhau trên Telegram trước khi có tín hiệu này.
 
 ## Phạm vi đo chi phí LLM
 

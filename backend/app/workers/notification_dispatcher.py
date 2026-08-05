@@ -43,7 +43,9 @@ def _enabled() -> bool:
     )
 
 
-def _load_task(task_id: str) -> Task | None:
+def _load_task(task_id: str | None) -> Task | None:
+    if not task_id:
+        return None
     db = SessionLocal()
     try:
         return db.query(Task).filter_by(id=task_id).first()
@@ -134,7 +136,7 @@ def _process_new_events(transport=None) -> int:
             continue
 
         task = _load_task(task_id)
-        if task is None:
+        if task is None and task_id is not None:
             record_outcome(
                 d_id,
                 status="failed",
@@ -178,7 +180,7 @@ def _process_retries(transport=None) -> int:
         if event is None:
             continue
         task = _load_task(task_id)
-        if task is None:
+        if task is None and task_id is not None:
             continue
 
         _send_one(

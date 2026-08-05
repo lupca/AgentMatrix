@@ -107,6 +107,16 @@ class CommandRouter(
             if not action:
                 return {'error': 'action is required'}
             command_args = json.dumps(args, ensure_ascii=False)
+        elif canonical_name == 'ask_human':
+            question = str(args.get('question', '') or '').strip()
+            if not question:
+                return {'error': 'question is required'}
+            command_args = json.dumps({
+                'question': question,
+                'why_human': args.get('why_human'),
+                'task_id': args.get('task_id'),
+                'options': args.get('options'),
+            }, ensure_ascii=False)
         elif canonical_name == 'get_status':
             command_args = str(args.get('task_id', '') or '')
         elif canonical_name == 'get_run_output':

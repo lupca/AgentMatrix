@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     TELEGRAM_MAX_ATTEMPTS: int = 3
     TELEGRAM_MAX_EVENT_AGE_SECONDS: int = 3600
 
+    # Deadman monitor (CTV2-1400): unfinished work with no progress in this
+    # many minutes gets exactly one `deadman` Telegram notification. The
+    # Setting table key `deadman_no_progress_minutes` overrides this.
+    DEADMAN_NO_PROGRESS_MINUTES: int = 30
+
     class Config:
         env_file = ".env"
         case_sensitive = True
