@@ -16,3 +16,12 @@ worker.log
 .codex/
 .fuse_hidden*
 .ruff_cache/
+
+# Ảnh chụp DB: to hàng trăm MB, vượt trần 100MB của GitHub và không
+# thuộc về lịch sử mã nguồn. Một file như vậy từng chặn 162 commit
+# (backups/control_tower_20260802_162652.sql, 171MB).
+backups/
+*.sql.gz
+worker.log
+backend.log
+.fuse_hidden*
