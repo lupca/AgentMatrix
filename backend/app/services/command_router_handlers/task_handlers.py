@@ -772,6 +772,15 @@ class TaskHandlersMixin:
         if not isinstance(payload, Mapping):
             return {'error': 'Payload must be a JSON object'}
 
+        # Answer mode (CTV2-1405). Asking marks the task as waiting on a
+        # human; the answer arrives in chat, through no tool at all. Without a
+        # way to say "they answered", that mark could never be cleared and the
+        # task was bricked -- every transition refused, forever. The tool that
+        # raises the flag has to be able to lower it.
+        answer = str(payload.get('answer') or '').strip()
+        if answer:
+            return await self._resolve_human_question(payload, answer, session_id)
+
         question = str(payload.get('question') or '').strip()
         if not question:
             return {'error': 'question is required and must be non-empty'}
@@ -835,6 +844,63 @@ class TaskHandlersMixin:
             'task_id': task_id,
             'question': question,
             'note': 'One-way: wait for the human to answer in chat, do not poll for a response.',
+        }
+
+    async def _resolve_human_question(
+        self, payload: Mapping, answer: str, session_id: str
+    ) -> dict:
+        """Record the answer the human typed in chat, and unblock the task.
+
+        The coordinator is the one who heard it -- that is the whole shape of
+        the asymmetry (spec 017d9cd4): out through the tool, back through the
+        chat. So the coordinator is also the only one who can report it. The
+        answer text is stored verbatim under its own event so the record shows
+        what was actually said, not merely that something was.
+        """
+        task_id = str(payload.get('task_id') or '').strip()
+        if not task_id:
+            return {'error': 'task_id is required when recording an answer'}
+
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return {'error': f'Task {task_id} not found'}
+
+        from app.services.task_event_service import emit_task_event
+
+        event = emit_task_event(
+            task_id=task_id,
+            event_type='human_answer',
+            payload={
+                'answer': answer,
+                'recorded_by': f"chat:{session_id or 'anonymous'}",
+            },
+            db=self.db,
+            kind='info',
+        )
+
+        was_waiting = bool(task.awaiting_approval)
+        prompt = task.approval_prompt or ''
+        # Only clear a block this tool put there. A real gate awaiting a
+        # decision must still be decided through approve_gate.
+        if was_waiting and prompt.startswith('[human_question]'):
+            task.awaiting_approval = False
+            task.approval_prompt = None
+            self.db.add(task)
+            cleared = True
+        else:
+            cleared = False
+
+        self.db.commit()
+        return {
+            'action': 'answered',
+            'event_id': event.id,
+            'task_id': task_id,
+            'unblocked': cleared,
+            'note': (
+                'Task unblocked; continue the work.' if cleared else
+                'Recorded. The task was not blocked by a human_question -- if it '
+                'is still waiting, that is a real gate: use approve_gate.'
+            ),
         }
 
     async def _handle_verdict(self, args: str, session_id: str) -> dict:

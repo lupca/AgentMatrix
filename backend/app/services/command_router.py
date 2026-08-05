@@ -108,15 +108,24 @@ class CommandRouter(
                 return {'error': 'action is required'}
             command_args = json.dumps(args, ensure_ascii=False)
         elif canonical_name == 'ask_human':
-            question = str(args.get('question', '') or '').strip()
-            if not question:
-                return {'error': 'question is required'}
-            command_args = json.dumps({
-                'question': question,
-                'why_human': args.get('why_human'),
-                'task_id': args.get('task_id'),
-                'options': args.get('options'),
-            }, ensure_ascii=False)
+            # Answer mode carries no question: it reports what the human said
+            # in chat and lowers the waiting-on-human mark that asking raised.
+            answer = str(args.get('answer', '') or '').strip()
+            if answer:
+                command_args = json.dumps({
+                    'answer': answer,
+                    'task_id': args.get('task_id'),
+                }, ensure_ascii=False)
+            else:
+                question = str(args.get('question', '') or '').strip()
+                if not question:
+                    return {'error': 'question is required (or pass answer to record a reply)'}
+                command_args = json.dumps({
+                    'question': question,
+                    'why_human': args.get('why_human'),
+                    'task_id': args.get('task_id'),
+                    'options': args.get('options'),
+                }, ensure_ascii=False)
         elif canonical_name == 'get_status':
             command_args = str(args.get('task_id', '') or '')
         elif canonical_name == 'get_run_output':

@@ -163,7 +163,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "spending real money, anything outside your authority to "
                 "decide alone. This is not manage_inbox: manage_inbox parks a "
                 "note for later with no gate and no reply expected; "
-                "ask_human actively notifies a human and expects one. This is "
+                "ask_human actively notifies a human and expects one. Once the human answers in chat, call this again with `answer` (plus task_id) to record what they said and unblock the task -- asking marks the task as waiting on a human, and nothing else can clear that mark. This is "
                 "ONE-WAY: it queues a Telegram message "
                 "and returns immediately. There is no get_answer, no "
                 "wait_for_human, and none will ever be added -- do not poll "
@@ -184,6 +184,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "type": "object",
                 "properties": {
                     "question": {"type": "string", "description": "The question for the human, in full."},
+                    "answer": {
+                        "type": "string",
+                        "description": (
+                            "Answer mode: what the human said in chat. Pass "
+                            "with task_id (question/why_human not needed). "
+                            "Records the answer verbatim and clears the "
+                            "waiting-on-human mark this tool set, so the task "
+                            "can move again."
+                        ),
+                    },
                     "why_human": {
                         "type": "string",
                         "description": (
