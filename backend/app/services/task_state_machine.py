@@ -34,6 +34,7 @@ from app.db.models import Session as SessionModel
 from app.services.agent_matcher import POLICY_VERSION as AGENT_MATCHER_POLICY_VERSION
 from app.services.agent_matcher import AgentMatcher
 from app.services.agent_run_classification import classify_termination
+from app.services.approval_hold import derive_approval_hold
 from app.services.landing import LandingResult, head_of, land_result
 from app.services.outbox import record_commit_event, record_run_requested
 from app.services.review_criteria import merged_review_criteria
@@ -512,13 +513,17 @@ class TaskStateMachine:
     ) -> None:
         """Project a passing verdict to ``done`` through one guarded path."""
         self.require_approved_pass_verdict(task, approval_record=approval_record)
+        # Written BEFORE the status flip on purpose: the CHECK constraint
+        # `ck_tasks_terminal_not_awaiting_approval` is evaluated on the very
+        # UPDATE that sets `status='done'`, so the row has to already carry the
+        # projection the new status implies.  `as_status` asks the derivation
+        # for exactly that.
+        self.sync_awaiting_approval(task, as_status="done")
         if task.status != "done":
             self.cas_status(task, "done")
         task.completed_at = now or datetime.now(timezone.utc)
         task.final_result_ref = task.result_ref
         task.final_verdict = "pass"
-        task.awaiting_approval = False
-        task.approval_prompt = None
         task.error = None
 
     def ledger_record(
@@ -592,29 +597,26 @@ class TaskStateMachine:
         self.db.refresh(record)
         return record
 
-    def sync_awaiting_approval(self, task: Task) -> bool:
-        """Recalculate the approval projection from unresolved gate records.
+    def sync_awaiting_approval(self, task: Task, *, as_status: str | None = None) -> bool:
+        """Write the approval projection back from the one function that derives it.
 
-        Gate records are append-only: a pending record is resolved by an
-        approved/rejected child rather than by updating the pending row.  A
-        pending root with any decision child is therefore not an active gate.
+        This is the ONLY place allowed to assign `task.awaiting_approval` or
+        `task.approval_prompt`.  Both come out of the same `ApprovalHold`, so
+        the two columns cannot disagree with each other, and neither can
+        disagree with the evidence -- gate ledger, human_question events, spec
+        clarity, plan critic verdict, landing error (CTV2-1401, spec item
+        3e2a7102).
+
+        Callers that *refuse to act* on a hold must not read the column this
+        writes; they call `derive_approval_hold` themselves.  A cached value
+        can be one beat stale, and a stale value must never be able to brick a
+        task again.
         """
         self.db.flush()
-        decision = aliased(GateRecord)
-        has_pending = (
-            self.db.query(GateRecord.id)
-            .filter(
-                GateRecord.task_id == task.id,
-                GateRecord.status == "pending",
-                ~exists().where(decision.parent_id == GateRecord.id),
-            )
-            .first()
-            is not None
-        )
-        task.awaiting_approval = has_pending
-        if not has_pending:
-            task.approval_prompt = None
-        return has_pending
+        hold = derive_approval_hold(self.db, task, as_status=as_status)
+        task.awaiting_approval = hold is not None
+        task.approval_prompt = hold.prompt if hold is not None else None
+        return hold is not None
 
     def _reject_pending_gates(
         self,
@@ -1072,8 +1074,10 @@ class TaskStateMachine:
                 run.task_round_id = task_round.id
             task.dispatched_at = now
             task.error = None
-            task.awaiting_approval = False
-            task.approval_prompt = None
+            # The projection is not cleared here: the decision child that
+            # resolves this pending gate is only appended after `_apply_gate`
+            # returns, so `_sync_after_transition` at the end of `decide_gate`
+            # is the first moment the ledger can answer truthfully.
             record_run_requested(self.db, run, str(payload["repo_root"]))
             emit_task_event(
                 task_id=task.id,
@@ -1119,8 +1123,6 @@ class TaskStateMachine:
             self.cas_status(task, "in-review")
             task.current_gate = "verdict"
             task.error = None
-            task.awaiting_approval = False
-            task.approval_prompt = None
             record_run_requested(self.db, run, str(payload["repo_root"]))
             self.db.add(
                 ReviewCycle(
@@ -1152,8 +1154,6 @@ class TaskStateMachine:
             task.verdict = verdict
             task.findings = payload.get("findings") or []
             task.current_gate = "verdict"
-            task.awaiting_approval = False
-            task.approval_prompt = None
             if verdict == "pass":
                 # Landing is an external side effect.  Prove the immutable
                 # approved verdict before touching git, not merely before the
@@ -1163,11 +1163,9 @@ class TaskStateMachine:
                 )
                 landing = self.land_verdict_result(task)
                 if not landing.ok:
-                    task.awaiting_approval = True
-                    task.approval_prompt = (
-                        f"Verdict is pass but landing {task.result_ref} failed: "
-                        f"{landing.error} — fix the repo, then call land_task."
-                    )
+                    # The error string IS the evidence: the `landing` hold is
+                    # derived from this prefix, so there is no separate flag to
+                    # keep in step with it.
                     task.error = f"landing_failed: {landing.error}"
                     self.record_verdict_on_round(task, verdict=verdict, now=now)
                     self._deferred_landing_event = (
@@ -1363,11 +1361,9 @@ class TaskStateMachine:
                 input_hash=input_hash,
                 payload=request_payload,
             )
-            task.awaiting_approval = True
-            task.approval_prompt = request_payload.get("approval_prompt") or (
-                f"Approve {gate_type} gate for task {task.id} "
-                f"(request {idempotency_key})?"
-            )
+            # The pending record just written IS the evidence; the prompt is
+            # read back out of it (`input_payload.approval_prompt`) rather
+            # than written twice into two places that can disagree.
             self.sync_awaiting_approval(task)
             self.audit(task, record)
             self.db.commit()
@@ -1787,8 +1783,6 @@ class TaskStateMachine:
             task.current_gate = "review_order"
             task.verdict = None
             task.completed_at = None
-            task.awaiting_approval = False
-            task.approval_prompt = None
 
         if record is None:
             record = self.ledger_record(
@@ -2029,16 +2023,17 @@ class TaskStateMachine:
 
         task = self.validator.task(task_id)
         if task.status != "failed":
-            # Second way to be stuck: the task is not terminal, but its
-            # approval projection says a human is being waited on while the
-            # ledger holds no unresolved pending gate.  Nothing can clear that
-            # -- `approve_gate` answers "No pending gate found", and every
-            # dispatch path refuses a task with `awaiting_approval` set.
+            # Second way to be stuck: the task is not terminal, but its stored
+            # approval projection says a human is being waited on while no
+            # source of waiting actually exists.  CTV2-1389 landed there when
+            # escalations changed from `rejected` to `pending` records: its
+            # flag was set by the old shape, so it sat on a finished,
+            # critic-accepted plan it could not act on.
             #
-            # CTV2-1389 landed there when escalations changed from `rejected`
-            # to `pending` records: its flag was set by the old shape, so it
-            # sat on a finished, critic-accepted plan it could not act on.  A
-            # projection that can drift from the ledger needs one way back.
+            # Since CTV2-1401 the blocking decisions derive the answer instead
+            # of reading this column, so a drifted value no longer bricks a
+            # task -- but rows written before that fix still carry one, and
+            # this remains the way to write the truth back over them.
             if task.awaiting_approval and not self.sync_awaiting_approval(task):
                 task.error = None
                 task.updated_at = datetime.now(timezone.utc)
@@ -2088,9 +2083,9 @@ class TaskStateMachine:
             "previous_error": previous_error,
         }
         self.cas_status(task, target)
+        # Clearing the error clears the evidence for the `landing` hold too;
+        # `_sync_after_transition` below rewrites the projection from it.
         task.error = None
-        task.awaiting_approval = False
-        task.approval_prompt = None
         task.current_gate = "review_order" if delivered else "dispatch"
         task.updated_at = datetime.now(timezone.utc)
         record = self.ledger_record(
@@ -2136,7 +2131,6 @@ class TaskStateMachine:
         # no new run is spawned while a human is being waited on.  The task
         # keeps its status and stays recoverable.
         task.error = reason
-        task.approval_prompt = reason
         task.updated_at = datetime.now(timezone.utc)
         # Written as a PENDING gate, not a rejected one.
         #
@@ -2418,22 +2412,13 @@ class TaskStateMachine:
             task.mode = self.validator.mode_for_task(task, risk=risk)
         task.flows = flows
         task.current_gate = "plan"
-        if open_questions or spec_clarity != "high":
-            questions = "\n".join(
-                f"{index}) {question}" for index, question in enumerate(open_questions, 1)
-            )
-            task.awaiting_approval = True
-            question_block = f"\n{questions}" if questions else ""
-            task.approval_prompt = (
-                f"Spec chưa đủ rõ (clarity={spec_clarity}). Cập nhật task.plan với "
-                f"câu trả lời cho các câu hỏi sau (dùng update_task, trường plan) "
-                f"rồi chạy lại generate_spec_plan — planner sẽ đọc task.plan ở vòng "
-                f"tiếp theo:{question_block}"
-            )
-        else:
+        if not (open_questions or spec_clarity != "high"):
             task.open_questions = []
-            task.awaiting_approval = False
-            task.approval_prompt = None
+        # `spec_clarity` + `open_questions` are themselves the evidence for the
+        # Spec Clarity hold, so the prompt is derived from them rather than
+        # written alongside them.  A later `update_task` that answers the
+        # questions therefore cannot leave a contradictory prompt behind.
+        self.sync_awaiting_approval(task)
         task.updated_at = datetime.now(timezone.utc)
         payload = {
             "acceptance_criteria": acceptance_criteria,
@@ -2532,12 +2517,10 @@ class TaskStateMachine:
         task.plan_critic = critic
         task.plan_critic_status = verdict
         task.plan_critic_findings = findings
-        if verdict == "reject":
-            task.awaiting_approval = True
-            task.approval_prompt = (
-                f"Plan critic {critic} rejected this plan: {summary}. "
-                "Correct the evidenced findings and run generate_spec_plan again."
-            )
+        # `plan_critic_status` is the evidence.  The prompt is derived from it
+        # (and from the findings), so replanning -- which resets the status --
+        # cannot leave a rejection prompt standing over an accepted plan.
+        self.sync_awaiting_approval(task)
         task.updated_at = datetime.now(timezone.utc)
         self.cas_status(task, task.status)
         critic_payload = {
@@ -2740,11 +2723,11 @@ class TaskStateMachine:
         approval_record = self.require_approved_pass_verdict(task)
         landing = self.land_verdict_result(task)
         if not landing.ok:
-            task.awaiting_approval = True
-            task.approval_prompt = (
-                f"Landing {task.result_ref} failed: {landing.error} — "
-                "fix the repo, then call land_task again."
-            )
+            # This used to assert the flag and then immediately call sync,
+            # which derived it back to False from gates alone and threw the
+            # prompt away -- the block this branch exists to create never
+            # survived the same function.  The error prefix is now the
+            # evidence the `landing` hold derives from.
             task.error = f"landing_failed: {landing.error}"
             self.sync_awaiting_approval(task)
             emit_task_event(
@@ -2765,8 +2748,6 @@ class TaskStateMachine:
         now = datetime.now(timezone.utc)
         if task.status != "done":
             self.transition_to_done(task, approval_record=approval_record, now=now)
-        task.awaiting_approval = False
-        task.approval_prompt = None
         task.error = None
         self._sync_after_transition(task)
         if landing.landed_ref:
@@ -2956,8 +2937,6 @@ class TaskStateMachine:
         task.result_ref = commit_ref
         task.current_gate = "review_order"
         task.error = None
-        task.awaiting_approval = False
-        task.approval_prompt = None
         self.cas_status(task, "awaiting-review")
         target_status = "awaiting-review"
 

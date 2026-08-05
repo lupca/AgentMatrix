@@ -33,6 +33,7 @@ from app.db.models import (
 )
 from app.schemas.task import ReviewResult
 from app.services.agent_matcher import AgentMatcher
+from app.services.approval_hold import task_is_waiting_on_human
 from app.services.command_builder import _is_review_task, review_result_path
 from app.services.process_manager import (
     ProcessManager,
@@ -213,7 +214,9 @@ def advance_task(task_id: str, trigger: str) -> str:
 
         status_before = task.status
         service = TaskOrchestrationService(db)
-        if task.awaiting_approval:
+        # Derived, never read off the stored flag (CTV2-1401): a column that
+        # had drifted made the driver skip a task on every tick, forever.
+        if task_is_waiting_on_human(db, task):
             outcome = "gate_pending"
         elif _advance_task_stalled(db, task_id, status_before):
             _escalate(db, task, _stall_reason(db, task))
@@ -330,7 +333,7 @@ def _advance_task_step(
     service: TaskOrchestrationService,
     task: Task,
 ) -> str:
-    if task.awaiting_approval:
+    if task_is_waiting_on_human(db, task):
         return "gate_pending"
     if task.status == "todo":
         return _advance_todo(db, service, task)

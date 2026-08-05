@@ -96,10 +96,15 @@ Kênh MỘT CHIỀU duy nhất từ điều phối/agent ra human — không có
 bằng cách gõ thẳng vào chat của phiên điều phối, đường đó không đi qua tool
 nào cả (bất đối xứng hai chiều, xem spec 017d9cd4). Tham số: `question`,
 `why_human` (bắt buộc, rỗng → reject kèm hint), `task_id` (optional),
-`options` (optional). Có `task_id` → gắn nhãn task đó `awaiting_approval=True`
-+ `approval_prompt` (bỏ qua nếu task đã terminal, vì CHECK constraint
-`ck_tasks_terminal_not_awaiting_approval`) → `workflow_state == "waiting_human"`,
-để điều phối không tưởng nhầm là bị treo. `task_id` rỗng vẫn hợp lệ (câu hỏi
+`options` (optional). Có `task_id` → event `human_question` là BẰNG CHỨNG, và
+`awaiting_approval` + `approval_prompt` (`[human_question] <câu hỏi>`) được
+SUY RA từ nó qua `derive_approval_hold` (CTV2-1401, xem 03) → `workflow_state
+== "waiting_human"`, để điều phối không tưởng nhầm là bị treo. Task terminal
+suy ra không hold (CHECK constraint `ck_tasks_terminal_not_awaiting_approval`).
+Trả lời (`ask_human {task_id, answer}`) ghi event `human_answer`, và chính
+event đó rút lại nguồn chờ — không còn khớp chuỗi `[human_question]` trên
+prompt nữa; nếu task còn hold khác (ví dụ gate thật) thì nó vẫn đứng, và
+`unblocked=false`. `task_id` rỗng vẫn hợp lệ (câu hỏi
 không gắn với task nào) — từ migration `057_task_events_task_id_nullable`,
 `TaskEvent.task_id`/`NotificationDelivery.task_id` đều nullable.
 

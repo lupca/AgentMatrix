@@ -198,13 +198,42 @@ CTV2-237, đã sửa; update rỗng giờ báo lỗi).
 
 ## Escalation
 
-Brake đạp (round limit, cost...) → task set
-`awaiting_approval=true` + `approval_prompt`, KHÔNG tạo GateRecord (CTV2-221).
-Spec Clarity Loop dùng cùng escalation này khi spec chưa đạt `high` hoặc còn
-`open_questions`; approval prompt liệt kê đủ câu hỏi và yêu cầu generate lại sau
-khi cập nhật `raw_input`.
-Vì vậy `_pending_approvals` (mcp_native) quét thêm nhánh escalation
-(`kind: "task:escalation"`). `auto_max_rounds` (default 3) round
+`awaiting_approval` + `approval_prompt` là **projection suy ra**, không phải cờ
+gán tay (CTV2-1401 — spec item `3e2a7102`). Một hàm duy nhất trả lời câu hỏi
+"task này có đang chờ human không":
+`derive_approval_hold(db, task) -> ApprovalHold | None`
+(`app/services/approval_hold.py`), union 5 nguồn, mỗi nguồn có bằng chứng bền
+riêng — không nguồn nào lấy chính cái cờ làm bằng chứng:
+
+| `source` | Bằng chứng | Gỡ bằng |
+|---|---|---|
+| `gate` | `gate_records` `status='pending'` chưa có hàng con quyết định | `approve_gate` |
+| `human_question` | `task_events` `human_question` mới hơn `human_answer` gần nhất | `ask_human {answer}` |
+| `spec_clarity` | `spec_clarity != 'high'` hoặc `open_questions` khác rỗng | `generate_spec_plan` lại |
+| `plan_critic` | `plan_critic_status == 'reject'` | `generate_spec_plan` lại |
+| `landing` | `task.error` bắt đầu `landing_failed:` | sửa repo rồi `land_task` |
+
+Task terminal (`done`/`cancelled`) không bao giờ hold — constraint
+`ck_tasks_terminal_not_awaiting_approval`. `transition_to_done` ghi projection
+TRƯỚC khi lật status (tham số `as_status="done"`) vì CHECK chạy ngay trên câu
+UPDATE đặt `status='done'`.
+
+Safety brake không còn gán cờ bên lề: nó ghi `GateRecord(gate_type='safety_brake')`
+**`pending`** khi task đã có `result_ref` (hold suy ra được từ sổ, `approve_gate`
+quyết được — đúng hình dạng escalation đã chuyển sang ở CTV2-1389), và
+`rejected` khi task đi tiếp về `failed` (ở đó mọi gate pending bị reject, và
+`reopen_task` cần một root `rejected` để móc bản ghi reopen vào).
+
+CHỈ `TaskStateMachine.sync_awaiting_approval` được ghi vào hai cột; nó ghi cả
+hai từ cùng một `ApprovalHold` nên chúng không thể lệch nhau. Mọi quyết định
+CHẶN (`check_brakes`, `advance_task`, `_advance_task_step`) gọi thẳng hàm suy
+ra chứ KHÔNG đọc cột — cột lệch chỉ sai một nhịp hiển thị rồi bị ghi đè, không
+khoá task vĩnh viễn được nữa. Đo 2026-08-06 trước khi sửa: 20 task mang cờ,
+4 task (`CTLA-005`, `CTV2-1372`, `VOMA-003`, `VOMA-015`) bị khoá mà không ai
+chờ ai.
+
+`_pending_approvals` (mcp_native) vẫn quét nhánh escalation
+(`kind: "task:escalation"`) qua cột này. `auto_max_rounds` (default 3) round
 changes-requested → status `failed` + escalation "human replan".
 
 ## Brakes (`check_brakes`, task_orchestration ~1580)

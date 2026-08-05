@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.db.models import Project, Task, TaskEvent
+from app.db.models import GateRecord, Project, Task, TaskEvent
 from app.services.command_router import CommandRouter
 
 
@@ -58,16 +58,54 @@ async def test_answer_is_stored_verbatim(db):
 
 @pytest.mark.asyncio
 async def test_answer_does_not_clear_a_real_gate(db):
-    """A genuine gate still needs approve_gate -- no back door."""
-    task = db.get(Task, "Q-1")
-    task.awaiting_approval = True
-    task.approval_prompt = "[dispatch] duyệt executor?"
+    """A genuine gate still needs approve_gate -- no back door.
+
+    The block is an undecided row in the append-only ledger, not a flag set on
+    the task (CTV2-1401), so that is what this test has to build: a hand-set
+    `awaiting_approval` would no longer describe a real hold and answering
+    would rightly clear it.
+    """
+    db.add(
+        GateRecord(
+            task_id="Q-1",
+            gate_type="dispatch",
+            status="pending",
+            actor="chat:test",
+            idempotency_key="gate-1",
+            input_hash="h" * 64,
+            input_payload={"approval_prompt": "[dispatch] duyệt executor?"},
+        )
+    )
     db.commit()
 
     res = await _ask(db, task_id="Q-1", answer="ừ")
     assert res["unblocked"] is False
     assert db.get(Task, "Q-1").awaiting_approval is True
+    assert db.get(Task, "Q-1").approval_prompt == "[dispatch] duyệt executor?"
     assert "approve_gate" in res["note"]
+
+
+@pytest.mark.asyncio
+async def test_answering_leaves_a_gate_that_was_also_waiting(db):
+    """Two holds at once: answering retires only the question it answered."""
+    await _ask(db, task_id="Q-1", question="A hay B?", why_human="tiêu tiền thật")
+    db.add(
+        GateRecord(
+            task_id="Q-1",
+            gate_type="dispatch",
+            status="pending",
+            actor="chat:test",
+            idempotency_key="gate-2",
+            input_hash="h" * 64,
+            input_payload={"approval_prompt": "[dispatch] duyệt executor?"},
+        )
+    )
+    db.commit()
+
+    res = await _ask(db, task_id="Q-1", answer="Chọn B")
+    assert res["unblocked"] is False
+    assert db.get(Task, "Q-1").awaiting_approval is True
+    assert db.get(Task, "Q-1").approval_prompt == "[dispatch] duyệt executor?"
 
 
 @pytest.mark.asyncio

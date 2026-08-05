@@ -19,12 +19,13 @@ from app.db.models import (
     TaskDependency,
     TaskEvent,
 )
+from app.services.approval_hold import derive_approval_hold
 from app.services.archive import ArchiveError, ArchiveService
 from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
 )
-from app.services.task_state_machine import find_active_plan_run
+from app.services.task_state_machine import TaskStateMachine, find_active_plan_run
 from app.services.task_validators import TaskValidator, TransitionConflictError
 
 logger = logging.getLogger(__name__)
@@ -828,13 +829,13 @@ class TaskHandlersMixin:
 
         # Label the task as waiting on a HUMAN, not on a machine, so the
         # coordinator does not mistake the silence for a hang (spec
-        # e6ee1eb0 / 017d9cd4). Reuses `awaiting_approval` +
-        # `approval_prompt`, the same projection that already means
-        # "workflow_state == waiting_human" for gates -- skip terminal
-        # tasks, whose `awaiting_approval` is constrained to False.
-        if task is not None and task.status not in ('done', 'cancelled'):
-            task.awaiting_approval = True
-            task.approval_prompt = f"[human_question] {question}"
+        # e6ee1eb0 / 017d9cd4). The `human_question` event emitted just above
+        # IS the evidence -- since CTV2-1401 the projection is derived from
+        # it, not asserted here, so the two can never disagree. Terminal tasks
+        # derive no hold at all (constraint
+        # ck_tasks_terminal_not_awaiting_approval).
+        if task is not None:
+            TaskStateMachine(self.db).sync_awaiting_approval(task)
             self.db.add(task)
 
         self.db.commit()
@@ -867,6 +868,11 @@ class TaskHandlersMixin:
 
         from app.services.task_event_service import emit_task_event
 
+        # Read the hold BEFORE the answer event exists -- afterwards the
+        # question is retired by definition and there would be nothing left to
+        # compare against.
+        hold_before = derive_approval_hold(self.db, task)
+
         event = emit_task_event(
             task_id=task_id,
             event_type='human_answer',
@@ -878,17 +884,18 @@ class TaskHandlersMixin:
             kind='info',
         )
 
-        was_waiting = bool(task.awaiting_approval)
-        prompt = task.approval_prompt or ''
         # Only clear a block this tool put there. A real gate awaiting a
-        # decision must still be decided through approve_gate.
-        if was_waiting and prompt.startswith('[human_question]'):
-            task.awaiting_approval = False
-            task.approval_prompt = None
-            self.db.add(task)
-            cleared = True
-        else:
-            cleared = False
+        # decision must still be decided through approve_gate -- and since
+        # CTV2-1401 that is structural rather than a string match on the
+        # prompt: the `human_answer` event retires the `human_question` hold,
+        # and re-deriving falls through to whatever other hold still stands.
+        TaskStateMachine(self.db).sync_awaiting_approval(task)
+        self.db.add(task)
+        cleared = (
+            hold_before is not None
+            and hold_before.source == 'human_question'
+            and not task.awaiting_approval
+        )
 
         self.db.commit()
         return {

@@ -31,6 +31,7 @@ from app.db.models import (
     Task,
     TaskDependency,
 )
+from app.services.approval_hold import derive_approval_hold
 from app.services.review_criteria import merged_review_criteria
 
 logger = logging.getLogger(__name__)
@@ -273,8 +274,22 @@ class TaskValidator:
         pending_deps = [d for d in deps if d.status not in {"done", "failed"}]
         if task.status in {"done", "cancelled"}:
             decision = BrakeDecision(False, f"Task is terminal: {task.status}", "terminal", observations=observations)
-        elif task.awaiting_approval:
-            decision = BrakeDecision(False, "Task has a pending gate", "pending_gate", observations=observations)
+        elif (hold := derive_approval_hold(self.db, task)) is not None:
+            # Derived, not read off `task.awaiting_approval` (CTV2-1401): a
+            # stored flag that had drifted off the ledger used to stop every
+            # run forever, with no tool able to clear it.  The reason names
+            # which hold it is, so the caller knows which tool resolves it.
+            reason = (
+                "Task has a pending gate"
+                if hold.source == "gate"
+                else f"Task is waiting on a human ({hold.source})"
+            )
+            decision = BrakeDecision(
+                False,
+                f"{reason}: {hold.prompt}",
+                "pending_gate",
+                observations=observations,
+            )
         elif pending_deps:
             dep_ids_str = ", ".join(str(d.id) for d in pending_deps[:3])
             decision = BrakeDecision(False, f"Waiting for dependencies: {dep_ids_str}", "dependency_pending", queue=True, observations=observations)
@@ -360,8 +375,6 @@ class TaskValidator:
             if not delivered:
                 TaskStateMachine(self.db).cas_status(task, "failed")
             task.error = decision.reason
-            task.awaiting_approval = True
-            task.approval_prompt = f"Escalated by safety brake: {decision.reason}"
             payload = {
                 "code": decision.code,
                 "reason": decision.reason,
@@ -371,10 +384,26 @@ class TaskValidator:
                 "task_status": task.status,
             }
             inp_hash = self.input_hash(payload)
+            # `pending` when a result survives, `rejected` when the task is on
+            # its way to `failed` (CTV2-1401).
+            #
+            # The brake used to assert `awaiting_approval` on the side and
+            # write a `rejected` record.  That flag was the only thing holding
+            # a delivered-but-braked task, and nothing could lower it:
+            # `approve_gate` answers "No pending gate found" for a rejected
+            # root.  Written as `pending`, the same hold is derived from the
+            # ledger, shows up in `pending_approvals`, and a human can
+            # actually decide it -- the shape escalations already moved to in
+            # CTV2-1389.
+            #
+            # The undelivered branch keeps `rejected`: that task becomes
+            # terminal three lines below, where every pending gate is rejected
+            # anyway, and `reopen_task` looks for a rejected root to hang the
+            # reopen record off.
             record = GateRecord(
                 task_id=task.id,
                 gate_type="safety_brake",
-                status="rejected",
+                status="pending" if delivered else "rejected",
                 actor="system:safety-brake",
                 mode=task.mode,
                 idempotency_key=str(uuid.uuid4()),
@@ -392,6 +421,8 @@ class TaskValidator:
                 state_machine._reject_all_pending_gates(
                     task, f"Task reached terminal state: {task.status}"
                 )
+            else:
+                TaskStateMachine(self.db).sync_awaiting_approval(task)
             self.db.add(
                 AuditLog(
                     task_id=task.id,

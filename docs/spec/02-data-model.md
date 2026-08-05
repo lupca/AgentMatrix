@@ -30,7 +30,11 @@ Cột đáng chú ý:
   bằng git. Task không commit thì KHÔNG có đường done (gap CTV2-235).
 - `verdict`/`final_verdict`: chỉ được set qua verdict gate từ review run thật;
   trigger DB `trg_tasks_done_verdict` đòi verdict='pass' khi done.
-- `awaiting_approval` + `approval_prompt`: cờ escalation/gate chờ human.
+- `awaiting_approval` + `approval_prompt`: **projection SUY RA**, không phải cờ
+  ai cũng gán được (CTV2-1401). Nguồn duy nhất:
+  `derive_approval_hold(db, task)` trong `app/services/approval_hold.py`; nơi
+  duy nhất được ghi vào hai cột này: `TaskStateMachine.sync_awaiting_approval`.
+  Chi tiết 5 nguồn chờ ở `03-gates-and-autonomy.md#escalation`.
 - `spec_clarity` (`high|medium|low`, nullable cho task legacy) + `open_questions`
   (JSON, nullable): câu hỏi còn phần tử chặn execute-dispatch cho tới khi
   coordinator cập nhật `raw_input` và regenerate.
