@@ -252,30 +252,72 @@ def advance_task(task_id: str, trigger: str) -> str:
         db.close()
 
 
-# Rounds that were never allowed to try.  A round blocked by a pending gate,
-# or one that did nothing but raise the escalation itself, says nothing about
-# whether the task can progress -- counting them turns the guard into a loop:
-# escalate -> a human approves -> the driver runs again, sees the blocked
-# rounds it just caused, and escalates on the spot.  CTV2-1389 went round that
-# loop twice on 2026-08-05 with a finished, critic-accepted plan in hand.
-_NOT_EVIDENCE_OF_STALL = {"gate_pending", "escalated_stall"}
+# Rounds that were never allowed to try.  A round blocked by a pending gate
+# says nothing about whether the task can progress -- counting it turns the
+# guard into a loop: escalate -> a human approves -> the driver runs again,
+# sees the blocked rounds it just caused, and escalates on the spot.
+# CTV2-1389 went round that loop twice on 2026-08-05 with a finished,
+# critic-accepted plan in hand.
+_NOT_EVIDENCE_OF_STALL = {"gate_pending"}
+
+#: An outcome that already rang the bell for a human.  Every `_escalate` call
+#: site names its outcome `escalated_*`; the stall guard treats that name as a
+#: boundary, so the prefix is load-bearing, not decorative.
+_ESCALATED_OUTCOME_PREFIX = "escalated"
+
+#: How far back to look for the boundary.  Only `gate_pending` rounds sit
+#: between the escalation and the human's decision, and there are rarely many
+#: -- but a task that got poked a lot while waiting must not push the boundary
+#: out of view, because losing it means falling back to ancient evidence.
+_STALL_SCAN_LIMIT = 200
+
+
+def _rounds_since_last_escalation(db: Session, task_id: str) -> list[AuditLog]:
+    """The driver rounds that happened *after* the last time a human was told.
+
+    Rounds older than the most recent escalation are not evidence about now.
+    A human has already seen them, acted on the reason they carried, and
+    approved the escalation gate that reported them; re-counting them means no
+    human action can ever clear the counter.
+
+    That is not hypothetical.  Measured 2026-08-06 on UIKI-012 (audit_log
+    5288/5330/5338): three genuinely stalled rounds -- missing AC, waiting on
+    the plan critic, a dispatch error -- from 21:27-21:33.  All three causes
+    were fixed afterwards, yet the three rows stayed frozen at the top of the
+    window forever, because the escalation rounds they produced were skipped
+    as non-evidence and the `gate_pending` rounds were skipped too.  So every
+    later round read the same three-round history and escalated again:
+    21:33, 21:58, and 22:26 -- the last one **one second** after a human
+    approved the previous escalation.  Approving the alarm re-armed it.
+
+    Cutting the window at the last escalation makes the guard measure what it
+    claims to measure: "since I last asked for help, has anything moved?"
+    """
+    rounds: list[AuditLog] = []
+    for entry in (
+        db.query(AuditLog)
+        .filter(AuditLog.task_id == task_id, AuditLog.action.like("advance_task:%"))
+        .order_by(AuditLog.id.desc())
+        .limit(_STALL_SCAN_LIMIT)
+        .all()
+    ):
+        if not isinstance(entry.details, dict):
+            continue
+        outcome = entry.details.get("outcome")
+        if isinstance(outcome, str) and outcome.startswith(_ESCALATED_OUTCOME_PREFIX):
+            break
+        if outcome in _NOT_EVIDENCE_OF_STALL:
+            continue
+        rounds.append(entry)
+        if len(rounds) >= AUTO_MAX_ROUNDS:
+            break
+    return rounds
 
 
 def _advance_task_stalled(db: Session, task_id: str, current_status: str) -> bool:
     if current_status not in _ACTIONABLE_STATUSES:
         return False
-    recent = [
-        entry
-        for entry in (
-            db.query(AuditLog)
-            .filter(AuditLog.task_id == task_id, AuditLog.action.like("advance_task:%"))
-            .order_by(AuditLog.id.desc())
-            .limit(AUTO_MAX_ROUNDS * 4)
-            .all()
-        )
-        if isinstance(entry.details, dict)
-        and entry.details.get("outcome") not in _NOT_EVIDENCE_OF_STALL
-    ][:AUTO_MAX_ROUNDS]
+    recent = _rounds_since_last_escalation(db, task_id)
     if len(recent) < AUTO_MAX_ROUNDS:
         return False
     return all(

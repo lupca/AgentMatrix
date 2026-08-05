@@ -264,6 +264,35 @@ pending gate") → `approve_gate` gặp `awaiting-review != todo` →
 thoát. Đo 2026-08-06: 7 task (`UIKI-001/003/004/005/006/008/010`), mỗi cái đã có
 commit thật, đều kẹt đúng ở đây.
 
+### Cửa sổ đo "no progress" bắt đầu LẠI sau mỗi escalation (CTV2-1409)
+
+`advance_task` có phanh chống lặp riêng: `AUTO_MAX_ROUNDS` (3) vòng liên tiếp
+không đổi status → escalate "made no progress". Câu hỏi nó ĐỊNH hỏi là *"kể từ
+lần tôi kêu human gần nhất, có gì nhúc nhích không?"* — nên cửa sổ đếm cắt tại
+vòng escalate gần nhất (`_rounds_since_last_escalation`, agent_runner.py). Vòng
+cũ hơn không phải bằng chứng về HIỆN TẠI: human đã nhìn chúng, đã sửa nguyên
+nhân, và đã duyệt đúng cái gate báo cáo chúng.
+
+Không cắt thì phanh tự khoá vĩnh viễn: vòng `escalated_*` bị bỏ qua (không phải
+bằng chứng), vòng `gate_pending` cũng bị bỏ qua, nên **đúng 3 vòng kẹt đầu tiên
+đóng băng ở đầu cửa sổ mãi mãi** và mọi vòng sau đều đọc lại chúng rồi escalate.
+Đo 2026-08-06 trên `UIKI-012` (audit_log 5288/5330/5338): ba vòng kẹt thật lúc
+21:27–21:33 (thiếu AC → chờ plan critic → dispatch error), cả ba nguyên nhân đã
+được sửa xong, vậy mà escalation vẫn mọc lại lúc 21:33, 21:58 và 22:26 — lần
+cuối **đúng 1 giây sau khi human duyệt escalation trước đó**. Duyệt chuông báo
+động chính là lên dây cót lại nó.
+
+Vì thế tên outcome `escalated_*` là **load-bearing**: mọi call site của
+`_escalate` phải trả outcome bắt đầu bằng `escalated`, nếu không phanh mất mốc
+cắt. Chỉ `gate_pending` còn nằm trong `_NOT_EVIDENCE_OF_STALL`.
+
+Lưu ý hai đường đánh giá KHÁC NHAU và đều đúng phần của mình:
+`get_status.available_actions` hỏi *"luật có cho dispatch bây giờ không"* (đọc
+status + gate), còn phanh này hỏi *"lịch sử driver có tiến không"*. Trước
+CTV2-1409, `available_actions` nói `dispatch_task` khả dụng trong khi driver
+escalate — không mâu thuẫn, chỉ là phanh trả lời một câu hỏi về QUÁ KHỨ mà không
+hành động nào của human xoá được.
+
 ## Brakes (`check_brakes`, task_orchestration ~1580)
 
 Thứ tự kiểm tra: dependencies pending → `autonomy_enabled=false` STOP →

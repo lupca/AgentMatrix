@@ -1474,6 +1474,92 @@ def test_advance_task_stalled_actionable_status_escalates_instead_of_looping(dri
     run_agent_mock.send.assert_not_called()
 
 
+def _approve_open_escalation(factory, task_id):
+    """Do what a human does at the escalation gate, through the real path."""
+    from app.services.task_orchestration import TaskOrchestrationService
+
+    db = factory()
+    pending = (
+        db.query(GateRecord)
+        .filter(
+            GateRecord.task_id == task_id,
+            GateRecord.gate_type == "escalation",
+            GateRecord.status == "pending",
+        )
+        .order_by(GateRecord.id.desc())
+        .first()
+    )
+    assert pending is not None, "expected an open escalation gate"
+    TaskOrchestrationService(db).decide_gate(
+        gate_record_id=pending.id,
+        decision="approved",
+        actor="human",
+        idempotency_key=f"test-approve-{pending.id}",
+    )
+    db.commit()
+    db.close()
+
+
+def test_approving_a_stall_escalation_does_not_immediately_regrow_it(driver_db):
+    """CTV2-1409 / UIKI-012: approving the alarm used to re-arm it in a second.
+
+    The stall window skipped both the escalation rounds and the `gate_pending`
+    rounds, so the three stalled rounds that caused the *first* escalation
+    stayed frozen at the top of it forever.  Every later round -- including the
+    one the human's approval triggered -- read that same history and escalated
+    again, one second after the approval.
+    """
+    factory, run_agent_mock = driver_db
+    _driver_task(
+        factory,
+        "ADV-RELOOP",
+        status="awaiting-review",
+        executor="@executor",
+        acceptance_criteria=["Tests pass"],
+        result_ref=None,
+    )
+
+    for _ in range(runner.AUTO_MAX_ROUNDS):
+        assert runner.advance_task.fn("ADV-RELOOP", "manual") == "waiting_result_ref"
+    assert runner.advance_task.fn("ADV-RELOOP", "manual") == "escalated_stall"
+    # While the gate is open the driver just waits -- it must not escalate.
+    assert runner.advance_task.fn("ADV-RELOOP", "manual") == "gate_pending"
+
+    _approve_open_escalation(factory, "ADV-RELOOP")
+
+    outcome = runner.advance_task.fn("ADV-RELOOP", "gate_approved")
+
+    # It may still be unable to move -- but it must say the real reason, not
+    # re-raise the escalation the human just cleared.
+    assert outcome == "waiting_result_ref"
+    run_agent_mock.send.assert_not_called()
+
+
+def test_stall_window_ignores_rounds_a_human_has_already_been_shown(driver_db):
+    """The UIKI-012 shape end to end: stall, fix the cause, then dispatch.
+
+    Three genuinely stalled rounds happened (missing acceptance criteria).
+    A human then fixed the cause and approved the escalation.  The next round
+    must act on the task as it is *now*, not on evidence that predates the fix.
+    """
+    factory, run_agent_mock = driver_db
+    _driver_task(factory, "ADV-CLEARED", status="todo", executor="@executor")
+
+    for _ in range(runner.AUTO_MAX_ROUNDS):
+        assert runner.advance_task.fn("ADV-CLEARED", "manual") == "escalated_missing_ac"
+        _approve_open_escalation(factory, "ADV-CLEARED")
+
+    db = factory()
+    db.get(Task, "ADV-CLEARED").acceptance_criteria = ["Tests pass"]
+    db.commit()
+    db.close()
+
+    outcome = runner.advance_task.fn("ADV-CLEARED", "gate_approved")
+
+    assert outcome == "dispatched"
+    run_agent_mock.send.assert_called_once()
+
+
 def test_advance_task_dispatch_idempotency_key_prevents_duplicate_run(driver_db):
     factory, run_agent_mock = driver_db
     _driver_task(factory, "ADV-014", acceptance_criteria=["Tests pass"])
