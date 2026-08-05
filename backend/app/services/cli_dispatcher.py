@@ -245,12 +245,21 @@ class CLIDispatcher:
         prompt: str,
         effort: str | None = None,
         cwd: str | None = None,
+        on_start: Callable[[int], None] | None = None,
     ) -> AsyncIterator[str]:
         """Spawn a CLI and yield stdout chunks until it exits.
 
         ``ProcessManager`` is intentionally synchronous because it is shared
         with the worker process.  Its generator runs in a thread while this
         async generator forwards each output item to the event loop.
+
+        ``on_start``, if given, is invoked with the child PID once the
+        process has been spawned -- routed through the same
+        thread-safe ``publish`` used for output/result so the callback runs
+        back on the event-loop thread (``ProcessManager.on_start`` itself
+        fires from the ``run_process`` background thread, and callers such as
+        ``spec_plan_generator`` use this to persist the PID on a SQLAlchemy
+        session that must not be touched from a second thread).
         """
 
         effective_cwd = cwd or self.working_directory
@@ -276,6 +285,8 @@ class CLIDispatcher:
         def publish(kind: str, value: object) -> None:
             loop.call_soon_threadsafe(events.put_nowait, (kind, value))
 
+        process_manager.on_start = lambda pid: publish("pid", pid)
+
         def run_process() -> None:
             try:
                 stream: Iterable[str | ProcessResult] = process_manager.run_with_streaming(
@@ -300,6 +311,9 @@ class CLIDispatcher:
                 if kind == "output":
                     output = str(value)
                     yield output if output.endswith(("\n", "\r")) else f"{output}\n"
+                elif kind == "pid":
+                    if on_start is not None:
+                        on_start(int(value))
                 elif kind == "result":
                     result = value
                     if isinstance(result, ProcessResult) and result.status != ProcessStatus.COMPLETED:

@@ -73,33 +73,55 @@ def _begin_llm_run(
     prompt: str,
     *,
     kind: str,
+    run: AgentRun | None = None,
 ) -> AgentRun | None:
-    """Create a local, non-dispatch AgentRun for a planner/critic request.
+    """Create (or reuse) the AgentRun tracking one planner/critic LLM attempt.
 
-    Planner calls are synchronous service work, not task dispatches, so they
-    do not go through the dispatch outbox or a worker. Reusing the existing
-    execute/review kinds keeps the no-migration schema contract intact while
-    still making every request and its token estimate queryable.
+    CTV2-1382: planner/critic calls now run inside the Dramatiq worker,
+    dispatched through the same transactional outbox as every other run (see
+    ``app.workers.plan_executor``). ``run``, when given, is that
+    already-queued-and-claimed AgentRun -- reuse it for this attempt instead
+    of inserting a new row, so the row a caller dispatched through the outbox
+    is the same row that ends up carrying ``pid``/``started_at``. Retry
+    attempts (schema-invalid JSON, handled by the caller's retry loop) still
+    get their own fresh row, same as before this change, so LLMUsage
+    attribution per attempt is unaffected.
+
+    Reusing the existing execute/review kinds keeps the no-migration schema
+    contract intact while still making every request and its token estimate
+    queryable.
     """
     if db is None:
         return None
     cli = _agent_cli(agent)
     model = str(getattr(agent, "model", "") or "")
+    command = build_cli_command(
+        cli,
+        model,
+        prompt,
+        effort=getattr(agent, "effort", None),
+        timeout_seconds=settings.RUN_TIMEOUT_SECONDS,
+    )
+    now = datetime.now(timezone.utc)
+    if run is not None:
+        run.command = command
+        run.cli = cli
+        run.status = "running"
+        run.started_at = run.started_at or now
+        run.completed_at = None
+        run.error_message = None
+        db.commit()
+        return run
     run = AgentRun(
         id=str(uuid.uuid4()),
         task_id=task.id,
         agent_id=str(agent.id),
         cli=cli,
-        command=build_cli_command(
-            cli,
-            model,
-            prompt,
-            effort=getattr(agent, "effort", None),
-            timeout_seconds=settings.RUN_TIMEOUT_SECONDS,
-        ),
+        command=command,
         kind=kind,
         agent_role="reviewer" if kind == "review" else "executor",
         status="running",
+        started_at=now,
         timeout_seconds=settings.RUN_TIMEOUT_SECONDS,
         max_attempts=1,
         idempotency_key=f"planner:{task.id}:{kind}:{uuid.uuid4().hex[:16]}",
@@ -122,6 +144,27 @@ def _begin_llm_run(
     # _finish_llm_run commits its terminal state separately.
     db.commit()
     return run
+
+
+def _pid_recorder(db, run: AgentRun | None):
+    """Build an ``on_start`` callback that persists the spawned CLI's PID.
+
+    Called back on the event-loop thread (see ``CLIDispatcher.spawn``), so
+    touching ``db``/``run`` here is safe even though the subprocess itself
+    was launched from a worker thread.
+    """
+    if db is None or run is None:
+        return None
+
+    def on_start(pid: int) -> None:
+        try:
+            run.pid = pid
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.warning("Could not record pid for run %s", run.id, exc_info=True)
+
+    return on_start
 
 
 def _finish_llm_run(
@@ -161,6 +204,7 @@ def _finish_llm_run(
     run.status = "failed" if error else "success"
     run.error_message = error
     run.exit_code = 1 if error else 0
+    run.pid = None
     run.completed_at = datetime.now(timezone.utc)
     # Commit for the same reason as _begin_llm_run: the planner path runs a
     # second LLM call (the critic) right after this one, so a transaction left
@@ -415,6 +459,7 @@ async def generate_spec_plan(
     agent: Agent,
     project_context: str | None = None,
     db=None,
+    run: AgentRun | None = None,
 ) -> tuple[SpecPlanResult, list[str]]:
     """Call the LLM once (with one retry on schema mismatch) and ground its
     file claims and flows in the code graph. Returns (result, flows).
@@ -422,6 +467,11 @@ async def generate_spec_plan(
     ``agent`` is the resolved ``Agent`` to run generation with. There is
     deliberately no environment fallback: callers must resolve an agent
     (e.g. via ``AgentSuggester``) before calling this.
+
+    ``run``, if given, is an already-queued-and-claimed AgentRun (dispatched
+    through the outbox by the caller) to reuse for the *first* LLM attempt --
+    see ``_begin_llm_run``. A schema-invalid retry still gets its own fresh
+    row, matching prior behavior.
     """
     if agent is None:
         raise ConfigurationError(
@@ -475,7 +525,7 @@ async def generate_spec_plan(
     result: SpecPlanResult | None = None
     last_error: Exception | None = None
 
-    for _ in range(_MAX_ATTEMPTS):
+    for attempt_index in range(_MAX_ATTEMPTS):
         prompt = _build_prompt(
             task,
             graph_candidates,
@@ -483,7 +533,10 @@ async def generate_spec_plan(
             project_context=project_context,
             graph_warning=graph_warning,
         )
-        run = _begin_llm_run(db, task, agent, prompt, kind="execute")
+        attempt_run = _begin_llm_run(
+            db, task, agent, prompt, kind="execute",
+            run=run if attempt_index == 0 else None,
+        )
         started = time.monotonic()
         response = None
         try:
@@ -495,25 +548,26 @@ async def generate_spec_plan(
                 max_tokens=4096,
                 temperature=0.3,
                 cwd=repo_root,
+                on_start=_pid_recorder(db, attempt_run),
             )
         except Exception as exc:
             _finish_llm_run(
-                db, run, None, started=started, operation="plan", error=str(exc)
+                db, attempt_run, None, started=started, operation="plan", error=str(exc)
             )
             raise
         content = response.text
         try:
             parsed = _parse_json(content)
             result = SpecPlanResult.model_validate(parsed)
-            _finish_llm_run(db, run, response, started=started, operation="plan")
+            _finish_llm_run(db, attempt_run, response, started=started, operation="plan")
             last_error = None
             break
         except (json.JSONDecodeError, ValidationError) as exc:
             detail = _describe_parse_failure(
-                exc, content, run_id=getattr(run, "id", None)
+                exc, content, run_id=getattr(attempt_run, "id", None)
             )
             _finish_llm_run(
-                db, run, response, started=started, operation="plan", error=detail
+                db, attempt_run, response, started=started, operation="plan", error=detail
             )
             last_error = exc
             # The retry prompt keeps the plain message: the diagnostics are for
@@ -659,8 +713,13 @@ async def criticize_spec_plan(
     critic_agent: Agent,
     project_context: str | None = None,
     db=None,
+    run: AgentRun | None = None,
 ) -> tuple[PlanCriticResult, int]:
-    """Run one independent, focused critic after planning and before dispatch."""
+    """Run one independent, focused critic after planning and before dispatch.
+
+    ``run``, if given, is an already-queued-and-claimed AgentRun to reuse for
+    the first attempt -- see ``generate_spec_plan`` for the same pattern.
+    """
 
     if critic_agent is None:
         raise ConfigurationError("Plan criticism requires an explicitly configured critic.")
@@ -682,7 +741,7 @@ async def criticize_spec_plan(
     retry_reason: str | None = None
     last_error: Exception | None = None
     spent_tokens = 0
-    for _ in range(_MAX_ATTEMPTS):
+    for attempt_index in range(_MAX_ATTEMPTS):
         prompt = _build_critic_prompt(
             task,
             plan,
@@ -695,7 +754,10 @@ async def criticize_spec_plan(
             raise PlanCriticError(
                 f"Plan critic input exceeds the {PLAN_CRITIC_TOKEN_BUDGET}-token budget"
             )
-        run = _begin_llm_run(db, task, critic_agent, prompt, kind="review")
+        attempt_run = _begin_llm_run(
+            db, task, critic_agent, prompt, kind="review",
+            run=run if attempt_index == 0 else None,
+        )
         started = time.monotonic()
         response = None
         try:
@@ -705,10 +767,11 @@ async def criticize_spec_plan(
                 max_tokens=min(_PLAN_CRITIC_MAX_OUTPUT_TOKENS, remaining),
                 temperature=0.1,
                 cwd=repo_root,
+                on_start=_pid_recorder(db, attempt_run),
             )
         except Exception as exc:
             _finish_llm_run(
-                db, run, None, started=started, operation="plan_critic", error=str(exc)
+                db, attempt_run, None, started=started, operation="plan_critic", error=str(exc)
             )
             raise
         attempt_tokens = input_tokens + _estimate_tokens(response.text)
@@ -716,7 +779,7 @@ async def criticize_spec_plan(
         if spent_tokens > PLAN_CRITIC_TOKEN_BUDGET:
             _finish_llm_run(
                 db,
-                run,
+                attempt_run,
                 response,
                 started=started,
                 operation="plan_critic",
@@ -730,18 +793,18 @@ async def criticize_spec_plan(
         try:
             result = PlanCriticResult.model_validate(_parse_json(response.text))
             _finish_llm_run(
-                db, run, response, started=started, operation="plan_critic"
+                db, attempt_run, response, started=started, operation="plan_critic"
             )
             return result, spent_tokens
         except (json.JSONDecodeError, ValidationError) as exc:
             _finish_llm_run(
                 db,
-                run,
+                attempt_run,
                 response,
                 started=started,
                 operation="plan_critic",
                 error=_describe_parse_failure(
-                    exc, response.text, run_id=getattr(run, "id", None)
+                    exc, response.text, run_id=getattr(attempt_run, "id", None)
                 ),
             )
             last_error = exc

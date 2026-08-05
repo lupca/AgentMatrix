@@ -84,6 +84,50 @@ Không có transaction dài xuyên suốt hai lệnh gọi LLM nữa — mỗi b
 riêng, nên một critic bị treo/timeout không còn giữ khoá DB xuyên suốt lượt
 planner + critic như trước.
 
+### Planner/critic đi qua outbox + worker, không còn chạy trong MCP server (CTV2-1382)
+
+CTV2-1378 đưa plan/critic thành hai bước nối qua DB nhưng cả hai vẫn `await`
+đồng bộ **trong tiến trình MCP server**: mỗi `AgentRun` do
+`spec_plan_generator._begin_llm_run` tạo (`idempotency_key LIKE 'planner:%'`)
+không có `pid`/`started_at` — CLI con là con trực tiếp của PID MCP server, và
+client phải đợi 170-420s một lần gọi. CTV2-1382 chuyển việc CHẠY (không phải
+việc build prompt) sang đúng cơ chế dùng cho mọi run khác:
+
+1. `_handle_generate_spec_plan` build placeholder `AgentRun` (kind=`execute`,
+   `idempotency_key = planner:<task_id>:plan:<uuid>`, status=`queued`), ghi
+   `OutboxEvent(event_type='run_requested')` qua `record_run_requested` +
+   commit, gọi `run_agent.send()` (fast path), rồi CHỜ tối đa **30 giây**
+   (poll DB, không giữ transaction).
+2. Dramatiq actor `run_agent` (`app.workers.cli_executor.execute_agent_run`)
+   nhận diện run này qua `plan_executor.is_plan_run` (prefix
+   `idempotency_key`) và rẽ sang `plan_executor.execute_plan_run` thay vì
+   luồng worktree/git-diff — planner không tạo worktree, không có diff.
+   `generate_spec_plan()`/`criticize_spec_plan()` chạy KHÔNG ĐỔI logic bên
+   trong (`asyncio.run()` trong worker), chỉ khác nơi chạy; `on_start` được
+   nối xuyên `LLMService → CLIProvider → CLIDispatcher.spawn → ProcessManager`
+   để ghi `pid` thật của tiến trình CLI ngay khi spawn.
+3. Plan xong (`write_spec_plan` commit) → worker TỰ dispatch bước critic
+   (`plan_executor.create_critic_run`, cùng cơ chế outbox) — client không
+   phải gọi lại. Chọn critic: nếu `critic_id` được truyền tường minh, giữ
+   nguyên qua một `TaskEvent(event_type='spec_plan_dispatch_context')`; nếu
+   không, worker tự chọn lại (`AgentSuggester role=reviewer`) tại thời điểm
+   dispatch critic — mới hơn, không lệ thuộc snapshot lúc gọi ban đầu.
+4. Nếu cả hai bước xong trong 30s: `generate_spec_plan` trả nguyên payload
+   `SpecPlanResult` như trước (không đổi hợp đồng cho client cũ). Nếu không,
+   trả handle `{run_id, task_id, status, next: 'wait_for_task', latest_run}`
+   — gọi tiếp `wait_for_task` để lấy kết quả khi worker xong.
+
+Vì `Task.status` không đổi trong suốt lúc lập plan (giữ `todo`), một
+`AgentRun` planner/critic KHÔNG BAO GIỜ được xử lý lỗi qua
+`TaskOrchestrationService.record_execution_failure`/`record_review_failure`/
+`record_dispatch_queue_failure` (các hàm này CAS `Task.status` từ
+`dispatched`/`in-review`, luôn ném lỗi với task `todo`). Runner chết giữa
+chừng (kill CLI, restart backend, outbox dead-letter) chỉ đánh dấu MỖI
+`AgentRun` là `failed` cục bộ — `outbox.py:_reap_run`, `outbox.py:_dead_letter`,
+`agent_runner.py:run_agent_dead_letter`, và `cli_executor.py:
+_record_unexpected_failure` đều rẽ nhánh qua `plan_executor.is_plan_run`
+trước khi gọi các hàm CAS task ở trên.
+
 **Landing (CTV2-238): done = code ĐÃ ở main.** Khi verdict gate approve với
 pass, HỆ THỐNG (git subprocess thuần trong `services/landing.py` — không LLM,
 không coordinator) merge `--no-ff` head của result_ref vào branch đang

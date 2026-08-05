@@ -111,6 +111,7 @@ class CLIProvider:
         max_tokens: int = 2048,
         temperature: float = 0.7,
         tools: list[dict[str, Any]] | None = None,
+        on_start: Any = None,
     ) -> ProviderResponse:
         # ``max_tokens`` is an API transport parameter. Subscription CLIs do
         # not expose a portable equivalent; their native timeout is applied
@@ -136,6 +137,8 @@ class CLIProvider:
             spawn_kwargs: dict[str, Any] = {"effort": effort}
             if cwd is not None:
                 spawn_kwargs["cwd"] = cwd
+            if on_start is not None:
+                spawn_kwargs["on_start"] = on_start
             async for chunk in self.dispatcher.spawn(
                 selected_cli, model, prompt, **spawn_kwargs
             ):
