@@ -26,7 +26,38 @@ from pathlib import PurePosixPath
 
 from sqlalchemy.orm import Session
 
-from app.db.models import SpecAnchor, SpecItem, SpecTaskLink, Task
+from app.db.models import Project, SpecAnchor, SpecItem, SpecTaskLink, Task
+
+
+def resolve_repo_root(db: Session | None, repo: str) -> str:
+    """Turn an anchor's ``repo`` value into a directory that can be read.
+
+    ``SpecAnchor.repo`` holds a *project id* ("agenticmatix"), but every reader
+    passed it straight to ``open()`` as if it were a path. Nothing ever resolved
+    it, so the whole anchoring mechanism was inert in both directions:
+
+      * writing  — ``compute_anchor_sha`` always returned None, so ``spec_write``
+        fell through to the agent-supplied ``anchor_sha``. That fallback is how
+        283 anchors ended up holding 40-char commit SHAs: agents had no other
+        option, whatever the tool description and the prompt claimed.
+      * reading  — ``apply_commit_staleness`` filters ``SpecAnchor.repo ==
+        repo_root``, comparing a project id against an absolute path. It matched
+        nothing, every time. Across 862 anchors and hundreds of commits, not one
+        spec_item was ever marked stale.
+
+    Accepts either form: an existing directory is returned unchanged, so callers
+    that already hold a real ``repo_root`` (``apply_commit_staleness``) keep
+    working, and so do tests that pass a tmp_path.
+    """
+    if not repo:
+        return repo
+    if os.path.isdir(repo):
+        return repo
+    if db is None:
+        return repo
+    project = db.get(Project, repo)
+    root = (getattr(project, "repo_root", None) or "").strip() if project else ""
+    return root or repo
 
 _GIT_TIMEOUT_SECONDS = 30
 _PYTHON_SUFFIX = ".py"
@@ -342,7 +373,12 @@ def apply_commit_staleness(
         db.query(SpecAnchor)
         .join(SpecItem, SpecAnchor.spec_item_id == SpecItem.id)
         .filter(
-            SpecAnchor.repo == repo_root,
+            # Match on how `repo` is actually stored — a project id — while
+            # still accepting a raw path, since callers and tests use both.
+            # Comparing only against `repo_root` matched nothing: every anchor
+            # holds "agenticmatix", never "/home/.../agenticmatix". That single
+            # mismatch is why no spec_item had ever been marked stale.
+            SpecAnchor.repo.in_({repo_root, project_id}),
             SpecAnchor.path.in_(changed_paths),
             SpecItem.project_id == project_id,
             SpecItem.archived_at.is_(None),

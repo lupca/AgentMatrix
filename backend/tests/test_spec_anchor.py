@@ -282,3 +282,99 @@ def test_outbox_graph_rebuild_event_drives_spec_staleness(db_session, git_repo_r
         publish_pending_events(db_session)
 
     mock_staleness.assert_called_once_with(db_session, "anchor-proj-2", git_repo_root, "deadbeef")
+
+
+# --- The production shape: `repo` is a project id, not a path -----------------
+#
+# Every test above passes `repo=git_repo_root`, an absolute path. Production
+# never does: `SpecAnchor.repo` holds a project id ("agenticmatix"). Because no
+# test used that shape, both halves of the anchoring mechanism were inert for
+# months without a single failure:
+#
+#   writing  — compute_anchor_sha() opened "agenticmatix/mod.py" relative to the
+#              server CWD, got nothing, and returned None. spec_write then fell
+#              through to the agent-supplied anchor_sha. That fallback is how 283
+#              anchors came to hold 40-char commit SHAs.
+#   reading  — apply_commit_staleness filtered `SpecAnchor.repo == repo_root`,
+#              comparing a project id to an absolute path. It matched nothing,
+#              always. Across 862 anchors, no spec_item was ever marked stale.
+
+
+@pytest.fixture
+def anchored_item_by_project_id(db_session, git_repo_root):
+    """Same as `anchored_item`, but anchoring the way production actually does."""
+    db_session.add(Project(id="proj-id-anchor", name="By id", repo_root=git_repo_root))
+    db_session.commit()
+
+    _write_module(git_repo_root, MODULE_V1)
+    _commit(git_repo_root, "add mod.py")
+
+    return write_specs(db_session, [
+        {
+            "op": "create", "id": "spec-by-project-id", "project_id": "proj-id-anchor",
+            "kind": "constraint", "title": "foo returns 1", "body": "foo() must return 1",
+            "status": "active",
+        },
+        {
+            # The project id, NOT the path — this is what every real anchor holds.
+            "op": "anchor", "spec_item_id": "spec-by-project-id", "repo": "proj-id-anchor",
+            "path": "mod.py", "symbol": "foo", "relation": "implements",
+        },
+    ])
+
+
+def test_anchor_by_project_id_is_computed_server_side(
+    anchored_item_by_project_id, db_session, git_repo_root
+):
+    """No anchor_sha was supplied, so a stored value proves the server computed it.
+
+    Before the repo-id resolution this raised "could not resolve symbol", which
+    left the agent-supplied fallback as the only way to write an anchor at all.
+    """
+    written = anchored_item_by_project_id["anchors"][0]
+    assert written["anchor_sha"] == compute_anchor_sha(git_repo_root, "mod.py", "foo")
+
+    row = db_session.query(SpecAnchor).filter_by(spec_item_id="spec-by-project-id").one()
+    assert row.repo == "proj-id-anchor", "the project id must still be what is stored"
+    assert len(row.anchor_sha) == 64
+
+
+def test_staleness_finds_anchors_stored_by_project_id(
+    anchored_item_by_project_id, db_session, git_repo_root
+):
+    """The half that silently found zero anchors on every commit."""
+    _write_module(git_repo_root, MODULE_V2_FOO_CHANGED)
+    head = _commit(git_repo_root, "change foo")
+
+    result = apply_commit_staleness(db_session, "proj-id-anchor", git_repo_root, head)
+
+    assert result["checked"] == 1, "the anchor must be found, not skipped"
+    item = db_session.get(SpecItem, "spec-by-project-id")
+    assert item.status == "stale"
+    assert "foo" in item.stale_reason
+
+
+def test_untouched_symbol_stored_by_project_id_stays_active(
+    anchored_item_by_project_id, db_session, git_repo_root
+):
+    """Finding the anchors must not mean marking everything stale."""
+    _write_module(git_repo_root, MODULE_V3_BAR_CHANGED)
+    head = _commit(git_repo_root, "change bar")
+
+    apply_commit_staleness(db_session, "proj-id-anchor", git_repo_root, head)
+
+    assert db_session.get(SpecItem, "spec-by-project-id").status == "active"
+
+
+def test_resolve_repo_root_accepts_both_forms(db_session, git_repo_root):
+    from app.services.spec_anchor import resolve_repo_root
+
+    db_session.add(Project(id="resolve-proj", name="R", repo_root=git_repo_root))
+    db_session.commit()
+
+    assert resolve_repo_root(db_session, "resolve-proj") == git_repo_root
+    # An existing directory is passed through, so callers holding a real root
+    # (apply_commit_staleness) and the older tests keep working.
+    assert resolve_repo_root(db_session, git_repo_root) == git_repo_root
+    # An unknown id is returned unchanged rather than guessed at.
+    assert resolve_repo_root(db_session, "no-such-project") == "no-such-project"

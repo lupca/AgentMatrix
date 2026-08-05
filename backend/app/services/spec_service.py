@@ -12,7 +12,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 
 from app.db.models import SpecAnchor, SpecItem, SpecRelation, SpecTaskLink, Task
-from app.services.spec_anchor import compute_anchor_sha, is_python_path, source_available
+from app.services.spec_anchor import (
+    compute_anchor_sha,
+    is_python_path,
+    resolve_repo_root,
+    source_available,
+)
 
 
 SPEC_KINDS = {"requirement", "decision", "constraint", "interface", "design"}
@@ -273,7 +278,11 @@ def write_specs(
                 # agent is never trusted when the source is available; the explicit
                 # value is only a compatibility fallback for repos not checked out
                 # on the server, and must be a symbol hash rather than a commit SHA.
-                computed_anchor_sha = compute_anchor_sha(repo, path, symbol)
+                # `repo` is a project id; the readers need a directory.
+                # Without this the computation below silently returned None for
+                # every anchor ever written, forcing the agent-supplied fallback.
+                repo_root = resolve_repo_root(db, repo)
+                computed_anchor_sha = compute_anchor_sha(repo_root, path, symbol)
                 supplied_anchor_sha = _clean_string(operation.get("anchor_sha"), "anchor_sha")
                 if supplied_anchor_sha and not _ANCHOR_SHA_RE.fullmatch(supplied_anchor_sha):
                     raise SpecError(
@@ -283,7 +292,7 @@ def write_specs(
                 if (
                     computed_anchor_sha is None
                     and is_python_path(path)
-                    and source_available(repo, path)
+                    and source_available(repo_root, path)
                 ):
                     raise SpecError(
                         f"could not resolve Python symbol '{symbol}' in {path}; "
