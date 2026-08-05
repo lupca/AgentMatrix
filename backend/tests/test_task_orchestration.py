@@ -16,6 +16,7 @@ from app.db.models import (
     LLMUsage,
     OutboxEvent,
     Project,
+    ReviewCycle,
     Setting,
     SpecAnchor,
     SpecItem,
@@ -174,12 +175,18 @@ def test_integration_branch_moves_only_after_independent_pass_verdict(
 
     review.agent_run.status = "success"
     db_session.commit()
+    review_cycle = (
+        db_session.query(ReviewCycle)
+        .filter(ReviewCycle.reviewer_agent_run_id == review.agent_run.id)
+        .one()
+    )
     verdict = orchestration.request_verdict(
         task_id=task.id,
         verdict="pass",
         ac_results=[{"passed": True, "evidence": "review run completed"}],
         actor="@reviewer",
         idempotency_key="ctv2-225:verdict",
+        review_cycle_id=review_cycle.id,
     )
     assert verdict.task.status == "done"
     assert verdict.task.landed_ref
@@ -408,6 +415,15 @@ def test_terminal_done_rejects_pending_gate(orchestration, db_session):
         ),
     ])
     db_session.commit()
+    review_cycle = ReviewCycle(
+        task_id=task.id,
+        task_round_id=task.current_round_id,
+        reviewer_id="@reviewer",
+        reviewer_agent_run_id="stale-done-review-run",
+        status="submitted",
+    )
+    db_session.add(review_cycle)
+    db_session.commit()
 
     orchestration.request_verdict(
         task_id=task.id,
@@ -415,6 +431,7 @@ def test_terminal_done_rejects_pending_gate(orchestration, db_session):
         ac_results=[{"passed": True}],
         actor="@reviewer",
         idempotency_key="done-terminal-verdict",
+        review_cycle_id=review_cycle.id,
     )
 
     decision = (
@@ -2339,11 +2356,21 @@ def test_verdict_pass_updates_current_round_and_task_projection_fields(
             kind="review",
             agent_role="reviewer",
             status="success",
+            task_round_id=round_id,
         )
     )
     task.status = "in-review"
     task.reviewer = "@reviewer"
     task.result_ref = "base..head"
+    db_session.commit()
+    review_cycle = ReviewCycle(
+        task_id=task.id,
+        task_round_id=round_id,
+        reviewer_id="@reviewer",
+        reviewer_agent_run_id="round-3-review-run",
+        status="submitted",
+    )
+    db_session.add(review_cycle)
     db_session.commit()
 
     result = orchestration.request_verdict(
@@ -2352,6 +2379,7 @@ def test_verdict_pass_updates_current_round_and_task_projection_fields(
         ac_results=[{"passed": True}],
         actor="@reviewer",
         idempotency_key="round-verdict-3",
+        review_cycle_id=review_cycle.id,
     )
 
     assert result.task.status == "done"
@@ -2392,11 +2420,21 @@ def test_verdict_changes_updates_round_without_setting_final_projection(
             kind="review",
             agent_role="reviewer",
             status="success",
+            task_round_id=round_id,
         )
     )
     task.status = "in-review"
     task.reviewer = "@reviewer"
     task.result_ref = "base..head"
+    db_session.commit()
+    review_cycle = ReviewCycle(
+        task_id=task.id,
+        task_round_id=round_id,
+        reviewer_id="@reviewer",
+        reviewer_agent_run_id="round-4-review-run",
+        status="submitted",
+    )
+    db_session.add(review_cycle)
     db_session.commit()
 
     result = orchestration.request_verdict(
@@ -2405,6 +2443,7 @@ def test_verdict_changes_updates_round_without_setting_final_projection(
         ac_results=[{"passed": False}],
         actor="@reviewer",
         idempotency_key="round-verdict-4",
+        review_cycle_id=review_cycle.id,
     )
 
     assert result.task.status == "changes-requested"
@@ -2442,6 +2481,15 @@ def test_verdict_without_a_current_round_does_not_crash(orchestration, db_sessio
         )
     )
     db_session.commit()
+    review_cycle = ReviewCycle(
+        task_id=task.id,
+        task_round_id=None,
+        reviewer_id="@reviewer",
+        reviewer_agent_run_id="round-5-review-run",
+        status="submitted",
+    )
+    db_session.add(review_cycle)
+    db_session.commit()
 
     result = orchestration.request_verdict(
         task_id=task.id,
@@ -2449,6 +2497,7 @@ def test_verdict_without_a_current_round_does_not_crash(orchestration, db_sessio
         ac_results=[{"passed": True}],
         actor="@reviewer",
         idempotency_key="round-verdict-5",
+        review_cycle_id=review_cycle.id,
     )
 
     assert result.task.status == "done"

@@ -13,6 +13,7 @@ from app.db.models import (
     AuditLog,
     GateRecord,
     Project,
+    ReviewCycle,
     Session as SessionModel,
     Task,
     TaskDependency,
@@ -778,6 +779,22 @@ class TaskHandlersMixin:
             findings = review_data.get('findings', [])
         except (json.JSONDecodeError, IOError) as exc:
             return {'error': f'Failed to load review file: {exc}'}
+        # This manual/chat path has no AgentRun in hand (unlike the automated
+        # worker path in cli_executor._submit_review_verdict), so the review
+        # cycle is resolved from the task's CURRENT round -- never "most
+        # recent for the task", which was the four-eyes-by-time hole this
+        # table exists to close (CTV2-1379).
+        review_cycle = (
+            self.db.query(ReviewCycle)
+            .filter(
+                ReviewCycle.task_id == task_id,
+                ReviewCycle.task_round_id == task.current_round_id,
+            )
+            .order_by(ReviewCycle.created_at.desc())
+            .first()
+        )
+        if review_cycle is None:
+            return {'error': f'No review_cycle found for task {task_id} current round'}
         try:
             result = TaskOrchestrationService(self.db).request_verdict(
                 task_id=task_id,
@@ -786,6 +803,7 @@ class TaskHandlersMixin:
                 findings=findings,
                 actor=f"chat:{session_id or 'anonymous'}",
                 idempotency_key=self._command_key(session_id, "verdict", args),
+                review_cycle_id=review_cycle.id,
             )
         except OrchestrationError as exc:
             return self._orchestration_error_payload(exc, task_id)

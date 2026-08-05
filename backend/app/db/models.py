@@ -587,6 +587,114 @@ class ImplDesign(Base):
     task = relationship("Task", back_populates="impl_design")
 
 
+class ReviewCycle(Base):
+    """One review pass over one task_round (CTV2-1379).
+
+    Verdict/finding data used to live only inside gate_records.input_payload
+    (JSON, unqueryable) and TaskRound.findings_ref. This is the queryable
+    relational home for it. Lifecycle:
+        requested -> running -> submitted -> pass | changes | abandoned
+    A retry does not mutate an existing row -- it creates a NEW row against
+    the new task_round; the old row keeps whatever terminal-ish status it
+    last had (round_no on task_rounds already says which is newest).
+    ``abandoned`` exists only for a run that died (failed/timeout/brake) with
+    no verdict ever submitted -- distinguishes "still running" from "dead
+    with no outcome" instead of leaving it stuck at 'running' forever.
+    """
+
+    __tablename__ = "review_cycles"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    task_id = Column(
+        String(20), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Nullable like AgentRun.task_round_id: only rows created through the
+    # normal dispatch->round->review gate flow populate it; a task moved to
+    # awaiting-review/in-review by an ad-hoc path (attach_result, tests, old
+    # data) has no TaskRound and this stays NULL for it.
+    task_round_id = Column(
+        String(36), ForeignKey("task_rounds.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    reviewer_id = Column(String(50), nullable=True)
+    reviewer_agent_run_id = Column(
+        String(36), ForeignKey("agent_runs.id"), nullable=True, index=True
+    )
+    status = Column(String(20), nullable=False, default="requested")
+    verdict = Column(String(10), nullable=True)
+    # Backfill idempotency (CTV2-1379): NULL for rows created through the
+    # normal review flow. Rows imported from a legacy gate_records verdict
+    # payload carry the source id, guarded by a partial unique index so
+    # re-running the backfill script inserts each historical verdict once.
+    source_gate_record_id = Column(
+        Integer, ForeignKey("gate_records.id"), nullable=True
+    )
+    requested_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    task = relationship("Task", foreign_keys=[task_id])
+    task_round = relationship("TaskRound", foreign_keys=[task_round_id])
+    findings = relationship(
+        "ReviewFinding", back_populates="review_cycle", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('requested', 'running', 'submitted', 'pass', 'changes', 'abandoned')",
+            name="ck_review_cycles_status",
+        ),
+        CheckConstraint(
+            "verdict IS NULL OR verdict IN ('pass', 'changes')",
+            name="ck_review_cycles_verdict",
+        ),
+        Index(
+            "ix_review_cycles_source_gate_record_id_unique",
+            "source_gate_record_id",
+            unique=True,
+            sqlite_where=source_gate_record_id.isnot(None),
+            postgresql_where=source_gate_record_id.isnot(None),
+        ),
+    )
+
+
+class ReviewFinding(Base):
+    """One reviewer-reported finding, split out of TaskRound.findings_ref
+    (CTV2-1379) so each finding gets its own lifecycle instead of being a
+    frozen blob. ``waived`` requires a reason -- a silently dropped finding
+    is indistinguishable from one nobody ever noticed.
+    """
+
+    __tablename__ = "review_findings"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    review_cycle_id = Column(
+        String(36), ForeignKey("review_cycles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    severity = Column(String(10), nullable=True)
+    title = Column(Text, nullable=False)
+    detail = Column(Text, nullable=True)
+    status = Column(String(10), nullable=False, default="open")
+    waived_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    review_cycle = relationship("ReviewCycle", back_populates="findings")
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('open', 'fixed', 'waived')",
+            name="ck_review_findings_status",
+        ),
+        CheckConstraint(
+            "status <> 'waived' OR (waived_reason IS NOT NULL AND trim(waived_reason) <> '')",
+            name="ck_review_findings_waived_reason",
+        ),
+    )
+
+
 @event.listens_for(GateRecord, "before_update")
 def _gate_records_are_append_only(*_args) -> None:
     raise ValueError("GateRecord is append-only and cannot be updated")

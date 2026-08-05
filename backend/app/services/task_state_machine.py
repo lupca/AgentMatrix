@@ -23,6 +23,8 @@ from app.db.models import (
     ImplDesign,
     LLMUsage,
     Project,
+    ReviewCycle,
+    ReviewFinding,
     SpecTaskLink,
     Task,
     TaskDependency,
@@ -305,6 +307,39 @@ def _split_result_range(result_ref: str) -> tuple[str | None, str | None]:
         return None, result_ref
     base, head = result_ref.split("..", 1)
     return base or None, head or None
+
+
+def _review_finding_from_payload(review_cycle_id: str, finding: Any) -> ReviewFinding:
+    """Build a ReviewFinding row from either a structured dict (the schema
+    in app/schemas/task.py: id/severity/category/file/line/description) or a
+    bare string (the legacy .ct/review-<task>.json / chat /verdict path)."""
+    if isinstance(finding, dict):
+        title = str(
+            finding.get("description")
+            or finding.get("title")
+            or finding.get("category")
+            or "finding"
+        )
+        file_ref = finding.get("file")
+        line_ref = finding.get("line")
+        detail = None
+        if file_ref:
+            detail = f"{file_ref}:{line_ref}" if line_ref is not None else str(file_ref)
+        severity = finding.get("severity")
+        return ReviewFinding(
+            review_cycle_id=review_cycle_id,
+            severity=str(severity) if severity else None,
+            title=title,
+            detail=detail,
+            status="open",
+        )
+    return ReviewFinding(
+        review_cycle_id=review_cycle_id,
+        severity=None,
+        title=str(finding),
+        detail=None,
+        status="open",
+    )
 
 
 def update_agent_success_rate(
@@ -788,6 +823,25 @@ class TaskStateMachine:
         )
         return decision_id
 
+    def _abandon_review_cycle(self, run_id: str | None) -> None:
+        """A review AgentRun died (failed/timeout/brake) without ever
+        reaching a verdict. Mark its cycle 'abandoned' so it reads as
+        "dead with no outcome" instead of stuck at 'running'/'requested'
+        forever (CTV2-1379). A cycle that already reached submitted/pass/
+        changes/abandoned is left alone -- this only catches runs that died
+        before producing anything.
+        """
+        if not run_id:
+            return
+        cycle = (
+            self.db.query(ReviewCycle)
+            .filter(ReviewCycle.reviewer_agent_run_id == run_id)
+            .first()
+        )
+        if cycle is not None and cycle.status in {"requested", "running"}:
+            cycle.status = "abandoned"
+            cycle.completed_at = datetime.now(timezone.utc)
+
     def record_verdict_on_round(
         self,
         task: Task,
@@ -1047,15 +1101,33 @@ class TaskStateMachine:
             task.awaiting_approval = False
             task.approval_prompt = None
             record_run_requested(self.db, run, str(payload["repo_root"]))
+            self.db.add(
+                ReviewCycle(
+                    task_id=task.id,
+                    task_round_id=task.current_round_id,
+                    reviewer_id=reviewer,
+                    reviewer_agent_run_id=run_id,
+                    status="requested",
+                )
+            )
             return run, run_id
         if gate_type == "verdict":
             verdict = str(payload["verdict"])
-            self.validator.validate_verdict_prerequisites(
+            review_cycle_id = payload.get("review_cycle_id")
+            review_cycle = self.validator.validate_verdict_prerequisites(
                 task,
                 actor=str(payload["reviewer"]),
                 verdict=verdict,
                 ac_results=payload["ac_results"],
+                review_cycle_id=review_cycle_id,
             )
+            now_ts = datetime.now(timezone.utc)
+            review_cycle.status = verdict
+            review_cycle.verdict = verdict
+            review_cycle.submitted_at = review_cycle.submitted_at or now_ts
+            review_cycle.completed_at = now_ts
+            for finding in payload.get("findings") or []:
+                self.db.add(_review_finding_from_payload(review_cycle.id, finding))
             task.verdict = verdict
             task.findings = payload.get("findings") or []
             task.current_gate = "verdict"
@@ -1554,6 +1626,7 @@ class TaskStateMachine:
         ac_results: Any,
         actor: str,
         idempotency_key: str,
+        review_cycle_id: str,
         findings: list[Any] | None = None,
         expected_status: str = "in-review",
     ) -> TransitionResult:
@@ -1561,11 +1634,24 @@ class TaskStateMachine:
         normalized_verdict = verdict.strip().lower()
         if normalized_verdict not in {"pass", "changes"}:
             raise PrerequisiteError("Verdict must be pass or changes")
+        # The reviewer submitting a verdict is what moves a cycle from
+        # 'running' to 'submitted' -- do it before validating so a fresh,
+        # legitimate submission is not rejected for "not submitted yet".
+        cycle = self.db.get(ReviewCycle, review_cycle_id) if review_cycle_id else None
+        if (
+            cycle is not None
+            and cycle.task_id == task.id
+            and cycle.status in {"requested", "running"}
+        ):
+            cycle.status = "submitted"
+            cycle.submitted_at = datetime.now(timezone.utc)
+            self.db.flush()
         self.validator.validate_verdict_prerequisites(
             task,
             actor=actor,
             verdict=normalized_verdict,
             ac_results=ac_results,
+            review_cycle_id=review_cycle_id,
         )
         return self.request_gate(
             task=task,
@@ -1579,6 +1665,7 @@ class TaskStateMachine:
                 "findings": findings or [],
                 "result_ref": task.result_ref,
                 "reviewer": task.reviewer,
+                "review_cycle_id": review_cycle_id,
             },
         )
 
@@ -1789,6 +1876,8 @@ class TaskStateMachine:
             run.failure_category = classify_termination(
                 status="failed", error=error, kind=run.kind
             )
+            if run.kind == "review":
+                self._abandon_review_cycle(run_id)
         task = self.validator.task(task_id)
         normalized_error_code = (error_code or "execution-failed").strip().lower()
         payload = {
@@ -1839,6 +1928,7 @@ class TaskStateMachine:
             run.failure_category = classify_termination(
                 status="failed", error=error, kind=run.kind
             )
+            self._abandon_review_cycle(run_id)
         task = self.validator.task(task_id)
         payload = {
             "expected_status": expected_status,

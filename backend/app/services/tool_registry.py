@@ -242,6 +242,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "- agent_capabilities (agent_id, capability) — junction table\n"
                 "- sessions (id, title, status, context_level, project_id, task_id)\n"
                 "- agent_runs (id, task_id, agent_id, kind [execute, review], status [queued, running, success, failed, cancelled], attempt)\n"
+                "- review_cycles (id, task_id, task_round_id, reviewer_id, reviewer_agent_run_id, status [requested, running, submitted, pass, changes, abandoned], verdict, source_gate_record_id, requested_at, submitted_at, completed_at) — one row per review pass over one task_round; the queryable home for verdicts (gate_records.input_payload used to be the only place this lived)\n"
+                "- review_findings (id, review_cycle_id, severity, title, detail, status [open, fixed, waived], waived_reason) — one row per reviewer finding; waived rows always carry waived_reason\n"
                 "- knowledge_items (id, title, category, project, author, content)\n"
                 "- audit_log (id, task_id, action, actor, created_at)\n"
                 "- tool_metrics (id, tool, source, task_id, ok, cache_hit, duration_ms, result_count, bytes_out, error, payload JSON, created_at) — telemetry for graph/ocr/review tooling\n"

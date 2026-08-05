@@ -75,6 +75,45 @@ queued → running → success / failed / cancelled
 Một round mỗi lần execute-dispatch; verdict ghi vào round. `auto_max_rounds`
 (default 3) round changes-requested → brake escalate "human replan".
 
+## ReviewCycle & ReviewFinding (CTV2-1379)
+
+Verdict/finding trước đây chỉ nằm trong `gate_records.input_payload` (JSON,
+không query được) và `TaskRound.findings_ref` (blob đông cứng, không có
+trạng thái riêng). Hai bảng này là nơi chứa quan hệ, query được.
+
+`review_cycles`: một dòng mỗi lượt review trên một `task_round`.
+```
+requested → running → submitted → pass | changes | abandoned
+```
+- Retry KHÔNG sửa dòng cũ — tạo dòng MỚI gắn `task_round` mới; dòng cũ giữ
+  nguyên trạng thái cuối (round_no trên `task_rounds` đã nói rõ cái nào mới
+  nhất). Không có `superseded`.
+- `abandoned`: run review chết (failed/timeout/brake) mà chưa từng có verdict
+  — phân biệt "đang chạy" với "chết từ đời nào", tránh kẹt mãi ở `running`.
+- `task_round_id` nullable như `AgentRun.task_round_id`: task đưa thẳng vào
+  awaiting-review/in-review qua đường không đi qua dispatch (attach_result,
+  dữ liệu cũ) thì NULL.
+- `source_gate_record_id`: FK nullable tới `gate_records.id`, NULL cho dòng
+  sinh từ đường chạy bình thường. Dòng backfill từ lịch sử mang giá trị này,
+  có UNIQUE INDEX PARTIAL `WHERE source_gate_record_id IS NOT NULL` — backfill
+  chạy lại chỉ `INSERT ... ON CONFLICT DO NOTHING`, không tạo trùng.
+
+**Verdict phải gắn đúng chu kỳ review** (`request_verdict` nhận
+`review_cycle_id`, bắt buộc): four-eyes cũ chỉ so NGƯỜI (agent của run review
+gần nhất thành công) với `task.reviewer`, không so THỜI ĐIỂM — một run từ vòng
+khác vẫn thoả. `validate_verdict_prerequisites` giờ đòi tất cả cùng lúc: cycle
+tồn tại và thuộc đúng task; `cycle.task_round_id` = vòng HIỆN TẠI của task;
+`reviewer_agent_run_id` trỏ AgentRun `kind='review'`, `status='success'`; agent
+của run đó khớp cả `review_cycles.reviewer_id` lẫn `task.reviewer`; cycle
+`status='submitted'`; và `task.reviewer != task.executor`. Thiếu bất kỳ điều
+nào → từ chối, không fallback "run gần nhất".
+
+`review_findings`: một dòng mỗi finding, `status` là `open | fixed | waived`;
+`waived` bắt buộc `waived_reason` (CHECK constraint).
+
+`query_db` biết schema hai bảng này — không có MCP tool riêng cho verdict/
+finding, `query_db` là mặt đọc tổng quát.
+
 ## GateRecord (task gates) & AdminGateRecord (admin gates)
 
 - Append-only (trigger chặn UPDATE). Quyết định = row con `parent_id` → parent.

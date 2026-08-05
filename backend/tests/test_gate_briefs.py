@@ -17,9 +17,11 @@ from app.db.models import (
     GateRecord,
     LLMUsage,
     Project,
+    ReviewCycle,
     SpecItem,
     SpecTaskLink,
     Task,
+    TaskRound,
 )
 from app.mcp_native import _verdict_evidence_block, _GATE_CHECKS
 from app.services.task_orchestration import TaskOrchestrationService
@@ -57,6 +59,13 @@ def _add_task(db, task_id: str, **overrides) -> Task:
 
 
 def _add_terminal_review_run(db, task: Task, agent_id: str = "@reviewer") -> AgentRun:
+    if task.current_round_id is None:
+        task_round = TaskRound(
+            id=f"{task.id}-round-1", task_id=task.id, round_no=1, status="in-review"
+        )
+        db.add(task_round)
+        db.flush()
+        task.current_round_id = task_round.id
     run = AgentRun(
         id=f"{task.id}-review-run",
         task_id=task.id,
@@ -66,9 +75,20 @@ def _add_terminal_review_run(db, task: Task, agent_id: str = "@reviewer") -> Age
         kind="review",
         agent_role="reviewer",
         status="success",
+        task_round_id=task.current_round_id,
     )
     db.add(run)
+    db.flush()
+    cycle = ReviewCycle(
+        task_id=task.id,
+        task_round_id=task.current_round_id,
+        reviewer_id=agent_id,
+        reviewer_agent_run_id=run.id,
+        status="submitted",
+    )
+    db.add(cycle)
     db.commit()
+    run.review_cycle_id = cycle.id
     return run
 
 
@@ -224,7 +244,7 @@ def _to_verdict_pending(db_session, service, task_id: str):
         reviewer="@reviewer",
         result_ref="base..head",
     )
-    _add_terminal_review_run(db_session, task)
+    run = _add_terminal_review_run(db_session, task)
     pending = service.request_verdict(
         task_id=task.id,
         verdict="pass",
@@ -235,6 +255,7 @@ def _to_verdict_pending(db_session, service, task_id: str):
         findings=[{"severity": "minor", "text": "nit"}],
         actor="@reviewer",
         idempotency_key=f"verdict-{task_id}",
+        review_cycle_id=run.review_cycle_id,
     )
     return task, pending
 

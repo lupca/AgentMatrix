@@ -25,6 +25,7 @@ from app.db.models import (
     GateRecord,
     LLMUsage,
     Project,
+    ReviewCycle,
     RunResourceUsage,
     Setting,
     Task,
@@ -487,31 +488,74 @@ class TaskValidator:
         actor: str,
         verdict: str,
         ac_results: Any,
-    ) -> None:
+        review_cycle_id: str,
+    ) -> ReviewCycle:
+        """Validate that a verdict is legal for `review_cycle_id`, and only
+        that cycle (CTV2-1379).
+
+        Four-eyes used to be checked on PERSON only: the most recent
+        successful review run for the task_id was compared against
+        task.reviewer, so a run from an EARLIER round still satisfied it --
+        right person, wrong time. This binds the verdict to one specific
+        review_cycle and requires, all at once:
+          1. the cycle exists, belongs to this task
+          2. the cycle's task_round is the task's CURRENT round
+          3. its reviewer_agent_run_id points at a successful review AgentRun
+          4. that run's agent matches review_cycles.reviewer_id and
+             task.reviewer
+          5. the cycle is 'submitted'
+          6. task.reviewer != task.executor (the original four-eyes check)
+        No fallback to "most recent run" -- that fallback was the hole.
+        """
         self.assert_status(task, "in-review")
         if not task.executor or not task.executor.strip():
             raise PrerequisiteError("executor is required for verdict")
         if not task.reviewer or not task.reviewer.strip():
             raise PrerequisiteError("reviewer is required for verdict")
         self.require_independent(task.executor, task.reviewer)
+
+        if not review_cycle_id:
+            raise PrerequisiteError("review_cycle_id is required for verdict")
+        review_cycle = (
+            self.db.query(ReviewCycle)
+            .filter(ReviewCycle.id == review_cycle_id, ReviewCycle.task_id == task.id)
+            .first()
+        )
+        if review_cycle is None:
+            raise PrerequisiteError(
+                f"review_cycle {review_cycle_id} does not exist for task {task.id}"
+            )
+        if review_cycle.task_round_id != task.current_round_id:
+            raise PrerequisiteError(
+                "review_cycle does not belong to the task's current round -- "
+                "verdict must be recorded against the review that ran for "
+                "this round, not an earlier one"
+            )
         review_run = (
             self.db.query(AgentRun)
             .filter(
+                AgentRun.id == review_cycle.reviewer_agent_run_id,
                 AgentRun.task_id == task.id,
                 AgentRun.kind == "review",
                 AgentRun.status == "success",
             )
-            .order_by(AgentRun.queued_at.desc())
             .first()
         )
         if review_run is None:
             raise PrerequisiteError(
-                "verdict requires a completed review run for this task"
+                "review_cycle has no completed (status=success) review run"
             )
-        if self.principal(review_run.agent_id) != self.principal(task.reviewer):
+        if self.principal(review_run.agent_id) != self.principal(
+            review_cycle.reviewer_id or ""
+        ) or self.principal(review_run.agent_id) != self.principal(task.reviewer):
             raise PrerequisiteError(
-                "The completed review run's agent does not match the task's "
-                "assigned reviewer"
+                "The completed review run's agent does not match the review "
+                "cycle's reviewer and/or the task's assigned reviewer"
+            )
+        if review_cycle.status != "submitted":
+            raise PrerequisiteError(
+                f"review_cycle status must be 'submitted', found "
+                f"'{review_cycle.status}'"
             )
         if not task.result_ref or not task.result_ref.strip():
             raise PrerequisiteError("result_ref is required for verdict")
@@ -528,6 +572,7 @@ class TaskValidator:
             raise PrerequisiteError(
                 "A passing verdict requires every acceptance criterion to pass"
             )
+        return review_cycle
 
     @staticmethod
     def evaluation_results(ac_results: Any) -> list[bool]:

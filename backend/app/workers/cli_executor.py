@@ -28,6 +28,7 @@ from app.db.models import (
     AgentOutputChunk,
     AgentRun,
     LLMUsage,
+    ReviewCycle,
     RunResourceUsage,
     Task,
     VendorRawEvent,
@@ -635,7 +636,14 @@ def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResu
         if executor_run is not None:
             executor_run.failure_category = classify_review_outcome(ac_results)
     orch_cls = _get_attr("TaskOrchestrationService", TaskOrchestrationService)
+    review_cycle = (
+        db.query(ReviewCycle).filter(ReviewCycle.reviewer_agent_run_id == run.id).first()
+    )
     try:
+        if review_cycle is None:
+            raise OrchestrationError(
+                f"No review_cycle found for review run {run.id}; cannot record verdict"
+            )
         orch_cls(db).request_verdict(
             task_id=run.task_id,
             verdict=verdict,
@@ -643,6 +651,7 @@ def _submit_review_verdict(db: Session, run: AgentRun, review_result: ReviewResu
             findings=[finding.model_dump() for finding in review_result.findings],
             actor=f"agent:{run.agent_id}",
             idempotency_key=f"run:{run.id}:review-verdict",
+            review_cycle_id=review_cycle.id,
         )
     except OrchestrationError as exc:
         orch_cls(db).record_review_failure(
@@ -1098,6 +1107,15 @@ def execute_agent_run(
         run.status = "running"
         run.attempt = attempt
         run.started_at = started_at
+        if run.kind == "review":
+            cycle = (
+                db.query(ReviewCycle)
+                .filter(ReviewCycle.reviewer_agent_run_id == run.id)
+                .first()
+            )
+            if cycle is not None and cycle.status == "requested":
+                cycle.status = "running"
+                cycle.started_at = started_at
         db.commit()
 
         def record_pid(pid: int) -> None:

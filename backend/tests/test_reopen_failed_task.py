@@ -21,7 +21,7 @@ destroying a delivered result, and there is a way back when a task does end up
 
 import pytest
 
-from app.db.models import Agent, AgentRun, GateRecord, Project, Task
+from app.db.models import Agent, AgentRun, GateRecord, Project, ReviewCycle, Task
 from app.services.task_orchestration import (
     BrakeViolationError,
     OrchestrationError,
@@ -349,6 +349,11 @@ def test_failed_delivered_result_recovers_through_independent_review_and_land(
     assert reviewed.agent_run.agent_id != reviewed.task.executor
     reviewed.agent_run.status = "success"
     db_session.commit()
+    review_cycle = (
+        db_session.query(ReviewCycle)
+        .filter(ReviewCycle.reviewer_agent_run_id == reviewed.agent_run.id)
+        .one()
+    )
 
     verdict_request = service.request_verdict(
         task_id=task.id,
@@ -356,6 +361,7 @@ def test_failed_delivered_result_recovers_through_independent_review_and_land(
         ac_results=[{"passed": True}],
         actor="@reviewer",
         idempotency_key="reopen-flow-verdict",
+        review_cycle_id=review_cycle.id,
     )
     assert verdict_request.applied is False
     verdict_gate = verdict_request.gate_record

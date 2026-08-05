@@ -196,6 +196,7 @@ class TaskOrchestrationService:
         ac_results: Any,
         actor: str,
         idempotency_key: str,
+        review_cycle_id: str,
         findings: list[Any] | None = None,
         expected_status: str = "in-review",
     ) -> TransitionResult:
@@ -205,6 +206,7 @@ class TaskOrchestrationService:
             ac_results=ac_results,
             actor=actor,
             idempotency_key=idempotency_key,
+            review_cycle_id=review_cycle_id,
             findings=findings,
             expected_status=expected_status,
         )

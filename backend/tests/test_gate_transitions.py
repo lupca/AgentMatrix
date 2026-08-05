@@ -1,7 +1,16 @@
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from app.db.models import Agent, AgentRun, GateRecord, Project, Task, TaskEvent
+from app.db.models import (
+    Agent,
+    AgentRun,
+    GateRecord,
+    Project,
+    ReviewCycle,
+    Task,
+    TaskEvent,
+    TaskRound,
+)
 from app.services.task_orchestration import (
     ModeViolationError,
     PrerequisiteError,
@@ -35,6 +44,13 @@ def service(db_session):
 
 
 def _add_terminal_review_run(db, task: Task, agent_id: str = "@reviewer") -> AgentRun:
+    if task.current_round_id is None:
+        task_round = TaskRound(
+            id=f"{task.id}-round-1", task_id=task.id, round_no=1, status="in-review"
+        )
+        db.add(task_round)
+        db.flush()
+        task.current_round_id = task_round.id
     run = AgentRun(
         id=f"{task.id}-review-run",
         task_id=task.id,
@@ -44,9 +60,20 @@ def _add_terminal_review_run(db, task: Task, agent_id: str = "@reviewer") -> Age
         kind="review",
         agent_role="reviewer",
         status="success",
+        task_round_id=task.current_round_id,
     )
     db.add(run)
+    db.flush()
+    cycle = ReviewCycle(
+        task_id=task.id,
+        task_round_id=task.current_round_id,
+        reviewer_id=agent_id,
+        reviewer_agent_run_id=run.id,
+        status="submitted",
+    )
+    db.add(cycle)
     db.commit()
+    run.review_cycle_id = cycle.id
     return run
 
 
@@ -143,8 +170,10 @@ def test_verdict_rejects_missing_prerequisites(
     }
     values.update(changes)
     task = _add_task(db_session, f"VER-{len(db_session.new)}{message[:2]}", **values)
+    review_cycle_id = None
     if task.reviewer:
-        _add_terminal_review_run(db_session, task, agent_id=task.reviewer)
+        run = _add_terminal_review_run(db_session, task, agent_id=task.reviewer)
+        review_cycle_id = run.review_cycle_id
 
     with pytest.raises((PrerequisiteError, TransitionConflictError), match=message):
         service.request_verdict(
@@ -153,6 +182,7 @@ def test_verdict_rejects_missing_prerequisites(
             ac_results=[{"passed": True}],
             actor=task.reviewer or "@reviewer",
             idempotency_key=f"verdict:{task.id}",
+            review_cycle_id=review_cycle_id,
         )
 
 
@@ -166,7 +196,7 @@ def test_passing_verdict_requires_complete_passing_ac_results(service, db_sessio
         result_ref="abc123",
         acceptance_criteria=["AC 1", "AC 2"],
     )
-    _add_terminal_review_run(db_session, task)
+    run = _add_terminal_review_run(db_session, task)
 
     with pytest.raises(PrerequisiteError, match="incomplete"):
         service.request_verdict(
@@ -175,6 +205,7 @@ def test_passing_verdict_requires_complete_passing_ac_results(service, db_sessio
             ac_results=[{"passed": True}],
             actor="@reviewer",
             idempotency_key="verdict-incomplete",
+            review_cycle_id=run.review_cycle_id,
         )
     with pytest.raises(PrerequisiteError, match="every acceptance criterion"):
         service.request_verdict(
@@ -183,6 +214,7 @@ def test_passing_verdict_requires_complete_passing_ac_results(service, db_sessio
             ac_results=[{"passed": True}, {"passed": False}],
             actor="@reviewer",
             idempotency_key="verdict-failed-ac",
+            review_cycle_id=run.review_cycle_id,
         )
 
 
@@ -198,7 +230,7 @@ def test_only_passing_verdict_service_transition_reaches_done(
         reviewer="@reviewer",
         result_ref="abc123",
     )
-    _add_terminal_review_run(db_session, task)
+    run = _add_terminal_review_run(db_session, task)
 
     result = service.request_verdict(
         task_id=task.id,
@@ -206,6 +238,7 @@ def test_only_passing_verdict_service_transition_reaches_done(
         ac_results=[{"passed": True}],
         actor="@reviewer",
         idempotency_key="verdict-pass",
+        review_cycle_id=run.review_cycle_id,
     )
 
     assert result.task.status == "done"
@@ -362,13 +395,14 @@ def test_verdict_rejects_when_no_review_run_exists(service, db_session):
         result_ref="base-sha..head-sha",
     )
 
-    with pytest.raises(PrerequisiteError, match="completed review run"):
+    with pytest.raises(PrerequisiteError, match="review_cycle_id is required"):
         service.request_verdict(
             task_id=task.id,
             verdict="pass",
             ac_results=[{"passed": True}],
             actor="@reviewer",
             idempotency_key="verdict-no-review-run",
+            review_cycle_id=None,
         )
 
 
@@ -386,13 +420,14 @@ def test_verdict_actor_cannot_impersonate_reviewer_without_a_review_run(
         result_ref="base-sha..head-sha",
     )
 
-    with pytest.raises(PrerequisiteError, match="completed review run"):
+    with pytest.raises(PrerequisiteError, match="review_cycle_id is required"):
         service.request_verdict(
             task_id=task.id,
             verdict="pass",
             ac_results=[{"passed": True}],
             actor="@reviewer",
             idempotency_key="verdict-spoofed-actor",
+            review_cycle_id=None,
         )
 
 
@@ -410,7 +445,7 @@ def test_verdict_pass_with_three_ac_and_two_results_is_rejected(service, db_sess
         result_ref="abc123",
         acceptance_criteria=["AC 1", "AC 2", "AC 3"],
     )
-    _add_terminal_review_run(db_session, task)
+    run = _add_terminal_review_run(db_session, task)
 
     with pytest.raises(PrerequisiteError, match="incomplete"):
         service.request_verdict(
@@ -419,6 +454,7 @@ def test_verdict_pass_with_three_ac_and_two_results_is_rejected(service, db_sess
             ac_results=[{"passed": True}, {"passed": True}],
             actor="@reviewer",
             idempotency_key="verdict-3ac-2results",
+            review_cycle_id=run.review_cycle_id,
         )
 
 
@@ -463,7 +499,7 @@ def test_verdict_pass_auto_updates_executor_and_reviewer_success_rate(service, d
         reviewer="@reviewer",
         result_ref="abc123",
     )
-    _add_terminal_review_run(db_session, task)
+    run = _add_terminal_review_run(db_session, task)
 
     result = service.request_verdict(
         task_id=task.id,
@@ -471,6 +507,7 @@ def test_verdict_pass_auto_updates_executor_and_reviewer_success_rate(service, d
         ac_results=[{"passed": True}],
         actor="@reviewer",
         idempotency_key="verdict-auto-pass",
+        review_cycle_id=run.review_cycle_id,
     )
 
     assert result.task.status == "done"
@@ -494,7 +531,7 @@ def test_verdict_changes_auto_updates_executor_and_reviewer_success_rate(service
         reviewer="@reviewer",
         result_ref="abc123",
     )
-    _add_terminal_review_run(db_session, task)
+    run = _add_terminal_review_run(db_session, task)
 
     result = service.request_verdict(
         task_id=task.id,
@@ -502,6 +539,7 @@ def test_verdict_changes_auto_updates_executor_and_reviewer_success_rate(service
         ac_results=[{"passed": False}],
         actor="@reviewer",
         idempotency_key="verdict-auto-fail",
+        review_cycle_id=run.review_cycle_id,
     )
 
     assert result.task.status == "changes-requested"
@@ -520,13 +558,14 @@ def test_rejected_verdict_gate_returns_to_reviewable_state(service, db_session):
         reviewer="@reviewer",
         result_ref="base-sha..head-sha",
     )
-    _add_terminal_review_run(db_session, task)
+    run = _add_terminal_review_run(db_session, task)
     pending = service.request_verdict(
         task_id=task.id,
         verdict="changes",
         ac_results=[{"passed": False}],
         actor="@reviewer",
         idempotency_key="verdict-to-reject",
+        review_cycle_id=run.review_cycle_id,
     )
 
     result = service.decide_gate(
