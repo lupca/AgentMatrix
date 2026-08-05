@@ -193,6 +193,115 @@ def test_update_settings_description_documents_autonomy_and_rejects_default_mode
     assert 'plan-only' in spec.description
 
 
+def test_attach_result_description_has_situation_confusable_precondition_recovery():
+    spec = TOOL_REGISTRY['attach_result']
+    # (a) caller-situation trigger
+    assert 'result_ref' in spec.description
+    # (b) named confusable tool + distinction
+    assert 'land_task' in spec.description
+    assert 'merge' in spec.description
+    # (c) precondition: status
+    assert 'dispatched' in spec.description
+    # (d) recovery/rejection path
+    assert 'reopen_task' in spec.description
+    assert 'failed' in spec.description
+    # `option` is a single-value enum (only 'request_review'). It cannot be
+    # removed here: backend/tests/test_attach_result.py asserts it stays in
+    # the schema. Since it must stay, its own description has to explain why
+    # the sole value exists rather than leaving it as an unexplained dead
+    # choice.
+    assert 'option' in spec.parameters['properties']
+    assert spec.parameters['properties']['option']['enum'] == ['request_review']
+    option_desc = spec.parameters['properties']['option']['description']
+    assert 'no other value' in option_desc or 'always routes' in option_desc
+
+
+def test_reopen_task_description_has_situation_confusable_precondition_recovery():
+    spec = TOOL_REGISTRY['reopen_task']
+    assert 'failed' in spec.description
+    assert 'cancel_task' in spec.description
+    assert 'awaiting-review' in spec.description
+    assert 'todo' in spec.description
+    assert 'get_status' in spec.description
+
+
+def test_approve_gate_description_has_situation_confusable_precondition_recovery():
+    spec = TOOL_REGISTRY['approve_gate']
+    assert 'pending' in spec.description
+    assert 'record_verdict' in spec.description
+    assert 'gate_record_id' in spec.description
+    assert 'dispatch_task' in spec.description or 'request_review' in spec.description
+
+
+def test_record_verdict_description_has_situation_confusable_precondition_recovery():
+    spec = TOOL_REGISTRY['record_verdict']
+    assert 'in-review' in spec.description
+    assert 'approve_gate' in spec.description
+    assert 'request_review' in spec.description
+
+
+def test_land_task_description_has_situation_confusable_precondition_recovery():
+    spec = TOOL_REGISTRY['land_task']
+    assert 'pass verdict' in spec.description
+    assert 'attach_result' in spec.description
+    assert 'record_verdict' in spec.description
+    assert 'landing_failed' in spec.description
+
+
+def test_critique_spec_plan_description_has_situation_confusable_precondition_recovery():
+    spec = TOOL_REGISTRY['critique_spec_plan']
+    assert 'generate_spec_plan' in spec.description
+    assert 'planner' in spec.description
+    assert 'plan' in spec.description
+
+
+def test_generate_spec_plan_description_has_situation_confusable_precondition_recovery():
+    spec = TOOL_REGISTRY['generate_spec_plan']
+    assert 'critique_spec_plan' in spec.description
+    assert 'todo' in spec.description
+    assert 'critic' in spec.description
+
+
+def test_manage_inbox_description_has_situation_confusable_precondition_recovery():
+    spec = TOOL_REGISTRY['manage_inbox']
+    assert 'create_task' in spec.description
+    assert 'promote' in spec.description
+    assert 'list' in spec.description
+
+
+def test_spec_write_description_has_situation_confusable_precondition_recovery():
+    spec = TOOL_REGISTRY['spec_write']
+    assert 'impl_design' in spec.description
+    assert 'spec_get' in spec.description
+    assert 'derived_from_sha' in spec.description
+
+
+def test_all_descriptions_carry_situation_confusable_precondition_recovery_signal():
+    """Every one of the 35 tools must convey: (a) a caller-situation trigger,
+    (b) a named confusable other tool + how this one differs, (c) a
+    precondition (status/field), and (d) a recovery/rejection path -- without
+    a rigid WHEN:/NOT:/PRECONDITION:/REJECTION: label format."""
+    tool_names = set(TOOL_REGISTRY)
+    forbidden_labels = ('WHEN:', 'NOT:', 'PRECONDITION:', 'REJECTION:')
+
+    for name, spec in TOOL_REGISTRY.items():
+        desc = spec.description
+        for label in forbidden_labels:
+            assert label not in desc, f'{name} description uses a forbidden rigid label {label!r}'
+
+        # (b) a named confusable other tool: at least one other registry tool
+        # name appears as a substring, referenced by name.
+        other_names_mentioned = [
+            other for other in tool_names
+            if other != name and other in desc
+        ]
+        assert other_names_mentioned, f'{name} description names no other tool for contrast'
+
+        # description length is a weak proxy but a one-liner cannot carry
+        # situation + distinction + precondition + recovery.
+        assert len(desc) > 120, f'{name} description too short to carry the required signal'
+
+
 def test_command_router_commands_derived_from_registry():
     for spec in TOOL_REGISTRY.values():
         if spec.slash_alias is None:

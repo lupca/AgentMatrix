@@ -56,8 +56,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="create_task",
             description=(
-                "Create a new task. Use when the user asks to create/add/start a "
-                "new task or work item."
+                "Reach for this when the user describes work that does not "
+                "correspond to any existing task row yet -- a new feature, bug, "
+                "or chore to track. This is the only tool that mints a task id; "
+                "it is not update_task, which edits an id that already exists "
+                "and errors if you pass one that doesn't. No status precondition: "
+                "it always starts a task at 'todo'. If the create call is "
+                "rejected for a missing title, just retry with one; there is no "
+                "separate recovery tool needed."
             ),
             parameters={
                 "type": "object",
@@ -94,7 +100,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="get_status",
-            description="Get the status of a task, or list recent tasks if no id is given.",
+            description=(
+                "Use this to check where a task currently sits in the "
+                "todo/dispatched/awaiting-review/in-review/done/failed lifecycle, "
+                "or to list recent tasks when you don't have a specific id yet. "
+                "It is a point-in-time snapshot, unlike wait_for_task, which "
+                "blocks until the task's state actually changes -- prefer "
+                "wait_for_task instead of calling get_status on a timer. No "
+                "precondition: it works on any task id at any status, including "
+                "one you're not sure exists. If the id is wrong it just returns "
+                "not-found; call it again with no task_id to browse recent tasks "
+                "and find the right one."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -111,7 +128,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="manage_inbox",
-            description="Capture raw ideas without an admin gate: add, update, delete, list, or promote.",
+            description=(
+                "Use this when someone drops a raw idea, note, or maybe-later "
+                "item that isn't ready to be a task yet -- add/update/delete/list "
+                "it as free text, with no gate to approve. This is not "
+                "create_task: create_task immediately starts a real, dispatchable "
+                "task row; manage_inbox just parks the idea until you call it "
+                "with action='promote' to turn it into one. No status "
+                "precondition -- inbox items don't have a task lifecycle. If an "
+                "action is rejected for a missing id (update/delete/promote on an "
+                "item that doesn't exist), call it again with action='list' to "
+                "find the right id first."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -130,9 +158,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="get_run_output",
             description=(
-                "Read persisted output chunks for an executor run. Use this to "
-                "inspect progress or a completed run; output is replayable and "
-                "does not depend on a live stream."
+                "Use this when you have a specific run_id and want to read what "
+                "that agent run actually printed -- to check progress on a "
+                "running dispatch or inspect a finished one's output. It reads "
+                "persisted, replayable chunks, so it works the same whether the "
+                "run is mid-flight or long done -- unlike wait_for_task, which "
+                "blocks until the task's status changes rather than showing you "
+                "text. Precondition: you need both task_id and run_id, which "
+                "come from a prior dispatch_task/request_review result or "
+                "get_status. If run_id is wrong or unknown, call get_status on "
+                "the task first to find the current run."
             ),
             parameters={
                 "type": "object",
@@ -155,12 +190,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="get_stats",
             description=(
-                "Return recorded API/CLI token usage, authoritative API USD cost, and run statistics. "
-                "Also reports plan-critic return rate and extra execution rounds in "
-                "the historical before/after cohorts. "
-                "CLI subscription cost_usd is vendor telemetry, not an authoritative charge; "
-                "use token totals for the CLI brake. "
-                "Use task_id or agent_id to narrow the report."
+                "Use this when you need aggregate numbers -- token usage, "
+                "authoritative API USD cost, run counts, plan-critic return "
+                "rate -- rather than one task's status; narrow with task_id or "
+                "agent_id, or omit both for a system-wide report. This is not "
+                "query_db: query_db runs arbitrary read-only SQL for questions "
+                "this canned report doesn't cover, while get_stats gives you the "
+                "specific cost/usage figures the budget brakes check (note CLI "
+                "subscription cost_usd is vendor telemetry, not an authoritative "
+                "charge -- use token totals for the CLI brake). No precondition "
+                "-- it's read-only against whatever history exists, including "
+                "none. If task_id or agent_id doesn't match anything, you just "
+                "get empty stats back; verify the id with get_status or query_db."
             ),
             parameters={
                 "type": "object",
@@ -179,10 +220,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="query_db",
             description=(
-                "Read-only database query using raw SQL (v2). "
-                "Only a single SELECT or WITH statement is allowed. "
-                "Use this to answer complex analytical questions or explore data. "
-                "Do NOT access the DB directly via other means.\n"
+                "Reach for this when the question is a genuine analytical query "
+                "over the data -- joins, filters, group-bys, counts across many "
+                "rows -- that none of the canned tools (get_status, get_stats, "
+                "get_task_events) answer directly. Only a single SELECT or WITH "
+                "statement is allowed; it is read-only and cannot be used to "
+                "mutate anything -- do NOT try to reach the DB any other way. "
+                "This is not get_stats: get_stats is a fixed cost/usage report, "
+                "query_db is free-form SQL for anything else. No status "
+                "precondition beyond a syntactically valid single-statement "
+                "SELECT/WITH. If the query is rejected (bad SQL, multiple "
+                "statements, unknown column), fix the SQL and call it again -- "
+                "check the schema summary below first.\n"
                 "Schema Summary:\n"
                 "- tasks (id, title, status [todo, dispatched, awaiting-review, in-review, done, cancelled, failed], project, executor, reviewer, priority, mode)\n"
                 "- inbox_items (id, content, project_id, task_id, tags, status, created_at)\n"
@@ -240,7 +289,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="dispatch_task",
-            description="Assign an executor to a task and move it to dispatched status.",
+            description=(
+                "Use this once a task is ready to actually be worked -- it "
+                "assigns an executor agent and moves the task from 'todo' to "
+                "'dispatched', kicking off the run. Precondition: the task must "
+                "be in 'todo' (and, per the plan-only autonomy mode, may need a "
+                "spec/plan already generated -- see generate_spec_plan). This is "
+                "not request_review, which dispatches a reviewer for a task "
+                "that's already awaiting-review; dispatch_task is for the first, "
+                "executor leg of the work. If dispatch is rejected because the "
+                "task isn't in 'todo' -- e.g. it's 'failed' -- call reopen_task "
+                "first to get it back to a dispatchable state."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -266,7 +326,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="record_verdict",
-            description="Record a review verdict (pass/changes) for a dispatched task.",
+            description=(
+                "Use this once you (the reviewer) have actually examined a "
+                "task's diff against its acceptance criteria and reached a "
+                "pass/changes decision -- it records that verdict as a gate "
+                "pending approval. Precondition: the task must be 'in-review' "
+                "(i.e. request_review has already dispatched a reviewer run for "
+                "it). This is not approve_gate: record_verdict is the reviewer "
+                "stating the decision for the first time, approve_gate is "
+                "confirming a pending gate (verdict or otherwise) that already "
+                "exists. Never record a verdict for a review you did not "
+                "actually run. If this is rejected because the task isn't "
+                "'in-review' yet, call request_review first to dispatch the "
+                "review run."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -286,9 +359,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="attach_result",
             description=(
-                "Submit an executor's existing commit for a dispatched task. "
-                "The task always moves to awaiting-review so an independent reviewer can "
-                "verify the changes; this tool can never mark a task done."
+                "Use this when an executor already made a commit but the task "
+                "record's result_ref never got set -- e.g. an agent run reported "
+                "success without printing RESULT_REF, or someone committed by "
+                "hand outside a dispatch. It attaches the commit and always "
+                "moves the task to awaiting-review so an independent reviewer "
+                "can verify it; it can never mark a task done itself. "
+                "Precondition: the task must be 'dispatched' (a retry after the "
+                "first successful call is also accepted). This is not "
+                "land_task: land_task performs the actual merge of an already "
+                "reviewed, pass-verdict result into the integration branch; "
+                "attach_result only records which commit to review and never "
+                "merges anything. If the task is 'failed' instead of "
+                "'dispatched', call reopen_task first to bring it back to a "
+                "state where attach_result is valid."
             ),
             parameters={
                 "type": "object",
@@ -303,7 +387,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "enum": ["request_review"],
                         "default": "request_review",
                         "description": (
-                            "Submit the result to awaiting-review for review dispatch"
+                            "Kept as an explicit field only so a caller can see, "
+                            "in the schema itself, that attaching a result always "
+                            "routes to review and never to done -- there is no "
+                            "other value to choose; omit it and the same "
+                            "'request_review' behavior applies automatically."
                         ),
                     },
                 },
@@ -320,10 +408,21 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="approve_gate",
             description=(
-                "Approve a gate awaiting human confirmation before it "
-                "proceeds. Pass gate_record_id when you have it (use the "
-                "'admin:<id>' form returned by manage_* tools for admin "
-                "gates); task_id alone resolves that task's pending gate."
+                "Use this once a pending gate (dispatch, review_order, verdict, "
+                "escalation, safety_brake, or an admin gate from manage_project/"
+                "manage_agent/manage_knowledge/update_settings) has actually been "
+                "checked and you're ready to let it proceed or reject it. Pass "
+                "gate_record_id when you have it (use the 'admin:<id>' form "
+                "returned by manage_* tools for admin gates); task_id alone "
+                "resolves that task's pending gate. This is not record_verdict: "
+                "record_verdict is the reviewer originating a pass/changes "
+                "decision, approve_gate is confirming a gate that already exists "
+                "and is pending -- including the verdict gate record_verdict "
+                "just created. Precondition: a gate must actually be pending "
+                "(get_status or a pending_approvals note tells you this). If "
+                "there's no pending gate to approve, there is nothing to recover "
+                "-- the underlying action (dispatch_task, request_review, "
+                "record_verdict, manage_*) has to be called first to create one."
             ),
             parameters={
                 "type": "object",
@@ -358,11 +457,21 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="land_task",
             description=(
-                "Merge a pass-verdict task's result into the project's "
-                "integration branch (retry after a landing failure, or "
-                "backfill a legacy done task whose ct-run branch was never "
-                "merged). Landing normally happens automatically when the "
-                "verdict gate approves."
+                "Use this to actually merge a task's reviewed result into the "
+                "project's integration branch -- normally this happens "
+                "automatically the moment the verdict gate is approved, so you "
+                "only need to call it by hand to retry after a reported landing "
+                "failure, or to backfill a legacy 'done' task whose ct-run "
+                "branch was never merged. Precondition: the task needs an "
+                "approved pass verdict on record (require_approved_pass_verdict) "
+                "and a result_ref; this is not attach_result or record_verdict, "
+                "neither of which ever performs the merge -- land_task is the "
+                "only tool that touches the integration branch. Never merge "
+                "ct-run/* branches yourself outside this tool. If land_task "
+                "reports 'landing_failed', fix whatever the error names in the "
+                "repo and call land_task again; if there's no approved pass "
+                "verdict yet, get the review through record_verdict and "
+                "approve_gate first."
             ),
             parameters={
                 "type": "object",
@@ -380,7 +489,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="cancel_task",
-            description="Cancel a task.",
+            description=(
+                "Use this when a task is no longer wanted at all, regardless of "
+                "its current status, and should stop moving through the "
+                "lifecycle for good. This is not archive_task: archive_task "
+                "soft-deletes a task (usually already done or otherwise "
+                "finished) while preserving it for history and lets you restore "
+                "it; cancel_task ends an active task's workflow. No status "
+                "precondition -- it works from most in-flight states. If you "
+                "cancel a task by mistake, there is no direct undo tool; use "
+                "update_task to review its state or create_task to start the "
+                "work again."
+            ),
             parameters={
                 "type": "object",
                 "properties": {"task_id": {"type": "string"}},
@@ -396,13 +516,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="reopen_task",
             description=(
-                "Bring a failed task back to a workable state. A task with a "
-                "delivered result_ref returns to awaiting-review (an "
-                "independent reviewer still has to pass it before landing); "
-                "one without returns to todo. Use this when a task reached "
-                "'failed' for a reason unrelated to the work itself -- a "
-                "budget brake firing after the result was delivered, or an "
-                "escalation raised while a step was still in flight."
+                "Use this when get_status shows a task stuck at 'failed' for a "
+                "reason unrelated to the work itself -- a budget brake firing "
+                "after the result was already delivered, or an escalation "
+                "raised while a step was still in flight -- and you want it "
+                "workable again. A task with a delivered result_ref returns to "
+                "awaiting-review (an independent reviewer still has to pass it "
+                "before landing, via request_review/record_verdict); one "
+                "without returns to 'todo' so dispatch_task can pick it up "
+                "again. Precondition: the task must be 'failed' -- this is not "
+                "cancel_task, which ends a task for good with no path back; "
+                "reopen_task exists specifically to undo a 'failed' state. If "
+                "reopen_task itself is rejected because the task isn't "
+                "'failed', there's nothing to recover -- check get_status for "
+                "its real status and use the tool matching that state instead."
             ),
             parameters={
                 "type": "object",
@@ -419,9 +546,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="get_task_events",
             description=(
-                "Poll task events with a cursor. Use since_id to fetch only "
-                "events newer than the last one you saw; kind=decision "
-                "returns events that need a coordinator decision."
+                "Use this when you want the event history/timeline for a task "
+                "-- what happened and in what order -- rather than just its "
+                "current status; pass since_id to fetch only events newer than "
+                "the last one you saw, or kind='decision' to filter to events "
+                "that need a coordinator decision. This is not wait_for_task: "
+                "wait_for_task blocks server-side until something new happens, "
+                "get_task_events is a non-blocking poll you drive yourself. No "
+                "status precondition -- works for a task in any state, or omit "
+                "task_id for events across all tasks. If since_id is stale or "
+                "invalid, drop it and call again from the start to resync."
             ),
             parameters={
                 "type": "object",
@@ -445,13 +579,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="wait_for_task",
             description=(
-                "Long-poll one task until something happens: a status change, "
-                "a pending gate that needs approval, or a terminal state "
-                "(done/failed/cancelled). Blocks server-side up to "
-                "timeout_seconds and returns the task snapshot, the latest "
-                "run, and new events in one call — use this instead of "
-                "polling get_status on a timer. On timeout (changed=false), "
-                "call it again with the returned cursor as since_event_id."
+                "Use this right after dispatching or requesting review on a "
+                "task, when you just need to know the moment something "
+                "happens -- a status change, a pending gate needing approval, "
+                "or a terminal state (done/failed/cancelled) -- instead of "
+                "checking repeatedly. It blocks server-side up to "
+                "timeout_seconds and returns the task snapshot, latest run, and "
+                "new events in one call; this is not get_status, which returns "
+                "immediately with only a snapshot and no blocking. No status "
+                "precondition -- works on a task in any state. On timeout "
+                "(changed=false) there's nothing to recover: just call it again "
+                "with the returned cursor as since_event_id to keep waiting."
             ),
             parameters={
                 "type": "object",
@@ -484,8 +622,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="archive_task",
             description=(
-                "Archive a task (soft delete preserving history), or restore "
-                "a previously archived one with restore=true."
+                "Use this to tidy up a task that's finished or no longer "
+                "relevant to active views, without losing its history -- pass "
+                "restore=true to bring a previously archived task back. This is "
+                "not cancel_task: cancel_task stops an active task's workflow "
+                "outright, archive_task hides an already-settled task and can "
+                "be undone. No status precondition -- any task can be archived. "
+                "If you archived the wrong task, there's no separate recovery "
+                "tool: call archive_task again on the same id with restore=true."
             ),
             parameters={
                 "type": "object",
@@ -505,10 +649,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="suggest_agents",
             description=(
-                "Advisory agent ranking for a task without dispatching: "
-                "returns the top candidates with score and reason, using the "
-                "same matcher dispatch uses (skill/performance/load/cost/"
-                "risk). Read-only."
+                "Use this when you want to see which agent dispatch_task would "
+                "pick, or compare candidates, before actually committing to a "
+                "dispatch -- it returns the top candidates with score and "
+                "reason from the same matcher (skill/performance/load/cost/"
+                "risk), and is purely read-only, unlike dispatch_task which "
+                "actually assigns the executor and moves the task. No status "
+                "precondition -- works on any task id you want a ranking for. "
+                "If the ranking looks wrong or empty, check the task's project "
+                "and required capabilities with get_status/query_db rather than "
+                "retrying suggest_agents itself."
             ),
             parameters={
                 "type": "object",
@@ -533,13 +683,21 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="request_review",
             description=(
-                "Move a task from awaiting-review to in-review by dispatching "
-                "a real /code-review run against its committed base..head "
-                "range. If reviewer is omitted, one is auto-selected and is "
-                "always independent from the executor (four-eyes); if no "
-                "independent reviewer is available this fails rather than "
-                "lowering the bar. An explicitly requested invalid reviewer "
-                "is rejected with valid alternatives and is never silently replaced."
+                "Use this once a task has a result attached (via attach_result "
+                "or a successful execute run) and is sitting at 'awaiting-"
+                "review' -- it dispatches a real /code-review run against the "
+                "committed base..head range and moves the task to 'in-review'. "
+                "If reviewer is omitted, one is auto-selected and is always "
+                "independent from the executor (four-eyes); if no independent "
+                "reviewer is available this fails rather than lowering the bar, "
+                "and an explicitly requested invalid reviewer is rejected with "
+                "valid alternatives rather than silently replaced. This is not "
+                "dispatch_task, which assigns the first, executor leg of work "
+                "on a 'todo' task -- request_review is the second, reviewer "
+                "leg on a task that already has a result. If it's rejected "
+                "because the task isn't 'awaiting-review' yet, attach the "
+                "result first (attach_result) or wait for the execute run to "
+                "finish."
             ),
             parameters={
                 "type": "object",
@@ -562,13 +720,21 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="generate_spec_plan",
             description=(
-                "Run the research-first spec/plan gate for a 'todo' task with "
-                "a CLI agent inside the project repo, then run an independent, "
-                "focused plan critic before dispatch. The critic has a 150k token "
-                "budget, receives no diff, and may reject only with reproducible "
-                "evidence. Persists the extended plan contract and critic verdict. "
-                "If the critic step fails after the plan is written, the plan stays "
-                "on the task — retry with critique_spec_plan instead of re-running this."
+                "Use this before dispatching a non-trivial 'todo' task when you "
+                "want a researched spec/plan in place first, and no plan exists "
+                "on the task yet -- it runs a CLI agent inside the project repo "
+                "to write the plan, then an independent, focused plan critic "
+                "(150k token budget, no diff access, may reject only with "
+                "reproducible evidence) before the task is dispatch-eligible. "
+                "This is not critique_spec_plan: critique_spec_plan re-runs "
+                "only the critic against a plan that's already written, never "
+                "calling the planner again. Precondition: task should be "
+                "'todo' with no usable plan yet (plan-only autonomy mode "
+                "requires this gate before dispatch_task will accept it). If "
+                "the critic step fails after the plan itself was written "
+                "successfully, don't call generate_spec_plan again and burn "
+                "another planner run -- call critique_spec_plan instead, since "
+                "the plan already persisted on the task."
             ),
             parameters={
                 "type": "object",
@@ -601,10 +767,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="critique_spec_plan",
             description=(
-                "Run the independent plan critic alone against the plan already "
-                "stored on a task — never calls the planner. Use this to retry a "
-                "critic that failed or was rejected without burning another planner "
-                "call; each run appends a new plan_critic gate record."
+                "Use this when a task already has a plan stored on it (from a "
+                "prior generate_spec_plan call) and the critic step needs to "
+                "run or re-run -- because it failed, was rejected, or you want "
+                "a fresh independent pass -- without paying for another planner "
+                "call. It never calls the planner itself, only the critic, and "
+                "each run appends a new plan_critic gate record. This is not "
+                "generate_spec_plan, which is required first to actually write "
+                "the plan when none exists yet. Precondition: the task must "
+                "already have a stored plan. If critique_spec_plan is rejected "
+                "because there's no plan to critique, call generate_spec_plan "
+                "first to produce one."
             ),
             parameters={
                 "type": "object",
@@ -629,7 +802,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="compact_context",
-            description="Summarize older session messages to reduce context size.",
+            description=(
+                "Use this on your own session when it has grown long and older "
+                "messages are eating context budget you'd rather spend on the "
+                "current work -- it summarizes older session messages in place. "
+                "This is not save_project_context, which persists durable "
+                "project conventions for future sessions to read; "
+                "compact_context only shrinks this session's own history. No "
+                "precondition beyond having an active session. There's no "
+                "specific rejection path -- if it doesn't help enough, keep "
+                "working and call it again later as the session grows further."
+            ),
             parameters={"type": "object", "properties": {}},
             handler="compact_context",
             tier="deferred",
@@ -641,10 +824,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="manage_project",
             description=(
-                "Create, update, archive, or restore a project. No hard delete. "
-                "Admin-permission: in "
-                "supervised mode this creates a pending gate awaiting "
-                "/approve; in bypass mode it applies immediately."
+                "Use this when the unit you're creating/changing is the "
+                "project itself -- its repo_root, name, mode, status -- rather "
+                "than a task inside it; action=create/update/archive/restore, "
+                "with no hard delete. This is not update_task, which edits a "
+                "task's own fields and never touches project-level settings. "
+                "Admin-permission: in supervised mode this creates a pending "
+                "gate awaiting approve_gate rather than applying immediately; "
+                "in bypass mode it applies right away. If the call returns a "
+                "pending admin gate, call approve_gate with the 'admin:<id>' "
+                "form to let it proceed."
             ),
             parameters={
                 "type": "object",
@@ -682,12 +871,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="manage_agent",
             description=(
-                "Create, update, or disable an agent. api_key is write-only: "
-                "it is encrypted before any record is persisted, never "
-                "echoed back, and never readable through any tool — use "
-                "has_api_key to check whether one is set. Admin-permission: "
-                "in supervised mode this creates a pending gate awaiting "
-                "/approve; in bypass mode it applies immediately."
+                "Use this to register a new CLI/API agent, change one's "
+                "roles/capabilities/model/effort, or disable/archive/restore "
+                "one -- action=create/update/disable/archive/restore. api_key "
+                "is write-only: it is encrypted before any record is "
+                "persisted, never echoed back, and never readable through any "
+                "tool -- check has_api_key instead of expecting api_key back. "
+                "This is not suggest_agents, which only ranks existing agents "
+                "for a task and never mutates the roster. Admin-permission: in "
+                "supervised mode this creates a pending gate awaiting "
+                "approve_gate rather than applying immediately; in bypass mode "
+                "it applies right away. If it returns a pending admin gate, "
+                "call approve_gate with the 'admin:<id>' form."
             ),
             parameters={
                 "type": "object",
@@ -756,7 +951,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ),
         ToolSpec(
             name="manage_knowledge",
-            description="Create, update, archive, or restore a knowledge item. No hard delete.",
+            description=(
+                "Use this to save or edit a standalone knowledge-base article -- "
+                "action=create/update/archive/restore, no hard delete. This is "
+                "not manage_notes: manage_notes handles smaller agent notes with "
+                "many-to-many links to specific projects/tasks and semantic "
+                "search; manage_knowledge is for titled, categorized reference "
+                "content with no gate to approve. No status precondition beyond "
+                "an id existing for update/archive/restore. If update/archive "
+                "is rejected for an unknown id, list existing items via "
+                "query_db (entity knowledge_items) to find the right one."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -787,7 +992,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="manage_notes",
             description=(
-                "Manage agent knowledge notes with many-to-many links to projects and tasks.\n"
+                "Use this for a smaller, linkable note tied to one or more "
+                "specific projects/tasks -- a fact, decision, observation, "
+                "procedure, or preference you want future sessions to find via "
+                "semantic search. This is not manage_knowledge: manage_knowledge "
+                "is for standalone titled/categorized reference articles; "
+                "manage_notes is for notes with explicit project_id/task_id "
+                "links and a query='...' semantic search action. No status "
+                "precondition for save/search/list; link/archive need an "
+                "existing note id, from a prior save or a search/list call. If "
+                "link/archive is rejected for an unknown id, call action='list' "
+                "or action='search' first to find the right id.\n"
                 "- save: create note, pass project_id/task_id to link immediately\n"
                 "- search: semantic search (query auto-embedded) or filter by project_id/task_id\n"
                 "- link: link existing note to additional projects/tasks\n"
@@ -822,11 +1037,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="update_settings",
             description=(
-                "Update a whitelisted system setting (see query_db "
-                "entity=settings for readable keys). Admin-permission: in "
-                "supervised mode this creates a pending gate awaiting "
-                "/approve; in bypass mode it applies immediately. Rejects "
-                "keys outside the whitelist. "
+                "Use this to change a system-wide setting like autonomy mode -- "
+                "not a specific project's or agent's own fields (use "
+                "manage_project/manage_agent for those). Reads the whitelist "
+                "via query_db (SELECT key, value FROM settings) to see what's "
+                "writable; keys outside the whitelist are rejected. "
+                "Admin-permission: in supervised mode this creates a pending "
+                "gate awaiting approve_gate rather than applying immediately; "
+                "in bypass mode it applies right away -- if it returns a "
+                "pending admin gate, call approve_gate with the 'admin:<id>' "
+                "form. "
                 "The `autonomy` setting controls task mode behavior: "
                 "`supervised` requires human approval at every gate, "
                 "`auto` allows low-risk tasks to bypass gates automatically, "
@@ -861,10 +1081,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="update_task",
             description=(
-                "Edit a task's raw input, plan, acceptance criteria, priority, tags, or "
-                "dependencies. Does not change task status — use "
-                "dispatch_task, record_verdict, or approve_gate for status "
-                "transitions."
+                "Use this to correct or extend a task's own content -- "
+                "raw_input, plan, acceptance_criteria, priority, tags, or "
+                "dependencies -- while it sits at whatever status it's "
+                "already at. This is not manage_project, which edits the "
+                "project the task lives in, not the task itself; also, "
+                "update_task never changes task status -- use dispatch_task, "
+                "record_verdict, or approve_gate for status transitions. No "
+                "status precondition, but the task id must exist. If the patch "
+                "is rejected (e.g. a dependency cycle), fix the patch content "
+                "and call update_task again -- there's no separate recovery "
+                "tool."
             ),
             parameters={
                 "type": "object",
@@ -892,8 +1119,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="get_minimal_context",
             description=(
-                "Read-only semantic search over the project's code graph and "
-                "return compact context relevant to a query."
+                "Use this when you're about to touch code and want a compact, "
+                "relevant slice of the project's code graph for a natural-"
+                "language query, instead of reading whole files blind. This is "
+                "not get_impact_radius: get_impact_radius answers 'what breaks "
+                "if I change this file', get_minimal_context answers 'what code "
+                "is relevant to this topic'. Read-only, no status precondition "
+                "-- works for any project the graph has indexed. If results "
+                "look thin or empty, the graph may not be built for this repo "
+                "yet; save_project_context after scanning the repo, or narrow "
+                "the query and try again."
             ),
             parameters={
                 "type": "object",
@@ -914,8 +1149,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="get_impact_radius",
             description=(
-                "Read-only compact blast-radius summary for a changed project file, "
-                "including risk and affected-file count."
+                "Use this before or after editing a specific file, when you "
+                "need to know what else could be affected -- it returns a "
+                "compact blast-radius summary with risk and affected-file "
+                "count for that one file. This is not get_minimal_context, "
+                "which searches by topic/query across the whole graph rather "
+                "than tracing dependents of one known file path. Read-only, no "
+                "status precondition. If the file path isn't recognized, "
+                "double-check it's project-relative (not absolute) and that "
+                "the project's code graph has been built."
             ),
             parameters={
                 "type": "object",
@@ -942,10 +1184,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="save_project_context",
             description=(
-                "Save generated project context (context_md) and up to 5 scoped "
-                "rules for a project. Used after scanning a repo to persist "
-                "conventions/boundaries that get injected into future dispatch "
-                "and review prompts."
+                "Use this after scanning a repo's conventions and boundaries, "
+                "as an executor, to persist that project context (context_md, "
+                "up to 5 scoped rules) so it gets injected into future dispatch "
+                "and review prompts automatically. This is not compact_context, "
+                "which shrinks this session's own message history and has "
+                "nothing to do with project conventions. Precondition: needs "
+                "task_id (so an executor token passes the task-scope check) and "
+                "project_id. If it's rejected for a missing task_id/project_id, "
+                "supply them from the current dispatch's task/project rather "
+                "than retrying blind."
             ),
             parameters={
                 "type": "object",
@@ -992,9 +1240,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="impl_design",
             description=(
-                "Create, read, or code-score the one implementation design directly "
-                "above a task. Completeness returns six mechanical checks with reasons; "
-                "it never calls an LLM and never scores document length."
+                "Use this to write down or read the single implementation "
+                "design that sits directly above a task -- files touched, "
+                "symbol changes, test plan, risks -- via action=create/get, "
+                "or to mechanically score it with action=score_completeness "
+                "(six fixed checks with reasons; never calls an LLM, never "
+                "scores by document length). This is not spec_write, which "
+                "records durable living-spec claims and code anchors across "
+                "the whole codebase, not a single task's design doc. No status "
+                "precondition beyond the task existing; action='get' on a task "
+                "with no design just returns empty -- call action='create' "
+                "first."
             ),
             parameters={
                 "type": "object",
@@ -1036,14 +1292,22 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="spec_write",
             description=(
-                "Write living-spec items, relations, code anchors, and manual task links "
-                "in one transaction. Task-link relations are implements, modifies, "
-                "violates, or references. "
-                "For anchor operations, omit anchor_sha: the server computes a Python "
-                "declaration hash or a whole-file hash for non-Python paths. A manual "
-                "fallback is accepted only when the repo is not checked out and must be "
-                "exactly 64 hex characters. "
-                "Always preserve derived_from_sha and confidence when recording a claim."
+                "Use this to record or update a durable claim about how the "
+                "codebase actually behaves -- create/update/supersede a "
+                "spec_item, add a relation, anchor it to code, or manually "
+                "link it to a task (relations: implements, modifies, violates, "
+                "references) -- all as one transaction. This is not "
+                "impl_design, which is a single task's own upfront design doc, "
+                "not a durable cross-task claim about the codebase; also not "
+                "manage_notes, which is free-text agent notes rather than "
+                "anchored, provenance-tracked spec claims. For anchor "
+                "operations, omit anchor_sha and let the server compute it "
+                "(a manual 64-hex fallback is accepted only when the repo "
+                "isn't checked out). Always preserve derived_from_sha and "
+                "confidence when recording a claim. If an op is rejected for a "
+                "missing field (e.g. a task_link missing relation/confidence/"
+                "created_by), fix that op and resubmit -- spec_get shows what "
+                "already exists so you can check before you supersede it."
             ),
             parameters={
                 "type": "object",
@@ -1075,9 +1339,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="spec_get",
             description=(
-                "Read active living specs by ids, filter, or linked task_id. Returns "
-                "spec relations, code anchors, and task links in both top-level "
-                "and per-item views."
+                "Use this before writing code, or before calling spec_write, to "
+                "read what's already claimed about the codebase -- by spec item "
+                "ids, a filter (project_id/kind/status/confidence/provenance), "
+                "or task_id for specs manually linked to a task. This is not "
+                "spec_stale, which lists items flagged stale by the commit "
+                "invalidation engine rather than returning the general active "
+                "set. Read-only, no status precondition. If ids/filter/task_id "
+                "match nothing, that's a valid empty result, not an error -- "
+                "check spec_stale if you expected something that used to exist."
             ),
             parameters={
                 "type": "object",
@@ -1110,10 +1380,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="spec_stale",
             description=(
-                "List active spec_item rows the commit-triggered invalidation "
-                "engine flagged stale, with why (which symbol, which commit). "
-                "Pure lookup -- never re-derives staleness itself, and never "
-                "asks an LLM whether a spec item is still correct."
+                "Use this to see which spec items for a project the commit-"
+                "triggered invalidation engine has already flagged as "
+                "possibly-outdated, and why (which symbol, which commit) -- "
+                "before trusting spec_get results or before deciding what to "
+                "supersede via spec_write. It's a pure lookup: it never "
+                "re-derives staleness itself and never asks an LLM whether an "
+                "item is still correct, unlike spec_write's supersede op, "
+                "which is the actual way to fix a flagged item. Precondition: "
+                "just needs a valid project id. If it returns nothing, the "
+                "project may have no stale items right now, or the project id "
+                "is wrong -- check with query_db (entity projects)."
             ),
             parameters={
                 "type": "object",
@@ -1136,15 +1413,23 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         ToolSpec(
             name="load_tools",
             description=(
-                "Load additional tool schemas for the rest of this turn. Call "
-                "this before using a tool that isn't in the baseline set. "
-                "Groups: task_lifecycle (dispatch_task, record_verdict, "
-                "approve_gate, cancel_task, request_review, update_task, "
-                "archive_task, generate_spec_plan), admin (project/agent/"
-                "knowledge/settings management), session (compact_context), "
-                "research (get_minimal_context, get_impact_radius), query "
-                "(get_task_events, suggest_agents), spec (impl_design, spec_write, "
-                "spec_get, spec_stale)."
+                "Use this when you want to call a deferred tool that isn't in "
+                "your baseline schema set yet -- call load_tools with its group "
+                "first, in the same turn, before invoking that tool. This is "
+                "not a normal working tool: it doesn't touch tasks or data, "
+                "just exposes more schemas for the rest of this turn. Only "
+                "relevant to the OpenAI-style tool loop (the eager/deferred "
+                "split doesn't apply over MCP, where every tool is already "
+                "exposed). Groups: task_lifecycle (dispatch_task, "
+                "record_verdict, approve_gate, cancel_task, request_review, "
+                "update_task, archive_task, generate_spec_plan), admin "
+                "(project/agent/knowledge/settings management), session "
+                "(compact_context), research (get_minimal_context, "
+                "get_impact_radius), query (get_task_events, suggest_agents), "
+                "spec (impl_design, spec_write, spec_get, spec_stale). If a "
+                "tool call still fails as unrecognized after loading its "
+                "group, double check the group name against this list and "
+                "load_tools again with the right one."
             ),
             parameters={
                 "type": "object",
