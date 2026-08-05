@@ -275,19 +275,41 @@ class TaskHandlersMixin:
     async def _handle_create_task(self, args: str, session_id: str) -> dict:
         from sqlalchemy import update as sa_update
 
+        # Two encodings: JSON from the MCP tool surface, and the legacy flag
+        # string from the `/pm <title> --project p` slash alias. The flag form
+        # cannot express a multi-line description, so the tool surface moved to
+        # JSON; the string form is kept so typed commands keep working.
         depends_on: list[str] = []
-        if '--depends-on' in args:
-            args, dep_part = args.split('--depends-on', 1)
-            dep_part = dep_part.strip().split()[0] if dep_part.strip() else ''
-            depends_on = [dep_id for dep_id in dep_part.split(',') if dep_id]
-
+        description = ''
         project = None
         title = args
-        if '--project' in args:
-            parts = args.split('--project')
-            title = parts[0].strip()
-            explicit_project = parts[1].strip().split()[0] if parts[1].strip() else ''
-            project = explicit_project or None
+
+        payload = None
+        if args.strip().startswith('{'):
+            try:
+                candidate = json.loads(args)
+                if isinstance(candidate, dict):
+                    payload = candidate
+            except json.JSONDecodeError:
+                payload = None
+
+        if payload is not None:
+            title = str(payload.get('title', '')).strip()
+            project = str(payload.get('project', '')).strip() or None
+            description = str(payload.get('description', '') or '')
+            depends_on = [str(d) for d in (payload.get('depends_on') or []) if d]
+        else:
+            if '--depends-on' in args:
+                args, dep_part = args.split('--depends-on', 1)
+                dep_part = dep_part.strip().split()[0] if dep_part.strip() else ''
+                depends_on = [dep_id for dep_id in dep_part.split(',') if dep_id]
+
+            title = args
+            if '--project' in args:
+                parts = args.split('--project')
+                title = parts[0].strip()
+                explicit_project = parts[1].strip().split()[0] if parts[1].strip() else ''
+                project = explicit_project or None
 
         if not project:
             session = (
@@ -329,6 +351,11 @@ class TaskHandlersMixin:
             id=task_id,
             title=title,
             project=project,
+            # raw_input is the field the planner actually reads (_build_prompt
+            # in spec_plan_generator). A task created without it has nothing but
+            # a title to plan from, and the fail-closed dispatch check will
+            # refuse it — which is exactly how CTV2-1380 ended up unrecoverable.
+            raw_input=description or None,
             status='todo',
             current_gate='spec',
             created_at=now,

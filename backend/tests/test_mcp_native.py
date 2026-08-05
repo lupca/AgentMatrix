@@ -504,6 +504,100 @@ async def test_mcp_tool_list_is_filtered_by_token_role(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_unknown_arguments_are_rejected_instead_of_silently_dropped(monkeypatch):
+    """A tool must never answer "created" to an argument it threw away.
+
+    Four tasks were created with description=... on 2026-08-05, back when
+    create_task did not declare that parameter: each returned
+    {"action": "created"} and discarded the whole description. The loss surfaced
+    days later, while investigating something unrelated.
+
+    `description` is an accepted parameter now (see the test below), so this
+    uses a name that is still genuinely unknown — the guard is about the class
+    of mistake, not that one field.
+    """
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    server = build_server(default_token=issue_token("test-secret", role="coordinator"))
+
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "create_task",
+            {"title": "T", "project": "agenticmatix", "acceptance_criteria": ["x"]},
+        )
+
+    error = json.loads(result.content[0].text)["error"]
+    assert error["code"] == "unknown_arguments"
+    assert "acceptance_criteria" in error["message"]
+    # The caller must learn the value is gone and how to store it properly.
+    assert "update_task" in error["hint"]
+
+
+@pytest.mark.asyncio
+async def test_create_task_stores_the_description_it_accepts(monkeypatch):
+    """Rejecting unknown names is only half the fix.
+
+    Without a way to set the description at creation, every task would still
+    start with nothing but a title for the planner to work from — and the
+    fail-closed dispatch check would refuse it, which is how CTV2-1380 became
+    unrecoverable. raw_input is the field the planner actually reads.
+    """
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="p1", name="P", repo_root="/tmp"))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    server = build_server(default_token=issue_token("test-secret", role="coordinator"))
+    # Multi-line with quotes and backticks: exactly what the old flag-string
+    # encoding could not carry.
+    spec_text = '# Problem\n\nMulti-line spec with `code` and "quotes".'
+
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "create_task",
+            {"title": "T", "project": "p1", "description": spec_text},
+        )
+
+    payload = json.loads(result.content[0].text)
+    assert payload.get("error") is None, payload
+    task_id = payload["data"]["task_id"]
+
+    check = session_factory()
+    try:
+        row = check.get(Task, task_id)
+        assert row is not None, task_id
+        assert row.raw_input == spec_text
+        assert row.title == "T"
+    finally:
+        check.close()
+
+
+@pytest.mark.asyncio
+async def test_permission_is_checked_before_arguments(monkeypatch):
+    """Argument feedback is an oracle; it belongs behind the permission check.
+
+    A first draft validated arguments first, so an executor token calling a
+    coordinator-only tool learned about its parameters instead of being refused.
+    """
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    executor = build_server(
+        default_token=issue_token("test-secret", role="executor", task_id="task-1")
+    )
+
+    async with Client(executor) as client:
+        # Both forbidden AND malformed: the permission error must win.
+        result = await client.call_tool("manage_agent", {"bogus_argument": 1})
+
+    assert json.loads(result.content[0].text)["error"]["code"] == "forbidden"
+
+
+@pytest.mark.asyncio
 async def test_mcp_tool_list_filters_each_http_connection_by_its_token(monkeypatch):
     """One HTTP server must project a different tools/list for each token."""
     monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")

@@ -96,11 +96,12 @@ class CommandRouter(
             title = str(args.get('title', '')).strip()
             if not title:
                 return {'error': 'title is required'}
-            project = str(args.get('project', '')).strip()
-            depends_on = args.get('depends_on') or []
-            command_args = title + (f' --project {project}' if project else '')
-            if depends_on:
-                command_args += ' --depends-on ' + ','.join(str(d) for d in depends_on)
+            # JSON, following the manage_inbox convention. The old flag-string
+            # encoding (`title --project p --depends-on a,b`) cannot carry a
+            # multi-line description, which is why create_task had no way to
+            # set one — and why four task descriptions were lost on 2026-08-05.
+            # The handler still accepts the flag string so `/pm <title>` works.
+            command_args = json.dumps(args, ensure_ascii=False)
         elif canonical_name == 'manage_inbox':
             action = str(args.get('action', '')).strip().lower()
             if not action:

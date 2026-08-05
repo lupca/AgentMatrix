@@ -33,6 +33,10 @@ from app.db.base import SessionLocal
 from app.db.models import AdminGateRecord, GateRecord, Session as SessionModel, Task
 from app.graph.context import invalidate_context_snapshot
 from app.services.command_router import CommandRouter
+from app.services.tool_argument_validator import (
+    describe_problems,
+    validate_tool_arguments,
+)
 from app.services.tool_registry import ToolSpec, get_mcp_tool_specs
 
 # Injected into every connecting CLI's system prompt at initialize (Claude
@@ -381,6 +385,27 @@ def make_tool_handler(
             return {"ok": False, "data": None, "error": {"code": "unauthorized", "message": "Invalid or missing MCP token"}}
         if spec.required_role == "coordinator" and claims.role != "coordinator":
             return {"ok": False, "data": None, "error": {"code": "forbidden", "message": "This tool requires a coordinator token"}}
+        # Argument validation comes AFTER authn/authz and BEFORE any DB session.
+        #
+        # After: a caller with no right to this tool must be told "forbidden",
+        # not handed a description of its parameters — argument feedback is a
+        # small oracle and it belongs behind the permission check. Ordering it
+        # the other way also changed the error a forbidden call receives, which
+        # is what test_mcp_tool_list_is_filtered_by_token_role caught.
+        #
+        # Before: a malformed call should not cost a database connection, and
+        # must never reach a handler that would quietly discard part of it.
+        problems = validate_tool_arguments(spec, kwargs)
+        if problems:
+            return {
+                "ok": False,
+                "data": None,
+                "error": describe_problems(
+                    spec.name,
+                    problems,
+                    (spec.parameters.get("properties") or {}).keys(),
+                ),
+            }
         scoped_kwargs = _task_scope_arguments(claims, spec, kwargs)
         if not _task_scope_ok(claims, spec, scoped_kwargs):
             return {"ok": False, "data": None, "error": {"code": "task_scope_violation", "message": "Executor token is scoped to a different task"}}

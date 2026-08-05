@@ -64,6 +64,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "properties": {
                     "title": {"type": "string", "description": "Task title"},
                     "project": {"type": "string", "description": "Project id"},
+                    "description": {
+                        "type": "string",
+                        "description": (
+                            "Full task specification, stored as raw_input — the "
+                            "field the planner reads. Include the problem, the "
+                            "evidence, the constraints and what must NOT be done. "
+                            "A task created without it has only a title to plan "
+                            "from and will be refused at dispatch."
+                        ),
+                    },
                     "depends_on": {
                         "type": "array",
                         "items": {"type": "string"},
