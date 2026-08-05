@@ -21,8 +21,9 @@ destroying a delivered result, and there is a way back when a task does end up
 
 import pytest
 
-from app.db.models import Agent, Project, Task
+from app.db.models import Agent, AgentRun, GateRecord, Project, Task
 from app.services.task_orchestration import (
+    BrakeViolationError,
     OrchestrationError,
     PrerequisiteError,
     TaskOrchestrationService,
@@ -85,6 +86,21 @@ def test_budget_brake_leaves_a_delivered_result_reviewable(service, db_session):
     # it just may not throw the finished work away.
     assert task.awaiting_approval is True
     assert "token limit" in (task.error or "")
+    assert db_session.query(GateRecord).filter_by(
+        task_id=task.id, gate_type="safety_brake"
+    ).count() == 1
+
+    decision = service.check_brakes(task, for_spawn=True, audit=False)
+    assert decision.allowed is False
+    assert decision.code == "pending_gate"
+    with pytest.raises(BrakeViolationError, match="pending gate"):
+        service.request_review(
+            task_id=task.id,
+            reviewer="@reviewer",
+            actor="chat:test",
+            idempotency_key="review-blocked-by-brake",
+        )
+    assert db_session.query(AgentRun).filter_by(task_id=task.id).count() == 0
 
 
 def test_budget_brake_still_fails_a_task_with_nothing_delivered(service, db_session):
@@ -101,9 +117,57 @@ def test_budget_brake_still_fails_a_task_with_nothing_delivered(service, db_sess
     db_session.refresh(task)
 
     assert task.status == "failed"
+    assert db_session.query(AgentRun).filter_by(task_id=task.id).count() == 0
+
+
+@pytest.mark.parametrize(
+    ("code", "task_id"),
+    [
+        ("autonomy_disabled", "BRAKE-AUTO"),
+        ("cost_limit", "BRAKE-COST"),
+        ("token_limit", "BRAKE-TOKEN"),
+    ],
+)
+def test_each_budget_brake_blocks_new_review_spend_after_delivery(
+    service, db_session, code, task_id
+):
+    task = _add_task(
+        db_session,
+        task_id,
+        status="awaiting-review",
+        executor="@executor",
+        result_ref="base-sha..head-sha",
+        current_gate="review_order",
+    )
+    TaskValidator(db_session)._record_brake(
+        task, BrakeDecision(False, f"{code} fired", code)
+    )
+
+    db_session.refresh(task)
+    assert task.status == "awaiting-review"
+    assert task.awaiting_approval is True
+    assert service.check_brakes(task, for_spawn=True).code == "pending_gate"
+    with pytest.raises(BrakeViolationError):
+        service.request_review(
+            task_id=task.id,
+            reviewer="@reviewer",
+            actor="chat:test",
+            idempotency_key=f"{task_id}:review-blocked",
+        )
+    assert db_session.query(AgentRun).filter_by(task_id=task.id).count() == 0
 
 
 def test_reopen_sends_a_delivered_task_back_to_the_review_boundary(service, db_session):
+    brake = GateRecord(
+        task_id="REOPEN-001",
+        gate_type="safety_brake",
+        status="rejected",
+        actor="system:safety-brake",
+        mode="bypass",
+        input_payload={"code": "token_limit"},
+        error_message="Task token limit reached",
+    )
+    db_session.add(brake)
     task = _add_task(
         db_session,
         "REOPEN-001",
@@ -124,6 +188,8 @@ def test_reopen_sends_a_delivered_task_back_to_the_review_boundary(service, db_s
     # that closed the task.
     assert result.gate_record.gate_type == "reopen"
     assert result.gate_record.status == "approved"
+    assert result.gate_record.parent_id == brake.id
+    assert db_session.get(GateRecord, brake.id).status == "rejected"
 
 
 def test_reopen_sends_an_undelivered_task_back_to_todo(service, db_session):
@@ -231,3 +297,79 @@ def test_reopen_does_not_hand_out_a_verdict(service, db_session):
     assert task.landed_ref is None
     with pytest.raises(OrchestrationError):
         service.land_task(task_id=task.id, actor="chat:test")
+
+
+def test_failed_delivered_result_recovers_through_independent_review_and_land(
+    service, db_session
+):
+    """The MCP lifecycle remains four-eyes after a terminal failure."""
+
+    brake = GateRecord(
+        task_id="REOPEN-FLOW",
+        gate_type="safety_brake",
+        status="rejected",
+        actor="system:safety-brake",
+        mode="supervised",
+        input_payload={"code": "token_limit"},
+        error_message="Task token limit reached",
+    )
+    db_session.add(brake)
+    task = _add_task(
+        db_session,
+        "REOPEN-FLOW",
+        mode="supervised",
+        status="failed",
+        executor="@executor",
+        result_ref="base-sha..head-sha",
+    )
+
+    reopened = service.reopen_failed_task(task_id=task.id, actor="chat:test")
+    assert reopened.task.status == "awaiting-review"
+    assert reopened.gate_record.parent_id == brake.id
+
+    review_request = service.request_review(
+        task_id=task.id,
+        reviewer="@reviewer",
+        actor="chat:test",
+        idempotency_key="reopen-flow-review",
+    )
+    assert review_request.applied is False
+    review_gate = review_request.gate_record
+    assert review_gate.gate_type == "review_order"
+
+    reviewed = service.decide_gate(
+        gate_record_id=review_gate.id,
+        decision="approved",
+        actor="chat:supervisor",
+        idempotency_key="reopen-flow-review-approve",
+    )
+    assert reviewed.task.status == "in-review"
+    assert reviewed.agent_run is not None
+    assert reviewed.agent_run.agent_id == "@reviewer"
+    assert reviewed.agent_run.agent_id != reviewed.task.executor
+    reviewed.agent_run.status = "success"
+    db_session.commit()
+
+    verdict_request = service.request_verdict(
+        task_id=task.id,
+        verdict="pass",
+        ac_results=[{"passed": True}],
+        actor="@reviewer",
+        idempotency_key="reopen-flow-verdict",
+    )
+    assert verdict_request.applied is False
+    verdict_gate = verdict_request.gate_record
+
+    verdict = service.decide_gate(
+        gate_record_id=verdict_gate.id,
+        decision="approved",
+        actor="chat:supervisor",
+        idempotency_key="reopen-flow-verdict-approve",
+    )
+    assert verdict.task.status == "done"
+    assert verdict.task.verdict == "pass"
+    assert verdict.task.landed_ref is None  # /tmp is not a project repository
+
+    landed = service.land_task(task_id=task.id, actor="chat:supervisor")
+    assert landed["status"] == "done"
+    assert db_session.get(GateRecord, brake.id).status == "rejected"
