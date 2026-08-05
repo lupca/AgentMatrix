@@ -1632,12 +1632,31 @@ class TaskStateMachine:
         self, *, task_id: str, reason: str, actor: str = "system"
     ) -> GateRecord:
         task = self.validator.task(task_id)
-        self.cas_status(task, "failed")
+        # An escalation means "stop and ask a human", not "this task is dead".
+        # Every reason that reaches here is human-actionable: missing
+        # acceptance criteria (add them), a failed dependency (reopen it), no
+        # available executor or reviewer (enable an agent), a transient
+        # dispatch/review exception (retry), the changes-requested round limit
+        # (whose own message says "escalating for a human replan"), or
+        # advance_task making no progress.
+        #
+        # It used to also set `failed`, which is terminal:
+        # `_sync_after_transition` then cancelled every active run and rejected
+        # every pending gate, so the very step that was about to unblock the
+        # task got killed and nothing could resolve the prompt this function
+        # had just written.  The system rang the bell for a human and locked
+        # the door.  On 2026-08-05 that killed CTV2-1382's delivered result and
+        # then CTV2-1388, the task filed to fix it.
+        #
+        # `awaiting_approval` is what actually stops the loop:
+        # `check_brakes` returns `pending_gate` for it (task_validators.py), so
+        # no new run is spawned while a human is being waited on.  The task
+        # keeps its status and stays recoverable.
         task.error = reason
         task.awaiting_approval = True
         task.approval_prompt = reason
         task.updated_at = datetime.now(timezone.utc)
-        payload = {"reason": reason, "task_status": "failed"}
+        payload = {"reason": reason, "task_status": task.status}
         record = self.ledger_record(
             task=task,
             gate_type="escalation",
@@ -1649,6 +1668,22 @@ class TaskStateMachine:
             error_message=reason,
         )
         self._sync_after_transition(task)
+        # Re-assert the projection *after* the sync.
+        #
+        # `_sync_after_transition` on a non-terminal status calls
+        # `sync_awaiting_approval`, which recomputes the flag from unresolved
+        # *pending* gate records.  An escalation is written as `rejected`, so
+        # that recompute clears the flag we just set -- and without it nothing
+        # stops advance_task from running straight into the same escalation
+        # again, forever.  Previously the flag being cleared did not matter
+        # because `failed` stopped everything; now it is the only brake.
+        #
+        # Kept as an explicit re-assert rather than writing the escalation as a
+        # `pending` gate: that would change what `approve_gate` and the
+        # append-only ledger mean for every escalation, which belongs in
+        # CTV2-1388's reviewed change, not here.
+        task.awaiting_approval = True
+        task.approval_prompt = reason
         self.audit(task, record, reason=reason)
         self.db.commit()
         self.db.refresh(task)

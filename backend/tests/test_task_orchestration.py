@@ -241,7 +241,7 @@ def test_workflow_state_is_derived_from_task_projection(
     assert task.workflow_state == expected
 
 
-def test_escalate_task_clears_approval_projection_without_pending_gate(
+def test_escalate_task_blocks_on_a_human_without_killing_the_task(
     orchestration, db_session
 ):
     task = _task(db_session, "ESCALATE-001", mode="bypass")
@@ -252,11 +252,16 @@ def test_escalate_task_clears_approval_projection_without_pending_gate(
         task_id=task.id, reason="Review output was invalid", actor="system:worker"
     )
 
-    assert task.status == "failed"
-    assert task.workflow_state == "blocked"
-    assert task.awaiting_approval is False
+    # An escalation asks a human to act; it does not declare the task dead.
+    # It used to also set `failed`, which is terminal -- that cancelled the
+    # active runs and rejected the pending gates, so the step that was about to
+    # unblock the task got killed and the prompt written here could never be
+    # answered (CTV2-1382 / CTV2-1388, 2026-08-05).
+    assert task.status == "dispatched"
+    assert task.workflow_state == "waiting_human"
+    assert task.awaiting_approval is True
     assert task.error == "Review output was invalid"
-    assert task.approval_prompt is None
+    assert task.approval_prompt == "Review output was invalid"
     assert record.gate_type == "escalation"
     assert record.status == "rejected"
     assert record.actor == "system:worker"

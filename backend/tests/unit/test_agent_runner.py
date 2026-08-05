@@ -1124,8 +1124,13 @@ def test_advance_task_todo_missing_ac_escalates_fail_closed(driver_db):
     assert outcome == "escalated_missing_ac"
     db = factory()
     task = db.get(Task, "ADV-001")
-    assert task.status == "failed"
-    assert task.awaiting_approval is False
+    # Escalation asks a human to act; it must not mark the task terminal.
+    # `failed` cancelled the active runs and rejected the pending gates,
+    # so the prompt the escalation had just written could never be
+    # answered (CTV2-1382 / CTV2-1388, 2026-08-05).  `awaiting_approval`
+    # is now the only thing stopping the loop, so it has to survive.
+    assert task.status == "todo"
+    assert task.awaiting_approval is True
     db.close()
     run_agent_mock.send.assert_not_called()
 
@@ -1336,8 +1341,13 @@ def test_advance_task_changes_requested_escalates_at_round_cap(driver_db):
     assert outcome == "escalated_round_limit"
     db = factory()
     task = db.get(Task, "ADV-008")
-    assert task.status == "failed"
-    assert task.awaiting_approval is False
+    # Escalation asks a human to act; it must not mark the task terminal.
+    # `failed` cancelled the active runs and rejected the pending gates,
+    # so the prompt the escalation had just written could never be
+    # answered (CTV2-1382 / CTV2-1388, 2026-08-05).  `awaiting_approval`
+    # is now the only thing stopping the loop, so it has to survive.
+    assert task.status == "changes-requested"
+    assert task.awaiting_approval is True
     db.close()
     run_agent_mock.send.assert_not_called()
 
@@ -1373,8 +1383,13 @@ def test_advance_task_changes_requested_escalates_at_custom_policy_round_cap(dri
     assert outcome == "escalated_round_limit"
     db = factory()
     task = db.get(Task, "ADV-POLICY-ROUND")
-    assert task.status == "failed"
-    assert task.awaiting_approval is False
+    # Escalation asks a human to act; it must not mark the task terminal.
+    # `failed` cancelled the active runs and rejected the pending gates,
+    # so the prompt the escalation had just written could never be
+    # answered (CTV2-1382 / CTV2-1388, 2026-08-05).  `awaiting_approval`
+    # is now the only thing stopping the loop, so it has to survive.
+    assert task.status == "changes-requested"
+    assert task.awaiting_approval is True
     db.close()
     run_agent_mock.send.assert_not_called()
 
@@ -1448,8 +1463,13 @@ def test_advance_task_stalled_actionable_status_escalates_instead_of_looping(dri
     assert outcome == "escalated_stall"
     db = factory()
     task = db.get(Task, "ADV-013")
-    assert task.status == "failed"
-    assert task.awaiting_approval is False
+    # Escalation asks a human to act; it must not mark the task terminal.
+    # `failed` cancelled the active runs and rejected the pending gates,
+    # so the prompt the escalation had just written could never be
+    # answered (CTV2-1382 / CTV2-1388, 2026-08-05).  `awaiting_approval`
+    # is now the only thing stopping the loop, so it has to survive.
+    assert task.status == "awaiting-review"
+    assert task.awaiting_approval is True
     db.close()
     run_agent_mock.send.assert_not_called()
 
@@ -1557,13 +1577,30 @@ def test_advance_task_escalates_when_dependency_failed(driver_db):
     assert outcome == "escalated_dependency_failed"
     db = factory()
     task = db.get(Task, "ADV-DOWN3")
-    assert task.status == "failed"
-    assert task.awaiting_approval is False
+    # Escalation asks a human to act; it must not mark the task terminal.
+    # `failed` cancelled the active runs and rejected the pending gates,
+    # so the prompt the escalation had just written could never be
+    # answered (CTV2-1382 / CTV2-1388, 2026-08-05).  `awaiting_approval`
+    # is now the only thing stopping the loop, so it has to survive.
+    assert task.status == "todo"
+    assert task.awaiting_approval is True
     db.close()
     run_agent_mock.send.assert_not_called()
 
 
-def test_advance_task_wakes_dependents_when_it_fails(driver_db):
+def test_advance_task_does_not_wake_dependents_on_a_mere_escalation(driver_db):
+    """An escalated task is blocked, not dead, so dependents keep waiting.
+
+    `wake_dependents` exists to release tasks whose upstream can never
+    complete.  While escalation implied `failed`, this test asserted the
+    opposite -- an upstream that only needed a human to add acceptance
+    criteria would tell its dependents to stop waiting for it.
+
+    Escalation no longer marks the task terminal (CTV2-1382 / CTV2-1388), so
+    the correct behaviour is the one asserted here: nothing is woken, because
+    ADV-UP4 is still going to run once a human answers.
+    """
+
     factory, run_agent_mock = driver_db
     _driver_task(factory, "ADV-UP4", acceptance_criteria=[])
     _driver_task(factory, "ADV-DOWN4", acceptance_criteria=["Tests pass"])
@@ -1572,14 +1609,18 @@ def test_advance_task_wakes_dependents_when_it_fails(driver_db):
     db.commit()
     db.close()
 
-    # ADV-UP4 has no acceptance_criteria, so it escalates to "failed" --
-    # this must wake ADV-DOWN4, the task waiting on it.
     real_advance_fn = runner.advance_task.fn
     with patch.object(runner, "advance_task") as mocked_advance:
         outcome = real_advance_fn("ADV-UP4", "manual")
 
     assert outcome == "escalated_missing_ac"
-    mocked_advance.send.assert_called_once_with("ADV-DOWN4", "dependency_closed")
+    mocked_advance.send.assert_not_called()
+
+    db = factory()
+    upstream = db.get(Task, "ADV-UP4")
+    assert upstream.status == "todo"
+    assert upstream.awaiting_approval is True
+    db.close()
 
 
 def _dead_message(run_id="run-001", message_id="msg-dead-1", traceback="boom: RuntimeError"):
