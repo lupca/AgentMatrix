@@ -43,6 +43,7 @@ from app.services.process_manager import (
 )
 from app.services.review_criteria import merged_review_criteria
 from app.services.task_event_service import emit_task_event
+from app.services.task_validators import TaskValidator
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.services.tool_metrics import record_tool_metric
 from app.workers import plan_executor, redis_broker
@@ -215,12 +216,7 @@ def advance_task(task_id: str, trigger: str) -> str:
         if task.awaiting_approval:
             outcome = "gate_pending"
         elif _advance_task_stalled(db, task_id, status_before):
-            _escalate(
-                db,
-                task,
-                f"advance_task made no progress after {AUTO_MAX_ROUNDS} calls "
-                f"at status {status_before!r}; escalating instead of looping",
-            )
+            _escalate(db, task, _stall_reason(db, task))
             outcome = "escalated_stall"
         else:
             outcome = _advance_task_step(db, service, task)
@@ -283,6 +279,39 @@ def _advance_task_stalled(db: Session, task_id: str, current_status: str) -> boo
         entry.details.get("status_before") == current_status
         and entry.details.get("status_after") == current_status
         for entry in recent
+    )
+
+
+def _stall_reason(db: Session, task: Task) -> str:
+    """Say WHY the task cannot move, not just that it did not.
+
+    The loop guard fires before `_advance_task_step` ever runs, so the old
+    message reported only the symptom ("no progress after 3 calls"). The cause
+    was knowable the whole time -- the driver had already named it once, then
+    stopped repeating it. On 2026-08-05 that cost a coordinator an hour: eight
+    ui-kit tasks were simply waiting on one unfinished dependency, and the
+    symptom-only message read like an AGMX bug worth restarting the backend
+    over. A blocking value that does not carry its own `why` sends the reader
+    hunting in the wrong place.
+    """
+    dep_ids = TaskValidator(db).dependency_ids(task.id)
+    if dep_ids:
+        rows = db.query(Task).filter(Task.id.in_(dep_ids)).all()
+        found = {row.id: row for row in rows}
+        unmet = [
+            f"{dep_id} ({found[dep_id].status})" if dep_id in found else f"{dep_id} (missing)"
+            for dep_id in dep_ids
+            if dep_id not in found or found[dep_id].status != "done"
+        ]
+        if unmet:
+            return (
+                f"cannot leave {task.status!r}: waiting on dependency "
+                f"{', '.join(unmet)}. Finish those first -- this task is not stuck, "
+                f"it is queued behind them."
+            )
+    return (
+        f"advance_task made no progress after {AUTO_MAX_ROUNDS} calls "
+        f"at status {task.status!r}; escalating instead of looping"
     )
 
 

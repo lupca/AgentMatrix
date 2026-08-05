@@ -2929,3 +2929,44 @@ def test_check_brakes_triggers_no_progress_limit_when_pid_is_dead(orchestration,
 
     assert brake.allowed is False
     assert brake.code == "no_progress_limit"
+
+
+def test_stall_reason_names_the_unfinished_dependency(db_session):
+    """A stalled task must say WHY, not just that it did not move.
+
+    Eight ui-kit tasks once queued behind one unfinished dependency; the
+    symptom-only message ("no progress after 3 calls") read like an AGMX bug
+    and sent a coordinator hunting in the wrong repo (CTV2-1402).
+    """
+    from app.db.models import Project, Task, TaskDependency
+    from app.workers.agent_runner import _stall_reason
+
+    db_session.add(Project(id="p-stall", name="P"))
+    db_session.add(Task(id="DEP-1", project="p-stall", title="dep", status="awaiting-review"))
+    db_session.add(Task(id="BLOCKED-1", project="p-stall", title="blocked", status="todo"))
+    db_session.commit()
+    db_session.add(TaskDependency(task_id="BLOCKED-1", depends_on_task_id="DEP-1"))
+    db_session.commit()
+
+    reason = _stall_reason(db_session, db_session.get(Task, "BLOCKED-1"))
+    assert "DEP-1" in reason
+    assert "awaiting-review" in reason
+    assert "not stuck" in reason
+
+
+def test_stall_reason_falls_back_when_dependencies_are_met(db_session):
+    from app.db.models import Project, Task, TaskDependency
+    from app.workers.agent_runner import _stall_reason
+
+    db_session.add(Project(id="p-stall2", name="P"))
+    db_session.add(Task(
+        id="DEP-2", project="p-stall2", title="dep", status="done",
+        executor="@a", reviewer="@b", result_ref="c1",
+    ))
+    db_session.add(Task(id="BLOCKED-2", project="p-stall2", title="blocked", status="todo"))
+    db_session.commit()
+    db_session.add(TaskDependency(task_id="BLOCKED-2", depends_on_task_id="DEP-2"))
+    db_session.commit()
+
+    reason = _stall_reason(db_session, db_session.get(Task, "BLOCKED-2"))
+    assert "no progress" in reason
