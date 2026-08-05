@@ -335,6 +335,7 @@ class TaskOrchestrationService:
         option: str = "request_review",
         actor: str = "system",
         idempotency_key: str | None = None,
+        external_executor: str | None = None,
     ) -> TransitionResult:
         return self.state_machine.attach_result(
             task_id=task_id,
@@ -342,6 +343,7 @@ class TaskOrchestrationService:
             option=option,
             actor=actor,
             idempotency_key=idempotency_key,
+            external_executor=external_executor,
         )
 
     def update_task_fields(

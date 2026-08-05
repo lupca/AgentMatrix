@@ -2868,8 +2868,27 @@ class TaskStateMachine:
         option: str = "request_review",
         actor: str = "system",
         idempotency_key: str | None = None,
+        external_executor: str | None = None,
     ) -> TransitionResult:
+        """Record a finished result against a task.
+
+        Normally the work came from an AgentRun this system dispatched, so the
+        task is already 'dispatched'. `external_executor` covers the other
+        case: the work was genuinely done outside AGMX -- by the coordinator
+        itself, by its own subagents, by hand -- and only needs recording.
+
+        Without it there was no way to record such work at all: attaching
+        demanded 'dispatched', and reaching 'dispatched' meant firing an agent
+        to redo work that was already finished (CTV2-1403). The record is the
+        point of a task; making the record cost a duplicate run made the
+        system fight its own purpose.
+
+        Provenance stays honest -- the event says no AGMX run produced this --
+        and four-eyes is untouched: the named executor becomes the task's
+        executor, so the reviewer must still be someone else.
+        """
         task = self.validator.task(task_id)
+        external = (external_executor or "").strip() or None
 
         opt = (option or "request_review").strip().lower().replace("-", "_")
         if opt == "done":
@@ -2885,7 +2904,11 @@ class TaskStateMachine:
         # An immediate replay may arrive after the first call already moved
         # dispatched -> awaiting-review.  Every other source state, especially
         # in-review, is rejected before any repository probing.
-        if task.status not in {"dispatched", "awaiting-review"}:
+        allowed_sources = {"dispatched", "awaiting-review"}
+        if external:
+            # Work done outside the system starts from where it actually is.
+            allowed_sources |= {"todo", "changes-requested"}
+        if task.status not in allowed_sources:
             self.validator.assert_status(task, "dispatched")
 
         commit_ref = (commit or "").strip()
@@ -2915,12 +2938,19 @@ class TaskStateMachine:
             "commit": commit_ref,
             "option": opt,
         }
+        if external:
+            payload["external_executor"] = external
         input_hash = TaskValidator.input_hash(payload)
         existing = self.validator.idempotent_record(task_id, idempotency_key, input_hash)
         if existing is not None:
             return self.result_for_record(task, existing)
 
-        self.validator.assert_status(task, "dispatched")
+        if external:
+            if task.status not in allowed_sources:
+                self.validator.assert_status(task, "dispatched")
+            task.executor = external
+        else:
+            self.validator.assert_status(task, "dispatched")
 
         now = datetime.now(timezone.utc)
         task.result_ref = commit_ref
@@ -2951,7 +2981,14 @@ class TaskStateMachine:
             task_id=task.id,
             event_type="attach_result",
             kind="info",
-            payload={"commit": commit_ref, "option": opt, "status": target_status},
+            payload={
+                "commit": commit_ref,
+                "option": opt,
+                "status": target_status,
+                # Say it plainly: nothing this system ran produced this diff.
+                "provenance": "external" if external else "agent_run",
+                "external_executor": external,
+            },
             db=self.db,
         )
 

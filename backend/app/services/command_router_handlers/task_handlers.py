@@ -646,6 +646,7 @@ class TaskHandlersMixin:
             task_id = str(payload.get('task_id', '')).strip()
             commit = str(payload.get('commit') or payload.get('result_ref') or '').strip()
             option = str(payload.get('option', 'request_review')).strip()
+            external_executor = str(payload.get('external_executor') or '').strip() or None
         else:
             parts = args.strip().split(maxsplit=2)
             if not parts:
@@ -653,6 +654,7 @@ class TaskHandlersMixin:
             task_id = parts[0]
             commit = parts[1] if len(parts) > 1 else ''
             option = parts[2] if len(parts) > 2 else 'request_review'
+            external_executor = None
 
         if not task_id or not commit:
             return {'error': 'task_id and commit are required'}
@@ -667,6 +669,7 @@ class TaskHandlersMixin:
                 task_id=task_id,
                 commit=commit,
                 option=option,
+                external_executor=external_executor,
                 actor=f"chat:{session_id or 'anonymous'}",
                 idempotency_key=self._command_key(
                     session_id,

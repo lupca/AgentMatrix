@@ -422,7 +422,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "attach_result only records which commit to review and never "
                 "merges anything. If the task is 'failed' instead of "
                 "'dispatched', call reopen_task first to bring it back to a "
-                "state where attach_result is valid."
+                "state where attach_result is valid. If the work was done "
+                "OUTSIDE this system -- by you, by your own subagents, by hand "
+                "-- pass external_executor and attach straight from 'todo': "
+                "never dispatch an agent just to redo finished work so the "
+                "record will accept it."
             ),
             parameters={
                 "type": "object",
@@ -431,6 +435,20 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                     "commit": {
                         "type": "string",
                         "description": "Git commit hash or reference to attach",
+                    },
+                    "external_executor": {
+                        "type": "string",
+                        "description": (
+                            "Who actually did the work, when no AgentRun from "
+                            "this system produced it (e.g. '@coordinator' or a "
+                            "subagent name). Lets a task be attached from "
+                            "'todo'/'changes-requested' instead of forcing a "
+                            "throwaway dispatch. Recorded as the task's "
+                            "executor, so four-eyes still applies: the reviewer "
+                            "must be someone else. The event records provenance "
+                            "as 'external' -- do not use it to disguise work "
+                            "that an agent run actually did."
+                        ),
                     },
                     "option": {
                         "type": "string",

@@ -206,11 +206,15 @@ class CommandRouter(
             commit = str(args.get('commit') or args.get('result_ref') or '').strip()
             if not task_id or not commit:
                 return {'error': 'task_id and commit are required'}
-            command_args = json.dumps({
+            attach_payload = {
                 'task_id': task_id,
                 'commit': commit,
                 'option': str(args.get('option', 'request_review')).strip(),
-            }, ensure_ascii=False)
+            }
+            external_executor = str(args.get('external_executor') or '').strip()
+            if external_executor:
+                attach_payload['external_executor'] = external_executor
+            command_args = json.dumps(attach_payload, ensure_ascii=False)
         elif canonical_name == 'request_review':
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
