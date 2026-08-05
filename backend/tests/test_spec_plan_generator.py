@@ -649,3 +649,35 @@ def test_spec_plan_result_from_task_errors_clearly_on_unusable_row():
 
     with pytest.raises(PlanCriticError):
         spec_plan_result_from_task(task)
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        pytest.param('{"a": 1, "plan": "viet do dang', "looks_truncated", id="cut_mid_string"),
+        pytest.param('{"a": 1, "b": 2', "looks_truncated", id="cut_mid_object"),
+        pytest.param('{"a": 1,', "looks_truncated", id="cut_after_comma"),
+        pytest.param('{"a": 1 "b": 2}', "looks_malformed", id="missing_comma"),
+        pytest.param("{'a': 1}", "looks_malformed", id="single_quotes"),
+    ],
+)
+def test_parse_failure_separates_a_cut_stream_from_bad_json(raw, expected):
+    """A truncated stream and a model writing bad JSON raise the SAME exception.
+
+    Two planner runs died mid-JSON on 2026-08-04 ("Expecting ',' delimiter" at
+    char 21626 and 20614) and there was no way to tell which had happened, so
+    the cause stayed a guess. Classification keys off the tail: a complete JSON
+    document ends with its closing brace, a cut stream does not.
+
+    Offset-based classification does NOT work here — for an unterminated string
+    json reports the position where the string *opened*, so a cut stream still
+    looks like it has plenty of characters left.
+    """
+    from app.services.spec_plan_generator import _describe_parse_failure
+
+    with pytest.raises(json.JSONDecodeError) as excinfo:
+        json.loads(raw)
+
+    detail = _describe_parse_failure(excinfo.value, raw, run_id="run-under-test")
+    assert expected in detail
+    assert f"raw_len={len(raw)}" in detail

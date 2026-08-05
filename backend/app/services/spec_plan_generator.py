@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -165,6 +166,59 @@ def _finish_llm_run(
     # second LLM call (the critic) right after this one, so a transaction left
     # open here would hold locks across that call too.
     db.commit()
+
+
+_PARSE_FAILURE_DIR = "/tmp/agmx-parse-failures"
+_PARSE_FAILURE_WINDOW = 200
+
+
+def _describe_parse_failure(exc: Exception, raw: str, *, run_id: str | None) -> str:
+    """Turn a parse failure into something diagnosable instead of a bare message.
+
+    Two failures on 2026-08-04 died mid-JSON at char 21626 and 20614 with
+    "Expecting ',' delimiter". Truncated output and a model that genuinely wrote
+    bad JSON produce the *same* exception, and nothing kept the raw text, so
+    there was no way to tell them apart — only a guess from the byte offset.
+
+    The discriminator is one number: if the failure offset is at the very end of
+    the captured text, the stream was cut; if content follows, the model wrote
+    invalid JSON. Both are recorded here, plus the surrounding window and a dump
+    of the full response, so the next occurrence answers itself.
+    """
+    stripped = raw.strip()
+    total = len(raw)
+    # Classify on the TAIL, not on the failure offset. For an unterminated
+    # string json raises at the position where the string *opened*, so a cut
+    # stream still reports plenty of "remaining" characters and offset-based
+    # classification calls it malformed. A complete JSON document ends with its
+    # closing brace; a cut stream almost never does.
+    closed = stripped.endswith("}")
+    parts = [
+        str(exc),
+        f"[raw_len={total}",
+        "looks_malformed" if closed else "looks_truncated",
+        f"ends_with_brace={closed}",
+    ]
+    pos = getattr(exc, "pos", None)
+    if isinstance(pos, int):
+        parts.append(f"fail_at={pos} remaining_after={total - pos}")
+        lo = max(0, pos - _PARSE_FAILURE_WINDOW)
+        hi = min(total, pos + _PARSE_FAILURE_WINDOW)
+        parts.append(f"window={raw[lo:hi]!r}")
+    parts.append(f"tail={stripped[-80:]!r}")
+
+    # Best-effort dump; a diagnostics aid must never become a new failure mode.
+    try:
+        os.makedirs(_PARSE_FAILURE_DIR, exist_ok=True)
+        path = os.path.join(_PARSE_FAILURE_DIR, f"{run_id or uuid.uuid4().hex}.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(raw)
+        parts.append(f"dump={path}")
+    except Exception as dump_exc:  # noqa: BLE001 - never mask the real error
+        parts.append(f"dump_failed={dump_exc!r}")
+        logger.warning("Could not dump parse-failure payload", exc_info=True)
+
+    return " ".join(parts) + "]"
 
 
 class SpecPlanGenerationError(RuntimeError):
@@ -455,10 +509,15 @@ async def generate_spec_plan(
             last_error = None
             break
         except (json.JSONDecodeError, ValidationError) as exc:
+            detail = _describe_parse_failure(
+                exc, content, run_id=getattr(run, "id", None)
+            )
             _finish_llm_run(
-                db, run, response, started=started, operation="plan", error=str(exc)
+                db, run, response, started=started, operation="plan", error=detail
             )
             last_error = exc
+            # The retry prompt keeps the plain message: the diagnostics are for
+            # us, and feeding an offset dump back to the model is just noise.
             retry_reason = str(exc)
             continue
 
@@ -681,7 +740,9 @@ async def criticize_spec_plan(
                 response,
                 started=started,
                 operation="plan_critic",
-                error=str(exc),
+                error=_describe_parse_failure(
+                    exc, response.text, run_id=getattr(run, "id", None)
+                ),
             )
             last_error = exc
             retry_reason = str(exc)
