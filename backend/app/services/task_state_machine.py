@@ -884,7 +884,31 @@ class TaskStateMachine:
                 f"Reviewer đề xuất: {reviewer} — lý do: "
                 f"{selection_reason}. Approve?"
             )
-        input_hash = TaskValidator.input_hash(request_payload)
+        # Hash the DECISION, not the prose explaining it.
+        #
+        # `selection_reason` (and the `approval_prompt` derived from it) embeds
+        # live telemetry: "score=0.89, success_rate=100%".  Those numbers move
+        # every time any agent finishes a task, so the same logical request --
+        # same task, same round, same reviewer -- hashed differently on each
+        # retry and collided with its own stored idempotency key:
+        #
+        #   review request failed: Idempotency key
+        #   'advance:CTV2-1389:review:r1:reviewer:@claude-sonnet-high'
+        #   was reused with different input
+        #
+        # CTV2-1389, 2026-08-05: that escalated, was cleared, escalated again on
+        # the very next driver pass -- a loop with no exit, while the task held
+        # a finished commit waiting to be reviewed.  Both fields stay in the
+        # payload (they are what a human reads); they just do not decide
+        # whether two requests are the same request.
+        _EXPLANATORY_FIELDS = ("selection_reason", "approval_prompt")
+        input_hash = TaskValidator.input_hash(
+            {
+                key: value
+                for key, value in request_payload.items()
+                if key not in _EXPLANATORY_FIELDS
+            }
+        )
 
         # Reject stale pending gates BEFORE idempotency check - a new request
         # should clean up orphaned gates even if this specific request is idempotent.

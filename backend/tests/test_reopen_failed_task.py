@@ -494,3 +494,44 @@ def test_gate_blocked_rounds_are_not_evidence_of_a_stall(db_session):
         _round("brake:autonomy_disabled")
     db_session.commit()
     assert _advance_task_stalled(db_session, "STALL-001", "todo") is True
+
+
+def test_review_request_is_idempotent_when_only_the_score_text_moves(
+    service, db_session
+):
+    """Telemetry inside the reason must not change the request's identity.
+
+    `selection_reason` embeds "score=0.89, success_rate=100%" -- numbers that
+    move whenever any agent finishes a task.  Hashing them made the same
+    logical request (same task, round and reviewer) collide with its own
+    stored idempotency key, and CTV2-1389 looped: escalate, clear, escalate
+    again on the next driver pass, while holding a finished commit.
+    """
+
+    task = _add_task(
+        db_session,
+        "IDEM-001",
+        status="awaiting-review",
+        executor="@executor",
+        result_ref="base..head",
+        current_gate="review_order",
+    )
+
+    first = service.request_review(
+        task_id=task.id,
+        reviewer="@reviewer",
+        actor="system:orchestration-driver",
+        idempotency_key="advance:IDEM-001:review:r0:reviewer:@reviewer",
+        selection_reason="@reviewer selected by matcher: score=0.89, success_rate=100%",
+    )
+
+    # Same request, but every agent's measured rate has moved since.
+    second = service.request_review(
+        task_id=task.id,
+        reviewer="@reviewer",
+        actor="system:orchestration-driver",
+        idempotency_key="advance:IDEM-001:review:r0:reviewer:@reviewer",
+        selection_reason="@reviewer selected by matcher: score=0.71, success_rate=83%",
+    )
+
+    assert second.gate_record.id == first.gate_record.id
