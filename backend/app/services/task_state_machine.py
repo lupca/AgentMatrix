@@ -1562,6 +1562,72 @@ class TaskStateMachine:
         self.db.refresh(record)
         return TransitionResult(task, record, True)
 
+    def reopen_failed_task(self, *, task_id: str, actor: str) -> TransitionResult:
+        """Bring a ``failed`` task back to a state work can continue from.
+
+        ``failed`` is terminal: ``_sync_after_transition`` cancels every active
+        run and rejects every pending gate, and every entry point refuses it --
+        ``request_review`` wants ``awaiting-review``, ``attach_result`` wants
+        ``dispatched``, ``land_task`` wants an approved verdict, and a freshly
+        requested planner/critic run is cancelled on arrival with "Task reached
+        terminal state: failed".  There was no way back in the whole tool
+        surface.
+
+        That mattered because tasks reach ``failed`` for reasons that say
+        nothing about the work: a budget brake firing one second after a
+        successful result was delivered (CTV2-1382), or the orchestration
+        driver escalating because a plan critic had not finished yet
+        (CTV2-1388 -- the task filed to fix CTV2-1382, killed by the same
+        defect).  Both were recoverable situations recorded as terminal ones.
+
+        Where the task lands is decided by evidence, not by the caller:
+
+        * a delivered ``result_ref`` -> ``awaiting-review``, so an independent
+          reviewer still has to pass it before it can land
+        * otherwise -> ``todo``, so it goes back through dispatch
+
+        Four-eyes is untouched: reopening restores the *boundary*, never a
+        verdict.  The ledger stays append-only -- this appends a ``reopen``
+        record rather than editing the escalation that closed the task.
+        """
+
+        task = self.validator.task(task_id)
+        if task.status != "failed":
+            raise PrerequisiteError(
+                f"reopen requires status 'failed', found {task.status!r}"
+            )
+        delivered = bool((task.result_ref or "").strip())
+        target = "awaiting-review" if delivered else "todo"
+        previous_error = task.error
+        payload = {
+            "from_status": "failed",
+            "to_status": target,
+            "result_ref": task.result_ref,
+            "previous_error": previous_error,
+        }
+        self.cas_status(task, target)
+        task.error = None
+        task.awaiting_approval = False
+        task.approval_prompt = None
+        task.current_gate = "review_order" if delivered else "dispatch"
+        task.updated_at = datetime.now(timezone.utc)
+        record = self.ledger_record(
+            task=task,
+            gate_type="reopen",
+            status="approved",
+            actor=actor,
+            idempotency_key=str(uuid.uuid4()),
+            input_hash=TaskValidator.input_hash(payload),
+            payload=payload,
+            output_payload={"status": target},
+        )
+        self._sync_after_transition(task)
+        self.audit(task, record, reason=f"reopened from failed -> {target}")
+        self.db.commit()
+        self.db.refresh(task)
+        self.db.refresh(record)
+        return TransitionResult(task, record, True)
+
     def escalate_task(
         self, *, task_id: str, reason: str, actor: str = "system"
     ) -> GateRecord:

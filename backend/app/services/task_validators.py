@@ -314,13 +314,44 @@ class TaskValidator:
         return decision
 
     def _record_brake(self, task: Task, decision: BrakeDecision) -> None:
-        if decision.code in {"autonomy_disabled", "cost_limit", "token_limit"}:
+        # A budget brake exists to stop the task SPENDING MORE.  It must not
+        # destroy work that has already been paid for and delivered.
+        #
+        # 2026-08-05, CTV2-1382 -- one second after the executor's `execution`
+        # gate was approved and `result_ref` was written, the token brake fired
+        # and flipped the task to `failed`:
+        #
+        #   05:22:52  gate 1620  execution     approved   agent:@claude-sonnet-high
+        #   05:22:53  gate 1621  safety_brake  rejected   system:safety-brake
+        #
+        # `failed` is terminal, so `_sync_after_transition` cancelled every run
+        # and rejected every pending gate.  A commit with 830 passing tests was
+        # stranded on its branch with no way back: request_review, land_task,
+        # attach_result and critique_spec_plan all refuse to touch a failed task.
+        # 56M tokens of good work were discarded for the sole reason that it had
+        # cost 56M tokens.
+        #
+        # When a result already exists, keep the task where it is.  Refusing to
+        # spawn the next run (which every caller of check_brakes already does on
+        # `allowed=False`) is the whole point of the brake; the status flip was
+        # never part of it.
+        delivered = bool((task.result_ref or "").strip())
+        budget_brake = decision.code in {"autonomy_disabled", "cost_limit", "token_limit"}
+        if budget_brake:
             from app.services.task_state_machine import TaskStateMachine
-            TaskStateMachine(self.db).cas_status(task, "failed")
+            if not delivered:
+                TaskStateMachine(self.db).cas_status(task, "failed")
             task.error = decision.reason
             task.awaiting_approval = True
             task.approval_prompt = f"Escalated by safety brake: {decision.reason}"
-            payload = {"code": decision.code, "reason": decision.reason}
+            payload = {
+                "code": decision.code,
+                "reason": decision.reason,
+                # Record which branch was taken so the ledger explains why an
+                # identical brake left one task failed and another untouched.
+                "result_delivered": delivered,
+                "task_status": task.status,
+            }
             inp_hash = self.input_hash(payload)
             record = GateRecord(
                 task_id=task.id,
@@ -337,11 +368,12 @@ class TaskValidator:
             )
             self.db.add(record)
             self.db.flush()
-            state_machine = TaskStateMachine(self.db)
-            state_machine._cancel_active_runs(task)
-            state_machine._reject_all_pending_gates(
-                task, f"Task reached terminal state: {task.status}"
-            )
+            if not delivered:
+                state_machine = TaskStateMachine(self.db)
+                state_machine._cancel_active_runs(task)
+                state_machine._reject_all_pending_gates(
+                    task, f"Task reached terminal state: {task.status}"
+                )
             self.db.add(
                 AuditLog(
                     task_id=task.id,
@@ -375,7 +407,9 @@ class TaskValidator:
                 )
             )
         self.db.commit()
-        if decision.code in {"autonomy_disabled", "cost_limit", "token_limit"}:
+        # Dependents only need waking when this task actually reached a terminal
+        # state; a delivered task the brake left alone is still in flight.
+        if budget_brake and not delivered:
             from app.services.task_state_machine import TaskStateMachine
             TaskStateMachine(self.db).wake_dependents(task.id)
 

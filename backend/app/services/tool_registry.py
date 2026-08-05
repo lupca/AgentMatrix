@@ -394,6 +394,29 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             group="task_lifecycle",
         ),
         ToolSpec(
+            name="reopen_task",
+            description=(
+                "Bring a failed task back to a workable state. A task with a "
+                "delivered result_ref returns to awaiting-review (an "
+                "independent reviewer still has to pass it before landing); "
+                "one without returns to todo. Use this when a task reached "
+                "'failed' for a reason unrelated to the work itself -- a "
+                "budget brake firing after the result was delivered, or an "
+                "escalation raised while a step was still in flight."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+            },
+            handler="reopen_task",
+            tier="deferred",
+            permission="write",
+            entity="tasks",
+            slash_alias="/reopen",
+            group="task_lifecycle",
+        ),
+        ToolSpec(
             name="get_task_events",
             description=(
                 "Poll task events with a cursor. Use since_id to fetch only "

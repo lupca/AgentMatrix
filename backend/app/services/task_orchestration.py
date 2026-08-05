@@ -295,6 +295,9 @@ class TaskOrchestrationService:
             task_id=task_id, reason=reason, actor=actor
         )
 
+    def reopen_failed_task(self, *, task_id: str, actor: str):
+        return self.state_machine.reopen_failed_task(task_id=task_id, actor=actor)
+
     def record_dispatch_queue_failure(
         self,
         *,

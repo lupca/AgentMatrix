@@ -674,6 +674,32 @@ class TaskHandlersMixin:
         return {'action': 'cancelled', 'task_id': task_id, 'run_id': run.id, 'status': 'cancelled',
                 'task': self._task_snapshot(task)}
 
+    async def _handle_reopen_task(self, args: str, session_id: str) -> dict:
+        task_id = args.strip()
+        if not task_id:
+            return {'error': 'Usage: /reopen <task_id>'}
+
+        task = self.db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            return {'error': f'Task {task_id} not found'}
+
+        try:
+            result = TaskOrchestrationService(self.db).reopen_failed_task(
+                task_id=task_id,
+                actor=f"chat:{session_id or 'anonymous'}",
+            )
+        except OrchestrationError as exc:
+            return {'error': str(exc)}
+
+        self.db.refresh(task)
+        return {
+            'action': 'reopened',
+            'task_id': task_id,
+            'status': task.status,
+            'gate_record_id': result.record.id,
+            'task': self._task_snapshot(task),
+        }
+
     async def _handle_verdict(self, args: str, session_id: str) -> dict:
         parts = args.strip().split(maxsplit=2)
         if len(parts) < 2:

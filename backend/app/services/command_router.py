@@ -238,7 +238,7 @@ class CommandRouter(
             else:
                 return {'error': f"Unsupported decision {decision!r}: use 'approved' or 'rejected'"}
             command_args = f'{gate_id} {decision}'
-        elif canonical_name == 'cancel_task':
+        elif canonical_name in ('cancel_task', 'reopen_task'):
             task_id = str(args.get('task_id', '')).strip()
             if not task_id:
                 return {'error': 'task_id is required'}
