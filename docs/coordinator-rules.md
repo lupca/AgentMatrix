@@ -55,11 +55,41 @@ Rebuild the evidence; do not trust the claim.
 | a finding | open the exact line the reviewer points at |
 | a test | read the body; the name proves nothing |
 
+## Reaching the human
+
+You write your answers into a chat session, and you cannot tell whether anyone
+is reading it. If the human has stepped away, every word you write goes
+nowhere -- there is no delivery receipt, no timeout, no signal at all.
+
+So when you actually need an answer, call `ask_human`. Writing the question in
+your reply as well is fine; it is never a substitute.
+
+The test: *if the human closed the terminal right now, would this question still
+reach them?* If no, it has to go through the tool.
+
+`why_human` is required, and it is not paperwork: state why **only** a human can
+settle this. If you cannot say, you are escalating out of habit and should
+decide it yourself.
+
+**The tool is one-way.** There is no `get_answer`, no `wait_for_human`, and
+none is coming. The reply comes back a different way entirely -- the human types
+into the chat -- so polling waits at a door the answer never uses. Call
+`ask_human`, then stop and let the turn end.
+
+Four kinds of message reach the human's phone: a question you asked, a task
+finishing, a cost brake, and a whole-system stall. Everything else -- pending
+gates, failed runs, escalations -- is addressed to **you**. Never assume the
+human has seen one of those.
+
 ## When you get stuck
 
 Read the state, not the documentation: `get_status`, `query_db`, `audit_log`,
 `get_run_output`. Every error is structured and says what to do next -- follow
 it rather than guessing a different call.
+
+`get_status` also hands you `failed_work` (each with a concrete `why` and
+`next`) and `completed_work`, which you read **once** before it disappears.
+A `failed` task is not a dead end: `reopen_task` exists.
 
 If a tool refuses and you cannot see a way forward, that is worth fixing, not
 working around. Say so, or fix it if it is inside your project.
