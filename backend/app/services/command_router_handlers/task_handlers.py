@@ -22,11 +22,29 @@ from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
 )
+from app.services.task_validators import TaskValidator, TransitionConflictError
 
 logger = logging.getLogger(__name__)
 
 
 class TaskHandlersMixin:
+    def _orchestration_error_payload(
+        self, exc: OrchestrationError, task_id: str | None
+    ) -> dict[str, Any]:
+        """Turn a rejected orchestration call into {error, next_step}.
+
+        A bare "expected status X, found Y" tells the caller nothing about
+        how to get unstuck (CTV2-1394). When the failure is a state-conflict
+        and we can still find the task, attach TaskValidator.describe_next_step
+        so the tool name to call next is right there in the error.
+        """
+        payload: dict[str, Any] = {'error': str(exc)}
+        if isinstance(exc, TransitionConflictError) and task_id:
+            task = self.db.query(Task).filter(Task.id == task_id).first()
+            if task is not None:
+                payload['next_step'] = TaskValidator(self.db).describe_next_step(task)
+        return payload
+
     def _task_snapshot(self, task: Task) -> dict[str, Any]:
         return {
             'id': task.id,
@@ -439,7 +457,7 @@ class TaskHandlersMixin:
                 effort=effort,
             )
         except OrchestrationError as exc:
-            return {'error': str(exc)}
+            return self._orchestration_error_payload(exc, task_id)
 
         if not result.applied:
             return {
@@ -527,7 +545,7 @@ class TaskHandlersMixin:
                 ),
             )
         except OrchestrationError as exc:
-            return {'error': str(exc)}
+            return self._orchestration_error_payload(exc, task_id)
 
         if not result.applied:
             return {
@@ -581,7 +599,7 @@ class TaskHandlersMixin:
                 task_id=task_id, actor=f"chat:{session_id or 'anonymous'}"
             )
         except OrchestrationError as exc:
-            return {'error': str(exc)}
+            return self._orchestration_error_payload(exc, task_id)
 
     async def _handle_attach_result(self, args: str, session_id: str) -> dict:
         try:
@@ -622,7 +640,7 @@ class TaskHandlersMixin:
                 ),
             )
         except OrchestrationError as exc:
-            return {'error': str(exc)}
+            return self._orchestration_error_payload(exc, task_id)
 
         self.db.refresh(task)
         return {
@@ -689,7 +707,7 @@ class TaskHandlersMixin:
                 actor=f"chat:{session_id or 'anonymous'}",
             )
         except OrchestrationError as exc:
-            return {'error': str(exc)}
+            return self._orchestration_error_payload(exc, task_id)
 
         self.db.refresh(task)
         return {
@@ -736,7 +754,7 @@ class TaskHandlersMixin:
                 idempotency_key=self._command_key(session_id, "verdict", args),
             )
         except OrchestrationError as exc:
-            return {'error': str(exc)}
+            return self._orchestration_error_payload(exc, task_id)
         
         return {
             'action': 'verdict',
@@ -937,6 +955,8 @@ class TaskHandlersMixin:
                             'created_at': pending.created_at.isoformat() if pending.created_at else None,
                         } if pending else None,
                         'error': task.error,
+                        'next_step': TaskValidator(self.db).describe_next_step(task),
+                        'available_actions': TaskValidator(self.db).available_actions(task),
                     }
                 }
             return {'error': f"Task '{target_id}' not found"}
@@ -976,6 +996,8 @@ class TaskHandlersMixin:
                             'created_at': pending.created_at.isoformat() if pending.created_at else None,
                         } if pending else None,
                         'error': task.error,
+                        'next_step': TaskValidator(self.db).describe_next_step(task),
+                        'available_actions': TaskValidator(self.db).available_actions(task),
                     }
                 }
         

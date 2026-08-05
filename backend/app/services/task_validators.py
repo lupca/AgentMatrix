@@ -561,6 +561,201 @@ class TaskValidator:
             )
         return results
 
+    def describe_next_step(self, task: Task) -> dict[str, Any]:
+        """Explain, in {state, why, next} shape, what to do from this task's
+        current status.
+
+        This is what a stuck orchestrator should get back the moment it hits
+        a state-conflict, instead of a bare "expected X found Y" with no way
+        out. CTV2-1394, 2026-08-05: an orchestrator sat on a `failed` task for
+        40 minutes because the error that stopped it named no tool to try
+        next -- the fix was only found by chance, remembering a code comment.
+        Modeled on ``tool_argument_validator.describe_problems``: name the
+        evidence, then name the tool.
+        """
+        status = task.status
+        result_ref = (task.result_ref or "").strip()
+        if status == "failed":
+            if result_ref:
+                return {
+                    "state": status,
+                    "why": (
+                        f"task is 'failed' but already has result_ref={result_ref!r} "
+                        "-- the work was delivered before the failure"
+                    ),
+                    "next": (
+                        "call reopen_task -- it routes a delivered result to "
+                        "'awaiting-review' so an independent reviewer still has "
+                        "to pass it"
+                    ),
+                }
+            return {
+                "state": status,
+                "why": "task is 'failed' with no result_ref delivered yet",
+                "next": (
+                    "call reopen_task -- it routes an undelivered failure back "
+                    "to 'todo', then call dispatch_task again"
+                ),
+            }
+        if status == "todo":
+            return {
+                "state": status,
+                "why": "task has not been dispatched yet",
+                "next": "call dispatch_task to start execution",
+            }
+        if status == "dispatched":
+            return {
+                "state": status,
+                "why": "an executor run is expected to be in flight, or finished without attach_result being called yet",
+                "next": "wait for the run, then call attach_result with the commit/result_ref",
+            }
+        if status == "awaiting-review":
+            return {
+                "state": status,
+                "why": f"result_ref={result_ref!r} is attached and waiting for a reviewer to be assigned",
+                "next": "call request_review to assign a reviewer and start the review run",
+            }
+        if status == "in-review":
+            return {
+                "state": status,
+                "why": "a review run is expected to be in flight, or finished without record_verdict being called yet",
+                "next": "wait for the review run, then call record_verdict with the verdict",
+            }
+        if status == "changes-requested":
+            return {
+                "state": status,
+                "why": "the reviewer recorded a 'changes' verdict on the last round",
+                "next": "call dispatch_task to start a new round of execution",
+            }
+        if status == "done":
+            return {
+                "state": status,
+                "why": "task already has an approved pass verdict",
+                "next": "call land_task to land it (idempotent if already landed)",
+            }
+        if status == "cancelled":
+            return {
+                "state": status,
+                "why": "task was cancelled and is terminal",
+                "next": "create_task a new task if the work is still needed",
+            }
+        return {
+            "state": status,
+            "why": "status is not one this helper recognizes",
+            "next": "call get_status for the full task record",
+        }
+
+    def available_actions(self, task: Task) -> dict[str, Any]:
+        """Which tools are valid from this task's current status, and why --
+        and for the blocked ones, why and how to unblock them.
+
+        Derived by calling the real FSM gates (``assert_status`` and
+        ``TaskStateMachine.require_approved_pass_verdict``) that the actual
+        transition methods use, not a hand-maintained status table -- the
+        exact drift a table like that produced before (see module docstring
+        history on CTV2-1382/CTV2-1388/CTV2-1389). A test asserts that every
+        tool this reports as available really can be called, from every
+        status, without raising a state-conflict.
+        """
+        from app.services.task_state_machine import TaskStateMachine
+
+        available: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
+
+        def check(tool: str, expected_status: str, fix: str) -> None:
+            try:
+                self.assert_status(task, expected_status)
+            except TransitionConflictError:
+                blocked.append(
+                    {
+                        "tool": tool,
+                        "reason": (
+                            f"{tool} requires status {expected_status!r}, "
+                            f"task is {task.status!r}"
+                        ),
+                        "fix": fix,
+                    }
+                )
+            else:
+                available.append(
+                    {
+                        "tool": tool,
+                        "reason": f"task status is {task.status!r}, which {tool} accepts",
+                    }
+                )
+
+        # dispatch_task (kind=execute) accepts 'todo', and also re-accepts a
+        # task already sitting in 'failed'/'changes-requested' -- this mirrors
+        # TaskStateMachine.request_dispatch's own expected_status default.
+        dispatch_expected = (
+            task.status if task.status in {"failed", "changes-requested"} else "todo"
+        )
+        check(
+            "dispatch_task",
+            dispatch_expected,
+            "get the task to 'todo', 'failed' or 'changes-requested' first "
+            "(reopen_task or record_verdict can move it there)",
+        )
+        check(
+            "attach_result",
+            "dispatched",
+            "call dispatch_task and let the executor run finish first",
+        )
+        check(
+            "request_review",
+            "awaiting-review",
+            "call attach_result to deliver a result_ref first",
+        )
+        check(
+            "record_verdict",
+            "in-review",
+            "call request_review to start a review run first",
+        )
+
+        try:
+            self.assert_status(task, "failed")
+        except TransitionConflictError:
+            blocked.append(
+                {
+                    "tool": "reopen_task",
+                    "reason": (
+                        f"reopen_task only applies to 'failed' tasks, task is {task.status!r}"
+                    ),
+                    "fix": "no action needed -- reopen_task is only for stuck 'failed' tasks",
+                }
+            )
+        else:
+            available.append(
+                {
+                    "tool": "reopen_task",
+                    "reason": (
+                        "task is 'failed'; reopen_task routes it to 'awaiting-review' "
+                        "if a result was delivered, otherwise 'todo'"
+                    ),
+                }
+            )
+
+        state_machine = TaskStateMachine(self.db)
+        try:
+            state_machine.require_approved_pass_verdict(task)
+        except PrerequisiteError as exc:
+            blocked.append(
+                {
+                    "tool": "land_task",
+                    "reason": str(exc),
+                    "fix": "get an approved 'pass' verdict via record_verdict before land_task",
+                }
+            )
+        else:
+            available.append(
+                {
+                    "tool": "land_task",
+                    "reason": "task has an approved pass verdict; land_task can merge it",
+                }
+            )
+
+        return {"available": available, "blocked": blocked}
+
     def task(self, task_id: str) -> Task:
         task = (
             self.db.query(Task)
