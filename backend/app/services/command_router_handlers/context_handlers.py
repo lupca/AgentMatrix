@@ -1,20 +1,23 @@
+import asyncio
 import json
 import os
 import sys
+import time
 from typing import Any
 from collections.abc import Mapping
 
 from app.db.models import (
     Agent,
+    AgentRun,
     Project,
     Task,
     Session as SessionModel,
 )
-from app.services import spec_plan_generator
 from app.services.agent_suggester import AgentSuggester
 from app.services.context_hierarchy import ContextHierarchy
-from app.services.llm_service import ConfigurationError
-from app.services.spec_plan_generator import PlanCriticError, SpecPlanGenerationError
+from app.workers import plan_executor
+
+_GENERATE_SPEC_PLAN_WAIT_SECONDS = 30
 
 
 def _get_graph_get_impact_radius():
@@ -31,14 +34,6 @@ def _get_semantic_search():
         return cr_mod.semantic_search
     from app.services.graph_client import semantic_search
     return semantic_search
-
-
-def _get_record_tool_metric():
-    tm_mod = sys.modules.get('app.services.tool_metrics')
-    if tm_mod and hasattr(tm_mod, 'record_tool_metric'):
-        return tm_mod.record_tool_metric
-    from app.services.tool_metrics import record_tool_metric
-    return record_tool_metric
 
 
 class ContextHandlersMixin:
@@ -268,9 +263,101 @@ class ContextHandlersMixin:
             'rules_count': len(parsed_rules),
         }
 
-    async def _handle_generate_spec_plan(self, args: str, session_id: str) -> dict:
-        from app.services.task_orchestration import TaskOrchestrationService, OrchestrationError
+    def _spec_plan_response_payload(self, task_id: str, repo_root: str | None) -> dict:
+        task = self.db.get(Task, task_id)
+        critic_rejected = task.plan_critic_status == 'reject'
+        questions_pending = bool(task.open_questions) or task.spec_clarity != 'high'
+        return {
+            'action': (
+                'spec_plan_critic_rejected'
+                if critic_rejected
+                else ('spec_questions_pending' if questions_pending else 'spec_plan_generated')
+            ),
+            'task_id': task_id,
+            'acceptance_criteria': task.acceptance_criteria,
+            'constraints': task.constraints,
+            'evidence': task.evidence,
+            'prior_art': task.prior_art,
+            'ruled_out': task.ruled_out,
+            'limits': task.limits,
+            'plan': task.plan,
+            'files': task.files,
+            'tests': task.tests,
+            'risk': task.risk,
+            'flows': task.flows,
+            'repo_root': repo_root,
+            'spec_clarity': task.spec_clarity,
+            'open_questions': task.open_questions or [],
+            'awaiting_approval': bool(task.awaiting_approval),
+            'approval_prompt': task.approval_prompt,
+            'planner': task.planner,
+            'plan_critic': task.plan_critic,
+            'plan_critic_status': task.plan_critic_status,
+            'plan_critic_findings': task.plan_critic_findings,
+        }
 
+    @staticmethod
+    def _run_handle(run: AgentRun, task_id: str) -> dict:
+        return {
+            'run_id': run.id,
+            'task_id': task_id,
+            'status': run.status,
+            'next': 'wait_for_task',
+            'latest_run': run.id,
+        }
+
+    def _latest_critic_run(self, task_id: str) -> AgentRun | None:
+        return (
+            self.db.query(AgentRun)
+            .filter(
+                AgentRun.task_id == task_id,
+                AgentRun.idempotency_key.like(f'{plan_executor.PLANNER_PREFIX}{task_id}:critic:%'),
+            )
+            .order_by(AgentRun.created_at.desc())
+            .first()
+        )
+
+    async def _await_spec_plan(
+        self, task_id: str, plan_run_id: str, repo_root: str | None, *, timeout_seconds: int,
+    ) -> dict:
+        """Poll for the (chained) plan -> critic run pair to finish, capped
+        at ``timeout_seconds`` total. CTV2-1382: both steps now run in the
+        Dramatiq worker, dispatched through the outbox -- this replaces the
+        synchronous in-process await that used to hold the MCP request open
+        for the full 170-420s of both LLM calls."""
+
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            self.db.rollback()
+            plan_run = self.db.get(AgentRun, plan_run_id)
+            if plan_run is None:
+                return {'error': f'AgentRun {plan_run_id} not found'}
+
+            if plan_run.status == 'failed':
+                return {
+                    'error': plan_run.error_message or 'Spec/plan generation failed',
+                    'task_id': task_id,
+                }
+            if plan_run.status == 'success':
+                critic_run = self._latest_critic_run(task_id)
+                if critic_run is not None:
+                    if critic_run.status == 'failed':
+                        return {
+                            'error': critic_run.error_message or 'Plan critic failed',
+                            'task_id': task_id,
+                            'plan_persisted': True,
+                            'next': 'critique_spec_plan',
+                        }
+                    if critic_run.status == 'success':
+                        return self._spec_plan_response_payload(task_id, repo_root)
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                handle_run = self._latest_critic_run(task_id) or plan_run
+                return self._run_handle(handle_run, task_id)
+            await asyncio.sleep(min(1.0, remaining))
+
+    async def _handle_generate_spec_plan(self, args: str, session_id: str) -> dict:
         parts = args.strip().split()
         if not parts:
             return {'error': 'Usage: /spec-plan <task_id> [agent_id]'}
@@ -279,6 +366,13 @@ class ContextHandlersMixin:
         task = self.db.query(Task).filter(Task.id == task_id).first()
         if not task:
             return {'error': f'Task {task_id} not found'}
+        if task.status != 'todo':
+            return {
+                'error': (
+                    f"generate_spec_plan requires task status 'todo'; task {task_id} is "
+                    f"{task.status!r}"
+                )
+            }
 
         agent_id = parts[1] if len(parts) > 1 else None
         critic_id = parts[2] if len(parts) > 2 else None
@@ -292,6 +386,17 @@ class ContextHandlersMixin:
                 return {'error': 'No suitable agent found for spec/plan generation'}
             agent = self.db.get(Agent, suggestions[0].agent_id)
 
+        agent_type = getattr(getattr(agent, "agent_type", None), "value", None) or getattr(
+            agent, "agent_type", ""
+        )
+        if str(agent_type).strip().lower() == "api":
+            return {
+                'error': (
+                    "Spec/plan research requires a CLI agent that can read the repository; "
+                    f"{agent.id} is API-backed."
+                )
+            }
+
         if critic_id:
             critic_agent = self.db.get(Agent, critic_id)
             if critic_agent is None:
@@ -304,168 +409,54 @@ class ContextHandlersMixin:
             if str(critic_type).strip().lower() == 'api':
                 return {'error': 'Plan criticism requires a CLI agent'}
         else:
-            critic_agent = None
+            # Cheap fail-fast check only -- do NOT pin a specific candidate.
+            # The actual critic is selected fresh by the worker once the plan
+            # step finishes (minutes later), when agent availability may have
+            # changed; see plan_executor._dispatch_critic_step.
             suggestions = AgentSuggester(self.db).suggest(
                 task, role="reviewer", top_n=10, exclude_agent_id=agent.id
             )
+            has_cli_candidate = False
             for suggestion in suggestions:
                 candidate = self.db.get(Agent, suggestion.agent_id)
-                candidate_type = getattr(getattr(candidate, "agent_type", None), "value", None) or getattr(
-                    candidate, "agent_type", ""
-                )
-                if candidate is not None and str(candidate_type).lower() != "api":
-                    critic_agent = candidate
+                if candidate is None:
+                    continue
+                candidate_type = getattr(
+                    getattr(candidate, "agent_type", None), "value", None
+                ) or getattr(candidate, "agent_type", "")
+                if str(candidate_type).strip().lower() != "api":
+                    has_cli_candidate = True
                     break
-            if critic_agent is None:
+            if not has_cli_candidate:
                 return {'error': 'No independent CLI plan critic is available'}
 
         project = self.db.get(Project, task.project) if task.project else None
         repo_root = os.path.abspath(project.repo_root) if project and project.repo_root else None
-        context_parts: list[str] = []
-        if project is not None and (project.context_md or '').strip():
-            context_parts.append(project.context_md.strip())
-        if project is not None:
-            from app.services.context_generator import get_matching_rules
-
-            for rule in get_matching_rules(self.db, project.id, task.files or None):
-                context_parts.append(f"## Rule: {rule.name}\n{rule.content}")
-        project_context = "\n\n".join(context_parts) or None
-
-        try:
-            result, flows = await spec_plan_generator.generate_spec_plan(
-                task, repo_root, agent, project_context=project_context, db=self.db
-            )
-        except (SpecPlanGenerationError, ConfigurationError) as exc:
-            self.db.commit()
-            return {'error': str(exc)}
-
-        record_metric_fn = _get_record_tool_metric()
-        record_metric_fn(
-            tool='spec_plan',
-            source='spec_plan_generator',
-            ok=True,
-            task_id=task_id,
-            result_count=len(result.open_questions),
-            payload={'spec_clarity': result.spec_clarity, 'task_id': task_id},
-        )
-
-        service = TaskOrchestrationService(self.db)
-
-        # Plan is written and committed BEFORE the critic runs — a critic
-        # failure below costs only the critic (~40-90s), not this planner
-        # call. The critic reads the plan back from DB rather than the
-        # in-memory `result`, so this step is the durable hand-off point.
-        try:
-            updated = service.write_spec_plan(
-                task_id=task_id,
-                actor=f"chat:{session_id or 'anonymous'}",
-                acceptance_criteria=result.acceptance_criteria,
-                constraints=result.constraints,
-                evidence=[item.model_dump(mode='json') for item in result.evidence],
-                prior_art=result.prior_art,
-                ruled_out=[item.model_dump(mode='json') for item in result.ruled_out],
-                limits=result.limits.model_dump(mode='json') if result.limits else None,
-                plan=result.plan,
-                files=result.files,
-                tests=result.tests,
-                risk=result.risk,
-                flows=flows,
-                spec_clarity=result.spec_clarity,
-                open_questions=result.open_questions,
-                planner=agent.id,
-            )
-        except OrchestrationError as exc:
-            return {'error': str(exc)}
-
-        task = self.db.get(Task, task_id)
-        self.db.refresh(task)
-
-        try:
-            plan_from_db = spec_plan_generator.spec_plan_result_from_task(task)
-            critic_result, critic_tokens = await spec_plan_generator.criticize_spec_plan(
-                task,
-                plan_from_db,
-                repo_root,
-                agent,
-                critic_agent,
-                project_context=project_context,
-                db=self.db,
-            )
-        except (PlanCriticError, ConfigurationError) as exc:
-            self.db.commit()
+        if not repo_root:
             return {
-                'error': str(exc),
-                'task_id': task_id,
-                'plan_persisted': True,
-                'next': 'critique_spec_plan',
+                'error': 'Spec/plan research requires a configured project repo_root for the CLI agent.'
             }
 
-        record_metric_fn(
-            tool='plan_critic',
-            source='spec_plan_generator',
-            ok=True,
+        run = plan_executor.create_plan_run(self.db, task, agent=agent, step="plan")
+        from app.services.task_event_service import emit_task_event
+
+        emit_task_event(
             task_id=task_id,
-            result_count=len(critic_result.findings),
-            payload={
-                'verdict': critic_result.verdict,
-                'critic': critic_agent.id,
-                'planner': agent.id,
-                'tokens_used': critic_tokens,
-                'token_budget': spec_plan_generator.PLAN_CRITIC_TOKEN_BUDGET,
-                'diff_provided': False,
-            },
+            event_type=plan_executor.DISPATCH_CONTEXT_EVENT,
+            kind="info",
+            payload={"critic_id": critic_id or "", "planner_agent_id": agent.id},
+            db=self.db,
         )
+        plan_executor.dispatch_plan_run(self.db, run, repo_root)
 
-        try:
-            updated = service.record_plan_critic_verdict(
-                task_id=task_id,
-                actor=f"chat:{session_id or 'anonymous'}",
-                critic=critic_agent.id,
-                verdict=critic_result.verdict,
-                findings=[item.model_dump(mode='json') for item in critic_result.findings],
-                summary=critic_result.summary,
-                tokens=critic_tokens,
-            )
-        except OrchestrationError as exc:
-            return {'error': str(exc)}
-
-        critic_rejected = updated.plan_critic_status == 'reject'
-        questions_pending = bool(updated.open_questions) or updated.spec_clarity != 'high'
-        return {
-            'action': (
-                'spec_plan_critic_rejected'
-                if critic_rejected
-                else ('spec_questions_pending' if questions_pending else 'spec_plan_generated')
-            ),
-            'task_id': task_id,
-            'acceptance_criteria': updated.acceptance_criteria,
-            'constraints': updated.constraints,
-            'evidence': updated.evidence,
-            'prior_art': updated.prior_art,
-            'ruled_out': updated.ruled_out,
-            'limits': updated.limits,
-            'plan': updated.plan,
-            'files': updated.files,
-            'tests': updated.tests,
-            'risk': updated.risk,
-            'flows': updated.flows,
-            'repo_root': repo_root,
-            'spec_clarity': updated.spec_clarity,
-            'open_questions': updated.open_questions or [],
-            'awaiting_approval': bool(updated.awaiting_approval),
-            'approval_prompt': updated.approval_prompt,
-            'planner': updated.planner,
-            'plan_critic': updated.plan_critic,
-            'plan_critic_status': updated.plan_critic_status,
-            'plan_critic_findings': updated.plan_critic_findings,
-        }
+        return await self._await_spec_plan(
+            task_id, run.id, repo_root, timeout_seconds=_GENERATE_SPEC_PLAN_WAIT_SECONDS,
+        )
 
     async def _handle_critique_spec_plan(self, args: str, session_id: str) -> dict:
         """Run the plan critic alone against whatever plan is already on the
         task. Never calls the planner — a re-critique round after a rejected
         verdict, or after a critic-only failure, costs only this step."""
-
-        from app.services.task_orchestration import TaskOrchestrationService, OrchestrationError
 
         try:
             payload = json.loads(args) if args.strip() else {}
@@ -515,72 +506,41 @@ class ContextHandlersMixin:
 
         project = self.db.get(Project, task.project) if task.project else None
         repo_root = os.path.abspath(project.repo_root) if project and project.repo_root else None
-        context_parts: list[str] = []
-        if project is not None and (project.context_md or '').strip():
-            context_parts.append(project.context_md.strip())
-        if project is not None:
-            from app.services.context_generator import get_matching_rules
+        if not repo_root:
+            return {'error': 'Plan criticism requires a configured project repo_root.'}
 
-            for rule in get_matching_rules(self.db, project.id, task.files or None):
-                context_parts.append(f"## Rule: {rule.name}\n{rule.content}")
-        project_context = "\n\n".join(context_parts) or None
-
-        try:
-            plan_from_db = spec_plan_generator.spec_plan_result_from_task(task)
-            critic_result, critic_tokens = await spec_plan_generator.criticize_spec_plan(
-                task,
-                plan_from_db,
-                repo_root,
-                planner_agent,
-                critic_agent,
-                project_context=project_context,
-                db=self.db,
-            )
-        except (PlanCriticError, ConfigurationError) as exc:
-            self.db.commit()
-            return {'error': str(exc)}
-
-        record_metric_fn = _get_record_tool_metric()
-        record_metric_fn(
-            tool='plan_critic',
-            source='spec_plan_generator',
-            ok=True,
-            task_id=task_id,
-            result_count=len(critic_result.findings),
-            payload={
-                'verdict': critic_result.verdict,
-                'critic': critic_agent.id,
-                'planner': task.planner,
-                'tokens_used': critic_tokens,
-                'token_budget': spec_plan_generator.PLAN_CRITIC_TOKEN_BUDGET,
-                'diff_provided': False,
-            },
+        critic_run = plan_executor.create_critic_run(
+            self.db, task, repo_root, critic_agent=critic_agent,
         )
 
-        service = TaskOrchestrationService(self.db)
-        try:
-            updated = service.record_plan_critic_verdict(
-                task_id=task_id,
-                actor=f"chat:{session_id or 'anonymous'}",
-                critic=critic_agent.id,
-                verdict=critic_result.verdict,
-                findings=[item.model_dump(mode='json') for item in critic_result.findings],
-                summary=critic_result.summary,
-                tokens=critic_tokens,
-            )
-        except OrchestrationError as exc:
-            return {'error': str(exc)}
-
-        return {
-            'action': 'spec_plan_critic_rejected' if updated.plan_critic_status == 'reject' else 'spec_plan_critiqued',
-            'task_id': task_id,
-            'planner': updated.planner,
-            'plan_critic': updated.plan_critic,
-            'plan_critic_status': updated.plan_critic_status,
-            'plan_critic_findings': updated.plan_critic_findings,
-            'awaiting_approval': bool(updated.awaiting_approval),
-            'approval_prompt': updated.approval_prompt,
-        }
+        deadline = time.monotonic() + _GENERATE_SPEC_PLAN_WAIT_SECONDS
+        while True:
+            self.db.rollback()
+            run = self.db.get(AgentRun, critic_run.id)
+            if run is None:
+                return {'error': f'AgentRun {critic_run.id} not found'}
+            if run.status == 'failed':
+                return {'error': run.error_message or 'Plan critic failed', 'task_id': task_id}
+            if run.status == 'success':
+                task = self.db.get(Task, task_id)
+                return {
+                    'action': (
+                        'spec_plan_critic_rejected'
+                        if task.plan_critic_status == 'reject'
+                        else 'spec_plan_critiqued'
+                    ),
+                    'task_id': task_id,
+                    'planner': task.planner,
+                    'plan_critic': task.plan_critic,
+                    'plan_critic_status': task.plan_critic_status,
+                    'plan_critic_findings': task.plan_critic_findings,
+                    'awaiting_approval': bool(task.awaiting_approval),
+                    'approval_prompt': task.approval_prompt,
+                }
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return self._run_handle(run, task_id)
+            await asyncio.sleep(min(1.0, remaining))
 
     async def _handle_compact_context(self, args: str, session_id: str) -> dict:
         session = self.db.query(SessionModel).filter(

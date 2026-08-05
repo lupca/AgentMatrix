@@ -1,6 +1,9 @@
+import json as _json
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 from unittest.mock import AsyncMock, MagicMock, patch
 from app.db.base import Base
 from app.services.command_router import COMMANDS, HELP_COMMAND, CommandRouter
@@ -9,7 +12,13 @@ from app.services.tool_registry import dump_registry
 
 @pytest.fixture
 def db_session():
-    engine = create_engine('sqlite:///:memory:')
+    # check_same_thread=False + StaticPool: the CTV2-1382 generate_spec_plan
+    # tests simulate the worker completing an outbox-dispatched run from a
+    # background thread (see _run_worker_inline below), which needs the same
+    # underlying SQLite connection to be usable across threads.
+    engine = create_engine(
+        'sqlite://', connect_args={'check_same_thread': False}, poolclass=StaticPool,
+    )
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     session = Session()
@@ -1630,18 +1639,63 @@ async def test_get_minimal_context_graph_unavailable_returns_structured_error(db
     assert "MCP timed out" in result["detail"]
 
 
+@pytest.fixture
+def auto_worker(monkeypatch):
+    """CTV2-1382: generate_spec_plan/critique_spec_plan now dispatch a
+    planner/critic AgentRun through the transactional outbox and complete it
+    in the Dramatiq worker (app.workers.plan_executor), not synchronously
+    inside the MCP request. Tests that want to observe a *finished* plan
+    (not just the dispatch handle) need a worker to actually run the job --
+    this fixture simulates one being instantly available: right after
+    dispatch, it runs the job to completion on a background thread and joins
+    before returning, so the handler's poll loop (_await_spec_plan) sees a
+    terminal status on its first check. LLMService.complete is the seam
+    tests mock (same as test_spec_plan_generator.py) -- everything above it,
+    including the outbox dispatch and pid-recording plumbing, runs for real.
+    """
+    import threading
+    from app.workers import plan_executor as pe
+
+    real_dispatch = pe.dispatch_plan_run
+
+    def fake_dispatch(db, run, repo_root):
+        real_dispatch(db, run, repo_root)
+        from app.db.models import Task as _Task
+
+        task = db.get(_Task, run.task_id)
+        errors: list[Exception] = []
+
+        def worker() -> None:
+            try:
+                pe.execute_plan_run(db, run, task, run.timeout_seconds)
+            except Exception as exc:  # pragma: no cover - re-raised below
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+        if errors:
+            raise errors[0]
+
+    monkeypatch.setattr(pe, "dispatch_plan_run", fake_dispatch)
+    return fake_dispatch
+
+
 @pytest.mark.asyncio
-async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
-    """CTV2-091: /spec-plan runs the (mocked) LLM+graph generator and writes
-    the result onto the task via TaskOrchestrationService, which is the only
-    thing that lets a subsequent dispatch through.
+async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session, auto_worker, tmp_path):
+    """CTV2-091: /spec-plan runs the (mocked-at-the-LLM-seam) generator and
+    writes the result onto the task via TaskOrchestrationService, which is
+    the only thing that lets a subsequent dispatch through.
 
-    CTV2-109: no spec_plan_model gate anymore -- generation runs immediately
-    with an explicitly passed agent_id."""
+    CTV2-1382: the planner/critic AgentRun now goes through the outbox and
+    the (simulated, via auto_worker) Dramatiq worker instead of running
+    synchronously inside this call -- the external result contract
+    (including the exact response key set) is unchanged."""
     from app.db.models import Agent, Project, Task
-    from app.schemas.task import SpecPlanResult
+    from app.schemas.task import PLAN_CRITIC_RESULT_SCHEMA_VERSION, SPEC_PLAN_RESULT_SCHEMA_VERSION
+    from app.services.providers import ProviderResponse
 
-    db_session.add(Project(id="proj-spec", name="Spec Project", repo_root="/tmp"))
+    db_session.add(Project(id="proj-spec", name="Spec Project", repo_root=str(tmp_path)))
     db_session.add(
         Agent(
             id="@spec-agent",
@@ -1675,37 +1729,39 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     )
     db_session.commit()
 
-    fake_result = SpecPlanResult(
-        schema_version="2.0",
-        acceptance_criteria=["Does the thing"],
-        constraints=["Do not add a migration"],
-        evidence=[{
+    plan_payload = {
+        "schema_version": SPEC_PLAN_RESULT_SCHEMA_VERSION,
+        "acceptance_criteria": ["Does the thing"],
+        "constraints": ["Do not add a migration"],
+        "evidence": [{
             "fact": "Thing module is absent", "source_type": "command",
             "source": "test ! -e backend/app/thing.py", "result": "exit 0",
         }],
-        prior_art=[],
-        ruled_out=[],
-        limits=None,
-        plan="Do the thing.",
-        files=["backend/app/thing.py"],
-        tests=["backend/tests/test_thing.py"],
-        risk="low",
-        spec_clarity="high",
-        open_questions=[],
-    )
+        "prior_art": [], "ruled_out": [], "limits": None,
+        "plan": "Do the thing.",
+        "files": ["backend/app/thing.py"],
+        "tests": ["backend/tests/test_thing.py"],
+        "risk": "low", "spec_clarity": "high", "open_questions": [],
+    }
+    critic_payload = {
+        "schema_version": PLAN_CRITIC_RESULT_SCHEMA_VERSION,
+        "verdict": "accept", "findings": [], "summary": "Verified",
+    }
+    responses = [
+        ProviderResponse(provider="anthropic", model="claude-x", text=_json.dumps(plan_payload)),
+        ProviderResponse(provider="openai", model="codex-x", text=_json.dumps(critic_payload)),
+    ]
 
     with patch(
-        "app.services.spec_plan_generator.generate_spec_plan",
-        new=AsyncMock(return_value=(fake_result, ["thing-flow"])),
+        "app.services.spec_plan_generator.semantic_search",
+        new=AsyncMock(return_value=[{"file_path": "backend/app/thing.py"}]),
     ), patch(
-        "app.services.spec_plan_generator.criticize_spec_plan",
-        new=AsyncMock(return_value=(
-            __import__("app.schemas.task", fromlist=["PlanCriticResult"]).PlanCriticResult(
-                schema_version="1.0", verdict="accept", findings=[], summary="Verified"
-            ),
-            1234,
-        )),
-    ), patch("app.services.tool_metrics.record_tool_metric") as mock_metric:
+        "app.services.spec_plan_generator.get_affected_flows",
+        new=AsyncMock(return_value=["thing-flow"]),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(side_effect=responses),
+    ), patch("app.workers.plan_executor.record_tool_metric") as mock_metric:
         result = await CommandRouter(db_session).execute(
             "generate_spec_plan", "TASK-SPEC @spec-agent @plan-critic", "session-1"
         )
@@ -1713,6 +1769,13 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     assert result["action"] == "spec_plan_generated"
     assert result["acceptance_criteria"] == ["Does the thing"]
     assert result["flows"] == ["thing-flow"]
+    assert set(result.keys()) == {
+        "action", "task_id", "acceptance_criteria", "constraints", "evidence",
+        "prior_art", "ruled_out", "limits", "plan", "files", "tests", "risk",
+        "flows", "repo_root", "spec_clarity", "open_questions",
+        "awaiting_approval", "approval_prompt", "planner", "plan_critic",
+        "plan_critic_status", "plan_critic_findings",
+    }
 
     task = db_session.get(Task, "TASK-SPEC")
     assert task.acceptance_criteria == ["Does the thing"]
@@ -1721,6 +1784,7 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     assert task.spec_clarity == "high"
     assert task.awaiting_approval is False
     assert task.approval_prompt is None
+    assert task.plan_critic_status == "accept"
     mock_metric.assert_any_call(
         tool="spec_plan",
         source="spec_plan_generator",
@@ -1731,112 +1795,66 @@ async def test_generate_spec_plan_writes_result_and_opens_dispatch(db_session):
     )
     assert mock_metric.call_count == 2
 
+    from app.db.models import AgentRun
+
+    runs = (
+        db_session.query(AgentRun)
+        .filter(AgentRun.idempotency_key.like("planner:TASK-SPEC:%"))
+        .order_by(AgentRun.created_at)
+        .all()
+    )
+    assert [run.kind for run in runs] == ["execute", "review"]
+    assert all(run.status == "success" for run in runs)
+
 
 @pytest.mark.asyncio
-async def test_generate_spec_plan_returns_questions_and_escalates(db_session):
-    from app.db.models import Agent, Project, Task
-    from app.schemas.task import SpecPlanResult
+async def test_generate_spec_plan_returns_handle_when_worker_has_not_finished_yet(db_session, tmp_path):
+    """No auto_worker here -- the dispatched AgentRun is left 'queued'
+    forever, simulating a worker that hasn't picked the job up within the
+    wait window. The handler must return a handle, not hang."""
+    from app.db.models import Agent, AgentRun, Project, Task
 
-    db_session.add(Project(id="proj-questions", name="Questions", repo_root="/tmp"))
+    db_session.add(Project(id="proj-slow", name="Slow Project", repo_root=str(tmp_path)))
     db_session.add(
-        Agent(
-            id="@question-planner",
-            name="Question Planner",
-            role="coordinator",
-            cli="codex",
-            capabilities=["coordinator"],
-        )
+        Agent(id="@slow-agent", name="Slow Agent", role="coordinator", cli="claude", capabilities=["coordinator"])
     )
     db_session.add(
-        Agent(
-            id="@question-critic",
-            name="Question Critic",
-            role="reviewer",
-            cli="claude",
-            capabilities=["review"],
-        )
+        Agent(id="@slow-critic", name="Slow Critic", role="reviewer", cli="codex", capabilities=["review"])
     )
     db_session.add(
-        Task(
-            id="TASK-QUESTIONS",
-            project="proj-questions",
-            title="Needs clarification",
-            status="todo",
-            acceptance_criteria=[],
-        )
+        Task(id="TASK-SLOW", project="proj-slow", title="Needs a spec", status="todo", acceptance_criteria=[])
     )
     db_session.commit()
 
-    fake_result = SpecPlanResult(
-        schema_version="2.0",
-        acceptance_criteria=["Authentication behavior is covered by tests"],
-        constraints=[],
-        evidence=[{
-            "fact": "Auth module exists", "source_type": "file",
-            "source": "backend/app/auth.py:1", "result": "auth module",
-        }],
-        prior_art=[],
-        ruled_out=[],
-        limits=None,
-        plan="Confirm auth convention, then implement.",
-        files=["backend/app/auth.py"],
-        tests=["backend/tests/test_auth.py"],
-        risk="medium",
-        spec_clarity="medium",
-        open_questions=[
-            "Which existing authentication convention should this use?",
-            "Should anonymous callers receive 401 or 403?",
-        ],
-    )
-
     with patch(
-        "app.services.spec_plan_generator.generate_spec_plan",
-        new=AsyncMock(return_value=(fake_result, [])),
-    ), patch(
-        "app.services.spec_plan_generator.criticize_spec_plan",
-        new=AsyncMock(return_value=(
-            __import__("app.schemas.task", fromlist=["PlanCriticResult"]).PlanCriticResult(
-                schema_version="1.0", verdict="accept", findings=[], summary="Verified"
-            ),
-            900,
-        )),
-    ):
-        result = await CommandRouter(db_session).execute_tool(
-            "generate_spec_plan",
-            {
-                "task_id": "TASK-QUESTIONS",
-                "agent_id": "@question-planner",
-                "critic_id": "@question-critic",
-            },
-            "session-questions",
+        "app.services.command_router_handlers.context_handlers._GENERATE_SPEC_PLAN_WAIT_SECONDS", 0.05,
+    ), patch("app.workers.agent_runner.run_agent.send"):
+        result = await CommandRouter(db_session).execute(
+            "generate_spec_plan", "TASK-SLOW @slow-agent @slow-critic", "session-1"
         )
 
-    assert result["action"] == "spec_questions_pending"
-    assert result["spec_clarity"] == "medium"
-    assert result["open_questions"] == fake_result.open_questions
-    assert result["awaiting_approval"] is True
-    assert "1) Which existing authentication convention should this use?" in result[
-        "approval_prompt"
-    ]
-    assert "2) Should anonymous callers receive 401 or 403?" in result[
-        "approval_prompt"
-    ]
+    assert result["next"] == "wait_for_task"
+    assert result["task_id"] == "TASK-SLOW"
+    assert result["status"] == "queued"
+    run = db_session.get(AgentRun, result["run_id"])
+    assert run is not None
+    assert run.idempotency_key.startswith("planner:TASK-SLOW:plan:")
 
-    task = db_session.get(Task, "TASK-QUESTIONS")
-    assert task.open_questions == fake_result.open_questions
-    assert task.spec_clarity == "medium"
-    assert task.awaiting_approval is True
+    task = db_session.get(Task, "TASK-SLOW")
+    assert task.status == "todo"
+    assert task.plan is None
 
 
 @pytest.mark.asyncio
-async def test_generate_spec_plan_auto_suggests_agent_when_not_provided(db_session):
+async def test_generate_spec_plan_auto_suggests_agent_when_not_provided(db_session, auto_worker, tmp_path):
     """CTV2-109: with no agent_id argument, /spec-plan auto-selects a
     capable agent via AgentSuggester(role="spec_plan") instead of gating on
     a human-approved model choice."""
-    from app.db.models import Agent, Project, Task
-    from app.schemas.task import SpecPlanResult
+    from app.db.models import Agent, AgentRun, Project, Task
+    from app.schemas.task import PLAN_CRITIC_RESULT_SCHEMA_VERSION, SPEC_PLAN_RESULT_SCHEMA_VERSION
+    from app.services.providers import ProviderResponse
 
-    db_session.add(Project(id="proj-spec-auto", name="Auto Spec Project", repo_root="/tmp"))
+    db_session.add(Project(id="proj-spec-auto", name="Auto Spec Project", repo_root=str(tmp_path)))
     db_session.add(
         Agent(
             id="@auto-spec-agent",
@@ -1866,52 +1884,51 @@ async def test_generate_spec_plan_auto_suggests_agent_when_not_provided(db_sessi
     )
     db_session.commit()
 
-    fake_result = SpecPlanResult(
-        schema_version="2.0",
-        acceptance_criteria=["Does the thing"],
-        constraints=[],
-        evidence=[{
+    plan_payload = {
+        "schema_version": SPEC_PLAN_RESULT_SCHEMA_VERSION,
+        "acceptance_criteria": ["Does the thing"], "constraints": [],
+        "evidence": [{
             "fact": "Task input inspected", "source_type": "query",
             "source": "get task TASK-SPEC-AUTO", "result": "task exists",
         }],
-        prior_art=[],
-        ruled_out=[],
-        limits=None,
-        plan="Do the thing.",
-        files=[],
-        tests=[],
-        risk="low",
-        spec_clarity="high",
-        open_questions=[],
-    )
+        "prior_art": [], "ruled_out": [], "limits": None,
+        "plan": "Do the thing.", "files": [], "tests": [],
+        "risk": "low", "spec_clarity": "high", "open_questions": [],
+    }
+    critic_payload = {
+        "schema_version": PLAN_CRITIC_RESULT_SCHEMA_VERSION,
+        "verdict": "accept", "findings": [], "summary": "Verified",
+    }
+    responses = [
+        ProviderResponse(provider="anthropic", model="claude-x", text=_json.dumps(plan_payload)),
+        ProviderResponse(provider="openai", model="codex-x", text=_json.dumps(critic_payload)),
+    ]
 
     with patch(
-        "app.services.spec_plan_generator.generate_spec_plan",
-        new=AsyncMock(return_value=(fake_result, [])),
-    ) as mock_generate, patch(
-        "app.services.spec_plan_generator.criticize_spec_plan",
-        new=AsyncMock(return_value=(
-            __import__("app.schemas.task", fromlist=["PlanCriticResult"]).PlanCriticResult(
-                schema_version="1.0", verdict="accept", findings=[], summary="Verified"
-            ),
-            800,
-        )),
+        "app.services.spec_plan_generator.semantic_search",
+        new=AsyncMock(return_value=[{"file_path": "some/file.py"}]),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(side_effect=responses),
     ):
         result = await CommandRouter(db_session).execute(
             "generate_spec_plan", "TASK-SPEC-AUTO", "session-1"
         )
 
     assert result["action"] == "spec_plan_generated"
-    used_agent = mock_generate.call_args.args[2]
-    assert used_agent.id == "@auto-spec-agent"
-    assert mock_generate.call_args.args[1] == "/tmp"
+    plan_run = (
+        db_session.query(AgentRun)
+        .filter(AgentRun.idempotency_key.like("planner:TASK-SPEC-AUTO:plan:%"))
+        .first()
+    )
+    assert plan_run.agent_id == "@auto-spec-agent"
 
 
 @pytest.mark.asyncio
 async def test_generate_spec_plan_errors_when_no_suitable_agent_found(db_session):
-    """CTV2-109: no capable agent configured -> a clear error, no LLM call,
+    """CTV2-109: no capable agent configured -> a clear error, no dispatch,
     and no fallback to an unconfigured provider."""
-    from app.db.models import Agent, Project, Task
+    from app.db.models import Agent, AgentRun, Project, Task
 
     db_session.add(Project(id="proj-spec-none", name="No Agent Spec Project", repo_root="/tmp"))
     db_session.add(
@@ -1934,18 +1951,15 @@ async def test_generate_spec_plan_errors_when_no_suitable_agent_found(db_session
     )
     db_session.commit()
 
-    with patch(
-        "app.services.spec_plan_generator.generate_spec_plan",
-        new=AsyncMock(side_effect=AssertionError("LLM must not be called with no suitable agent")),
-    ):
-        result = await CommandRouter(db_session).execute(
-            "generate_spec_plan", "TASK-SPEC-NONE", "session-1"
-        )
+    result = await CommandRouter(db_session).execute(
+        "generate_spec_plan", "TASK-SPEC-NONE", "session-1"
+    )
 
     assert "error" in result
 
     task = db_session.get(Task, "TASK-SPEC-NONE")
     assert task.acceptance_criteria == []
+    assert db_session.query(AgentRun).filter(AgentRun.task_id == "TASK-SPEC-NONE").count() == 0
 
 
 @pytest.mark.asyncio
@@ -1957,78 +1971,37 @@ async def test_generate_spec_plan_missing_task_returns_error(db_session):
 
 
 @pytest.mark.asyncio
-async def test_generate_spec_plan_success_response_keys_unchanged(db_session):
-    """The external contract of generate_spec_plan (byte-identical result
-    keys) must not change even though the internals now go plan -> DB ->
-    critic instead of one in-memory hop."""
+async def test_generate_spec_plan_requires_todo_status(db_session):
     from app.db.models import Agent, Project, Task
-    from app.schemas.task import PlanCriticResult, SpecPlanResult
 
-    db_session.add(Project(id="proj-keys", name="Keys Project", repo_root="/tmp"))
+    db_session.add(Project(id="proj-not-todo", name="Not Todo Project", repo_root="/tmp"))
     db_session.add(
-        Agent(id="@keys-agent", name="Keys Agent", role="coordinator", cli="claude", capabilities=["coordinator"])
+        Agent(id="@nt-agent", name="NT Agent", role="coordinator", cli="claude", capabilities=["coordinator"])
     )
     db_session.add(
-        Agent(id="@keys-critic", name="Keys Critic", role="reviewer", cli="codex", capabilities=["review"])
-    )
-    db_session.add(
-        Task(id="TASK-KEYS", project="proj-keys", title="Needs a spec", status="todo", acceptance_criteria=[])
+        Task(id="TASK-NOT-TODO", project="proj-not-todo", title="Already dispatched", status="dispatched")
     )
     db_session.commit()
 
-    fake_result = SpecPlanResult(
-        schema_version="2.0",
-        acceptance_criteria=["Does the thing"],
-        constraints=[],
-        evidence=[{
-            "fact": "Thing module is absent", "source_type": "command",
-            "source": "test ! -e backend/app/thing.py", "result": "exit 0",
-        }],
-        prior_art=[],
-        ruled_out=[],
-        limits=None,
-        plan="Do the thing.",
-        files=["backend/app/thing.py"],
-        tests=["backend/tests/test_thing.py"],
-        risk="low",
-        spec_clarity="high",
-        open_questions=[],
+    result = await CommandRouter(db_session).execute(
+        "generate_spec_plan", "TASK-NOT-TODO @nt-agent", "session-1"
     )
 
-    with patch(
-        "app.services.spec_plan_generator.generate_spec_plan",
-        new=AsyncMock(return_value=(fake_result, ["thing-flow"])),
-    ), patch(
-        "app.services.spec_plan_generator.criticize_spec_plan",
-        new=AsyncMock(return_value=(
-            PlanCriticResult(schema_version="1.0", verdict="accept", findings=[], summary="Verified"),
-            1234,
-        )),
-    ):
-        result = await CommandRouter(db_session).execute(
-            "generate_spec_plan", "TASK-KEYS @keys-agent @keys-critic", "session-1"
-        )
-
-    assert set(result.keys()) == {
-        "action", "task_id", "acceptance_criteria", "constraints", "evidence",
-        "prior_art", "ruled_out", "limits", "plan", "files", "tests", "risk",
-        "flows", "repo_root", "spec_clarity", "open_questions",
-        "awaiting_approval", "approval_prompt", "planner", "plan_critic",
-        "plan_critic_status", "plan_critic_findings",
-    }
+    assert "error" in result
+    assert "todo" in result["error"]
 
 
 @pytest.mark.asyncio
-async def test_generate_spec_plan_critic_failure_persists_plan(db_session):
+async def test_generate_spec_plan_critic_failure_persists_plan(db_session, auto_worker, tmp_path):
     """CTV2-1378: a critic failure must not discard the plan the planner
     just finished. Plan/evidence/planner stay on the task, only the critic
     verdict is missing (plan_critic_status stays NULL) and a retry can go
     through critique_spec_plan instead of re-running the whole planner."""
     from app.db.models import Agent, Project, Task
-    from app.schemas.task import SpecPlanResult
-    from app.services.spec_plan_generator import PlanCriticError
+    from app.schemas.task import SPEC_PLAN_RESULT_SCHEMA_VERSION
+    from app.services.providers import ProviderResponse
 
-    db_session.add(Project(id="proj-critic-fail", name="Critic Fail Project", repo_root="/tmp"))
+    db_session.add(Project(id="proj-critic-fail", name="Critic Fail Project", repo_root=str(tmp_path)))
     db_session.add(
         Agent(id="@cf-agent", name="CF Agent", role="coordinator", cli="claude", capabilities=["coordinator"])
     )
@@ -2040,31 +2013,35 @@ async def test_generate_spec_plan_critic_failure_persists_plan(db_session):
     )
     db_session.commit()
 
-    fake_result = SpecPlanResult(
-        schema_version="2.0",
-        acceptance_criteria=["Does the thing"],
-        constraints=["Do not add a migration"],
-        evidence=[{
+    plan_payload = {
+        "schema_version": SPEC_PLAN_RESULT_SCHEMA_VERSION,
+        "acceptance_criteria": ["Does the thing"],
+        "constraints": ["Do not add a migration"],
+        "evidence": [{
             "fact": "Thing module is absent", "source_type": "command",
             "source": "test ! -e backend/app/thing.py", "result": "exit 0",
         }],
-        prior_art=[],
-        ruled_out=[],
-        limits=None,
-        plan="Do the thing.",
-        files=["backend/app/thing.py"],
-        tests=["backend/tests/test_thing.py"],
-        risk="low",
-        spec_clarity="high",
-        open_questions=[],
-    )
+        "prior_art": [], "ruled_out": [], "limits": None,
+        "plan": "Do the thing.",
+        "files": ["backend/app/thing.py"],
+        "tests": ["backend/tests/test_thing.py"],
+        "risk": "low", "spec_clarity": "high", "open_questions": [],
+    }
+    responses = [
+        ProviderResponse(provider="anthropic", model="claude-x", text=_json.dumps(plan_payload)),
+        # Both critic attempts return unparseable JSON -> PlanCriticError,
+        # exhausting spec_plan_generator's own retry loop (_MAX_ATTEMPTS=2).
+        ProviderResponse(provider="openai", model="codex-x", text="not json"),
+        ProviderResponse(provider="openai", model="codex-x", text="still not json"),
+    ]
 
     with patch(
-        "app.services.spec_plan_generator.generate_spec_plan",
-        new=AsyncMock(return_value=(fake_result, ["thing-flow"])),
+        "app.services.spec_plan_generator.semantic_search", new=AsyncMock(return_value=[]),
     ), patch(
-        "app.services.spec_plan_generator.criticize_spec_plan",
-        new=AsyncMock(side_effect=PlanCriticError("critic agent unreachable")),
+        "app.services.spec_plan_generator.get_affected_flows", new=AsyncMock(return_value=[]),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(side_effect=responses),
     ):
         result = await CommandRouter(db_session).execute(
             "generate_spec_plan", "TASK-CRITIC-FAIL @cf-agent @cf-critic", "session-1"
@@ -2072,6 +2049,7 @@ async def test_generate_spec_plan_critic_failure_persists_plan(db_session):
 
     assert "error" in result
     assert result.get("plan_persisted") is True
+    assert result.get("next") == "critique_spec_plan"
 
     task = db_session.get(Task, "TASK-CRITIC-FAIL")
     assert task.plan == "Do the thing."
@@ -2083,13 +2061,15 @@ async def test_generate_spec_plan_critic_failure_persists_plan(db_session):
 
 
 @pytest.mark.asyncio
-async def test_critique_spec_plan_standalone_flips_verdict_without_planner(db_session):
-    """critique_spec_plan alone must never call generate_spec_plan (patched
-    to raise loudly if it is), and it flips a NULL verdict to accept."""
-    from app.db.models import Agent, Project, Task
-    from app.schemas.task import PlanCriticResult
+async def test_critique_spec_plan_standalone_flips_verdict_without_planner(db_session, auto_worker, tmp_path):
+    """critique_spec_plan alone dispatches only a critic AgentRun (never a
+    planner one -- there is no code path from this handler to
+    plan_executor's plan step), and flips a NULL verdict to accept."""
+    from app.db.models import Agent, AgentRun, GateRecord, Project, Task
+    from app.schemas.task import PLAN_CRITIC_RESULT_SCHEMA_VERSION
+    from app.services.providers import ProviderResponse
 
-    db_session.add(Project(id="proj-critique", name="Critique Project", repo_root="/tmp"))
+    db_session.add(Project(id="proj-critique", name="Critique Project", repo_root=str(tmp_path)))
     db_session.add(
         Agent(id="@cq-planner", name="CQ Planner", role="coordinator", cli="claude", capabilities=["coordinator"])
     )
@@ -2122,18 +2102,14 @@ async def test_critique_spec_plan_standalone_flips_verdict_without_planner(db_se
     )
     db_session.commit()
 
-    def _fail_if_called(*args, **kwargs):
-        raise AssertionError("critique_spec_plan must not invoke generate_spec_plan")
+    critic_payload = {
+        "schema_version": PLAN_CRITIC_RESULT_SCHEMA_VERSION,
+        "verdict": "accept", "findings": [], "summary": "Verified",
+    }
+    response = ProviderResponse(provider="openai", model="codex-x", text=_json.dumps(critic_payload))
 
     with patch(
-        "app.services.spec_plan_generator.generate_spec_plan",
-        new=AsyncMock(side_effect=_fail_if_called),
-    ), patch(
-        "app.services.spec_plan_generator.criticize_spec_plan",
-        new=AsyncMock(return_value=(
-            PlanCriticResult(schema_version="1.0", verdict="accept", findings=[], summary="Verified"),
-            777,
-        )),
+        "app.services.spec_plan_generator.LLMService.complete", new=AsyncMock(return_value=response),
     ):
         result = await CommandRouter(db_session).execute_tool(
             "critique_spec_plan",
@@ -2149,14 +2125,19 @@ async def test_critique_spec_plan_standalone_flips_verdict_without_planner(db_se
     assert task.plan_critic_status == "accept"
     assert task.plan_critic == "@cq-critic"
 
-    from app.db.models import GateRecord
-
     records = (
         db_session.query(GateRecord)
         .filter(GateRecord.task_id == "TASK-CRITIQUE", GateRecord.gate_type == "plan_critic")
         .all()
     )
     assert len(records) == 1
+
+    runs = (
+        db_session.query(AgentRun)
+        .filter(AgentRun.idempotency_key.like("planner:TASK-CRITIQUE:%"))
+        .all()
+    )
+    assert [run.kind for run in runs] == ["review"]
 
 
 @pytest.mark.asyncio

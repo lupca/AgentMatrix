@@ -110,8 +110,14 @@ class LLMService:
         max_tokens: int = 2048,
         temperature: float = 0.7,
         cwd: str | None = None,
+        on_start: Any = None,
     ) -> ProviderResponse:
-        """Complete a request through the provider selected by ``agent``."""
+        """Complete a request through the provider selected by ``agent``.
+
+        ``on_start``, if given, is only ever forwarded to a CLI-backed
+        provider (invoked with the spawned subprocess's PID) -- API
+        providers have no equivalent and never receive it.
+        """
 
         provider = self._provider_for(agent)
         selected_model = self._model_for(agent, model)
@@ -126,6 +132,7 @@ class LLMService:
                 cli=getattr(agent, "cli", None),
                 effort=getattr(agent, "effort", None),
                 cwd=cwd,
+                on_start=on_start,
             )
         return await provider.complete(
             messages,

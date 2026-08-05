@@ -274,19 +274,39 @@ def _publish_one(db: Session, event: OutboxEvent, now: datetime) -> None:
 def _dead_letter(db: Session, event: OutboxEvent, run: AgentRun) -> None:
     """Give up on `event` and escalate its run the same way a synchronous
     dispatch-queue failure would, rather than retrying forever."""
+    event.dead_letter = True
+    error = (
+        f"outbox publish exhausted after {event.attempts} attempts: {event.last_error}"
+    )
+
+    # Deferred to avoid an import cycle: app.workers.plan_executor imports
+    # record_run_requested from this module at module scope.
+    from app.workers.plan_executor import is_plan_run
+
+    if is_plan_run(run):
+        # A planner/critic run never moves Task.status (it stays 'todo'
+        # throughout planning), so record_dispatch_queue_failure below --
+        # which asserts the task is in 'dispatched'/'in-review' -- would
+        # always raise here and leave the row silently stuck 'queued'
+        # forever (the event is already dead-lettered above, so nothing else
+        # will ever retry it). Fail the row directly instead.
+        run.status = "failed"
+        run.pid = None
+        run.error_message = error[:4000]
+        run.completed_at = datetime.now(timezone.utc)
+        db.commit()
+        logger.warning("outbox: dead-lettered planner run %s: %s", run.id, error)
+        return
+
     # Deferred to avoid a task_orchestration <-> outbox import cycle
     # (task_orchestration imports record_run_requested at module scope).
     from app.services.task_orchestration import TaskOrchestrationService
 
-    event.dead_letter = True
     service = TaskOrchestrationService(db)
     try:
         service.record_dispatch_queue_failure(
             run_id=run.id,
-            error=(
-                f"outbox publish exhausted after {event.attempts} attempts: "
-                f"{event.last_error}"
-            ),
+            error=error,
             actor="system:outbox-publisher",
             idempotency_key=f"outbox:{event.id}:dead-letter",
         )
@@ -424,9 +444,9 @@ def reap_dead_running_runs(
 
 
 def _reap_run(db: Session, run: AgentRun, now: datetime) -> bool:
-    # Deferred to avoid a task_orchestration <-> outbox import cycle, same as
-    # `_dead_letter` above.
-    from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
+    # Deferred to avoid an import cycle: app.workers.plan_executor imports
+    # record_run_requested from this module at module scope.
+    from app.workers.plan_executor import is_plan_run
 
     pid = run.pid
     error = f"reaped: worker process {pid} is dead"
@@ -438,6 +458,20 @@ def _reap_run(db: Session, run: AgentRun, now: datetime) -> bool:
     # concurrency slot (brakes count status in {queued, running}) is freed
     # even if that next step fails.
     db.commit()
+
+    if is_plan_run(run):
+        # A planner/critic run never moves Task.status (stays 'todo'
+        # throughout), so record_execution_failure/record_review_failure
+        # below -- which assert a dispatch-flow status -- would always
+        # raise. The row above is already terminal; nothing else to do.
+        logger.warning(
+            "outbox: reaped dead planner run %s (task %s, pid %s)", run.id, run.task_id, pid
+        )
+        return True
+
+    # Deferred to avoid a task_orchestration <-> outbox import cycle, same as
+    # `_dead_letter` above.
+    from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 
     service = TaskOrchestrationService(db)
     record_failure = (

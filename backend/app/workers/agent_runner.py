@@ -45,7 +45,7 @@ from app.services.review_criteria import merged_review_criteria
 from app.services.task_event_service import emit_task_event
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.services.tool_metrics import record_tool_metric
-from app.workers import redis_broker
+from app.workers import plan_executor, redis_broker
 from app.workers.cli_executor import (
     WORKTREE_ENABLED, AgentExecutionError, _build_execution_result_ref, _cleanup_mcp_config,
     _cleanup_stale_process, _current_attempt, _emit_decision_event,
@@ -123,6 +123,18 @@ def run_agent_dead_letter(dead_message: dict, retry_info: dict) -> str:
                 run.status,
             )
             return "discarded_resolved"
+
+        if plan_executor.is_plan_run(run):
+            # A planner/critic run never moves Task.status (stays 'todo'
+            # throughout planning), so record_dispatch_queue_failure below --
+            # which asserts a dispatch-flow status -- would always raise and
+            # leave the row silently stuck 'queued'/'running' forever.
+            run.status = "failed"
+            run.pid = None
+            run.error_message = error
+            run.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            return "handled"
 
         service = TaskOrchestrationService(db)
         try:

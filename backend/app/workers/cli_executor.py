@@ -51,6 +51,7 @@ from app.services.review_criteria import merged_review_criteria
 from app.services.task_event_service import emit_task_event
 from app.services.task_orchestration import OrchestrationError, TaskOrchestrationService
 from app.services.tool_metrics import record_tool_metric
+from app.workers import plan_executor
 from app.workers.output_parser import (
     OUTPUT_CHUNK_LINES,
     ReviewResultLoadError,
@@ -834,16 +835,20 @@ def _record_unexpected_failure(
                 status="failed", error=str(exc), kind=run.kind
             )
             run.completed_at = datetime.now(timezone.utc)
-            _record_execution_failure(
-                db,
-                orch_cls,
-                task_id=task_id,
-                error=str(exc),
-                actor=f"agent:{run.agent_id}",
-                idempotency_key=f"run:{run.id}:execution-failure:unexpected",
-                run_id=run.id,
-                error_code="unexpected-execution-failure",
-            )
+            if not plan_executor.is_plan_run(run):
+                # A planner/critic run never moves Task.status (stays 'todo'
+                # throughout), so this task-status-bound call would always
+                # raise for one -- the row above is already terminal.
+                _record_execution_failure(
+                    db,
+                    orch_cls,
+                    task_id=task_id,
+                    error=str(exc),
+                    actor=f"agent:{run.agent_id}",
+                    idempotency_key=f"run:{run.id}:execution-failure:unexpected",
+                    run_id=run.id,
+                    error_code="unexpected-execution-failure",
+                )
         db.commit()
         return should_retry
     except Exception:
@@ -935,6 +940,18 @@ def execute_agent_run(
         attempt = _current_attempt(run)
         if not _claim_run_attempt(db, run, attempt):
             logger.info("Ignoring duplicate delivery while run %s is active", run_id)
+            return run.exit_code
+
+        if plan_executor.is_plan_run(run):
+            # A planner/critic run never has a worktree, git diff, or review
+            # artifact -- it is a read-only research call that writes its
+            # result onto the task via TaskOrchestrationService directly, and
+            # Task.status stays 'todo' throughout, so none of the
+            # dispatch-flow machinery below (brakes tied to for_spawn dispatch
+            # bookkeeping, worktree isolation, result_ref) applies.
+            plan_executor.execute_plan_run(db, run, task, timeout_seconds)
+            clear_cancel_request(run_id)
+            _nudge_driver(task_id, "run_agent_completed")
             return run.exit_code
 
         brake = orch_svc_cls(db).check_brakes(
