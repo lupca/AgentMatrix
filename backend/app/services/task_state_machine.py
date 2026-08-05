@@ -1616,6 +1616,39 @@ class TaskStateMachine:
 
         task = self.validator.task(task_id)
         if task.status != "failed":
+            # Second way to be stuck: the task is not terminal, but its
+            # approval projection says a human is being waited on while the
+            # ledger holds no unresolved pending gate.  Nothing can clear that
+            # -- `approve_gate` answers "No pending gate found", and every
+            # dispatch path refuses a task with `awaiting_approval` set.
+            #
+            # CTV2-1389 landed there when escalations changed from `rejected`
+            # to `pending` records: its flag was set by the old shape, so it
+            # sat on a finished, critic-accepted plan it could not act on.  A
+            # projection that can drift from the ledger needs one way back.
+            if task.awaiting_approval and not self.sync_awaiting_approval(task):
+                task.error = None
+                task.updated_at = datetime.now(timezone.utc)
+                payload = {
+                    "from_status": task.status,
+                    "to_status": task.status,
+                    "reason": "cleared a stale approval projection",
+                }
+                record = self.ledger_record(
+                    task=task,
+                    gate_type="reopen",
+                    status="approved",
+                    actor=actor,
+                    idempotency_key=str(uuid.uuid4()),
+                    input_hash=TaskValidator.input_hash(payload),
+                    payload=payload,
+                    output_payload={"status": task.status},
+                )
+                self.audit(task, record, reason="cleared a stale approval projection")
+                self.db.commit()
+                self.db.refresh(task)
+                self.db.refresh(record)
+                return TransitionResult(task, record, True)
             raise PrerequisiteError(
                 f"reopen requires status 'failed', found {task.status!r}"
             )

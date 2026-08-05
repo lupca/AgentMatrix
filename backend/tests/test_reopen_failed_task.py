@@ -417,3 +417,41 @@ def test_escalation_can_be_cleared_by_approving_it(service, db_session):
     assert task.status == "todo"
     # Append-only: the escalation row itself is untouched.
     assert db_session.get(GateRecord, record.id).status == "pending"
+
+
+def test_reopen_clears_a_stale_approval_projection(service, db_session):
+    """A projection that drifted from the ledger needs one way back.
+
+    `awaiting_approval` blocks every dispatch path, and `approve_gate` refuses
+    a task with no unresolved pending gate ("No pending gate found").  When
+    the flag is set but the ledger holds nothing pending -- as CTV2-1389 was
+    left after escalations changed shape -- the task is stuck with no tool
+    able to touch it.
+    """
+
+    task = _add_task(
+        db_session,
+        "STALE-001",
+        status="todo",
+        awaiting_approval=True,
+        approval_prompt="left over from an older escalation shape",
+        error="left over from an older escalation shape",
+    )
+
+    result = service.reopen_failed_task(task_id=task.id, actor="chat:test")
+    db_session.refresh(task)
+
+    assert task.status == "todo"
+    assert task.awaiting_approval is False
+    assert task.approval_prompt is None
+    assert task.error is None
+    assert result.gate_record.gate_type == "reopen"
+
+
+def test_reopen_still_refuses_a_healthy_task(service, db_session):
+    """Only stuck tasks: a task with nothing wrong must not be touched."""
+
+    task = _add_task(db_session, "STALE-002", status="dispatched", executor="@executor")
+
+    with pytest.raises(PrerequisiteError, match="requires status 'failed'"):
+        service.reopen_failed_task(task_id=task.id, actor="chat:test")
