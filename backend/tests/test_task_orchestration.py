@@ -263,7 +263,11 @@ def test_escalate_task_blocks_on_a_human_without_killing_the_task(
     assert task.error == "Review output was invalid"
     assert task.approval_prompt == "Review output was invalid"
     assert record.gate_type == "escalation"
-    assert record.status == "rejected"
+    # Pending, not rejected: the block and its release then come from the same
+    # place -- `sync_awaiting_approval` derives the flag from this row, and
+    # `approve_gate` clears it by appending a decision child.  Written as
+    # `rejected` it blocked dispatch while being unresolvable (CTV2-1389).
+    assert record.status == "pending"
     assert record.actor == "system:worker"
     assert record.error_message == "Review output was invalid"
     assert db_session.get(type(record), record.id) is not None

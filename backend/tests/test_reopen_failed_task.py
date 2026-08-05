@@ -373,3 +373,47 @@ def test_failed_delivered_result_recovers_through_independent_review_and_land(
     landed = service.land_task(task_id=task.id, actor="chat:supervisor")
     assert landed["status"] == "done"
     assert db_session.get(GateRecord, brake.id).status == "rejected"
+
+
+def test_escalation_can_be_cleared_by_approving_it(service, db_session):
+    """An escalation must be resolvable, or it is just a nicer dead end.
+
+    The first cut of this fix stopped escalation from marking the task
+    `failed` but left the gate record written as `rejected`.  That was worse
+    than it looked: `awaiting_approval` blocked every dispatch, while
+    `approve_gate` answered "No pending gate found" -- nothing could clear it.
+    CTV2-1389 sat there with a finished, critic-accepted plan it could not act
+    on.
+
+    Written as a pending gate, the block and its release come from the same
+    place.
+    """
+
+    task = _add_task(db_session, "ESC-CLEAR", status="todo")
+
+    record = service.escalate_task(
+        task_id=task.id,
+        reason="advance_task made no progress after 3 calls at status 'todo'",
+        actor="system:worker",
+    )
+    db_session.refresh(task)
+
+    assert record.status == "pending"
+    assert task.status == "todo"
+    assert task.awaiting_approval is True
+
+    result = service.decide_gate(
+        gate_record_id=record.id,
+        decision="approved",
+        actor="chat:test",
+        idempotency_key="esc-clear:approve",
+    )
+    db_session.refresh(task)
+
+    assert result.gate_record.parent_id == record.id
+    assert task.awaiting_approval is False
+    assert task.approval_prompt is None
+    assert task.error is None
+    assert task.status == "todo"
+    # Append-only: the escalation row itself is untouched.
+    assert db_session.get(GateRecord, record.id).status == "pending"

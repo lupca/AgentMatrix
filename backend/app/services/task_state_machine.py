@@ -841,6 +841,14 @@ class TaskStateMachine:
             self.record_verdict_on_round(task, verdict=verdict, now=now)
             self._update_verdict_agent_success_rates(task, verdict)
             return None, verdict
+        if gate_type == "escalation":
+            # Approving an escalation means "someone looked at this"; it clears
+            # the block without moving the task.  The `expected_status` assert
+            # at the top already confirmed the task has not moved since the
+            # escalation was raised, so work simply resumes from where it
+            # stopped.
+            task.error = None
+            return None, None
         raise OrchestrationError(f"Unsupported gate type: {gate_type}")
 
     def _update_verdict_agent_success_rates(self, task: Task, verdict: str) -> None:
@@ -1682,37 +1690,42 @@ class TaskStateMachine:
         # no new run is spawned while a human is being waited on.  The task
         # keeps its status and stays recoverable.
         task.error = reason
-        task.awaiting_approval = True
         task.approval_prompt = reason
         task.updated_at = datetime.now(timezone.utc)
-        payload = {"reason": reason, "task_status": task.status}
+        # Written as a PENDING gate, not a rejected one.
+        #
+        # The escalation has to actually block work, and `awaiting_approval` is
+        # the only thing left doing that now the status stays non-terminal.
+        # But that flag is not free-standing: `sync_awaiting_approval`
+        # recomputes it from unresolved *pending* gate records, so an
+        # escalation written as `rejected` gets its own block erased on the
+        # next sync -- and `approve_gate` refuses it too ("No pending gate
+        # found"), leaving nothing that could ever clear it.  CTV2-1389 hit
+        # exactly that: escalated, non-terminal, and undispatchable.
+        #
+        # As a pending gate it is honest in every direction: it appears in
+        # `pending_approvals`, `approve_gate` resolves it by appending a
+        # decision child (the ledger stays append-only), and the projection
+        # follows from the ledger instead of being asserted on the side.
+        payload = {
+            "reason": reason,
+            "task_status": task.status,
+            "expected_status": task.status,
+        }
         record = self.ledger_record(
             task=task,
             gate_type="escalation",
-            status="rejected",
+            status="pending",
             actor=actor,
             idempotency_key=str(uuid.uuid4()),
             input_hash=TaskValidator.input_hash(payload),
             payload=payload,
             error_message=reason,
         )
+        # The projection now follows from the ledger: the pending escalation
+        # record above makes `sync_awaiting_approval` compute `True` on its
+        # own, so there is nothing to assert on the side.
         self._sync_after_transition(task)
-        # Re-assert the projection *after* the sync.
-        #
-        # `_sync_after_transition` on a non-terminal status calls
-        # `sync_awaiting_approval`, which recomputes the flag from unresolved
-        # *pending* gate records.  An escalation is written as `rejected`, so
-        # that recompute clears the flag we just set -- and without it nothing
-        # stops advance_task from running straight into the same escalation
-        # again, forever.  Previously the flag being cleared did not matter
-        # because `failed` stopped everything; now it is the only brake.
-        #
-        # Kept as an explicit re-assert rather than writing the escalation as a
-        # `pending` gate: that would change what `approve_gate` and the
-        # append-only ledger mean for every escalation, which belongs in
-        # CTV2-1388's reviewed change, not here.
-        task.awaiting_approval = True
-        task.approval_prompt = reason
         self.audit(task, record, reason=reason)
         self.db.commit()
         self.db.refresh(task)
