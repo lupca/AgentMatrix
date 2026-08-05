@@ -23,6 +23,7 @@ from app.services.task_orchestration import (
     OrchestrationError,
     TaskOrchestrationService,
 )
+from app.services.task_state_machine import find_active_plan_run
 from app.services.task_validators import TaskValidator, TransitionConflictError
 
 logger = logging.getLogger(__name__)
@@ -61,6 +62,38 @@ class TaskHandlersMixin:
             'spec_clarity': task.spec_clarity,
             'open_questions': task.open_questions or [],
         }
+
+    def _open_questions_status(self, task: Task) -> dict[str, Any]:
+        """spec_clarity/open_questions plus whether they're stale (CTV2-1396).
+
+        These columns are only overwritten when a plan run finishes. If a
+        plan run is currently queued/running, the values on `task` still
+        reflect the PREVIOUS round -- surfacing them without saying so leads
+        the coordinator to conclude the planner ignored an answer and
+        re-answer the same questions, burning an extra planner round. We
+        keep the old values (don't erase in case the new run fails) but
+        attach {state, why, next} so one read is enough to know not to act.
+        """
+        result: dict[str, Any] = {
+            'spec_clarity': task.spec_clarity,
+            'open_questions': task.open_questions or [],
+        }
+        active_run = find_active_plan_run(self.db, task.id)
+        if active_run is not None and (task.open_questions or task.spec_clarity):
+            started = active_run.started_at or active_run.queued_at
+            result['open_questions_status'] = {
+                'state': 'stale_previous_round',
+                'why': (
+                    f"plan run {active_run.id} đang chạy (khởi động {started}); "
+                    "open_questions/spec_clarity ở trên thuộc vòng trước run này."
+                ),
+                'next': (
+                    "Đừng trả lời lại các câu hỏi trên -- chờ plan run "
+                    f"{active_run.id} chạy xong, kết quả mới sẽ ghi đè."
+                ),
+                'active_run_id': active_run.id,
+            }
+        return result
 
     def _pending_gate(self, task_id: str) -> GateRecord | None:
         decided_parent_ids = (
@@ -955,16 +988,7 @@ class TaskHandlersMixin:
                 "put it in 'coordinator_notes' instead."
             )
         if has_coordinator_notes:
-            active_run = (
-                self.db.query(AgentRun)
-                .filter(
-                    AgentRun.task_id == task_id,
-                    AgentRun.status.in_(['queued', 'running']),
-                    AgentRun.idempotency_key.like('planner:%'),
-                )
-                .order_by(AgentRun.queued_at.desc())
-                .first()
-            )
+            active_run = find_active_plan_run(self.db, task_id)
             if active_run is not None:
                 started = active_run.started_at or active_run.queued_at
                 warnings.append(
@@ -1014,6 +1038,7 @@ class TaskHandlersMixin:
                         'error': task.error,
                         'next_step': TaskValidator(self.db).describe_next_step(task),
                         'available_actions': TaskValidator(self.db).available_actions(task),
+                        **self._open_questions_status(task),
                     }
                 }
             return {'error': f"Task '{target_id}' not found"}
@@ -1055,6 +1080,7 @@ class TaskHandlersMixin:
                         'error': task.error,
                         'next_step': TaskValidator(self.db).describe_next_step(task),
                         'available_actions': TaskValidator(self.db).available_actions(task),
+                        **self._open_questions_status(task),
                     }
                 }
         

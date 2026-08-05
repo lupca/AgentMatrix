@@ -82,6 +82,28 @@ def _task_cost_and_tokens(db: Session, task_id: str) -> tuple[float, int]:
     return float(cost or 0), int(tokens or 0)
 
 
+def find_active_plan_run(db: Session, task_id: str) -> AgentRun | None:
+    """The queued/running planner AgentRun for a task, if any (CTV2-1396).
+
+    task.open_questions / task.spec_clarity are overwritten only when a
+    plan run finishes (write_spec_plan). While a new run is in flight the
+    columns still hold the *previous* round's values -- callers that surface
+    open_questions to the coordinator must be able to say so, instead of
+    letting the coordinator conclude the planner ignored an update and
+    answer the same questions again.
+    """
+    return (
+        db.query(AgentRun)
+        .filter(
+            AgentRun.task_id == task_id,
+            AgentRun.status.in_(["queued", "running"]),
+            AgentRun.idempotency_key.like("planner:%"),
+        )
+        .order_by(AgentRun.queued_at.desc())
+        .first()
+    )
+
+
 def gate_unknowns(db: Session, task: Task | None) -> list[str]:
     """What the system knows it cannot answer for this task.
 
@@ -1339,6 +1361,15 @@ class TaskStateMachine:
         task = self.validator.task(task_id)
         if kind == "execute" and (task.open_questions or []):
             question_count = len(task.open_questions)
+            active_run = find_active_plan_run(self.db, task.id)
+            if active_run is not None:
+                started = active_run.started_at or active_run.queued_at
+                raise PrerequisiteError(
+                    f"Spec has {question_count} open questions, but these are from a "
+                    f"PREVIOUS round -- plan run {active_run.id} is already running "
+                    f"(started {started}) and will overwrite them. Do not answer again; "
+                    "wait for that run to finish, then re-check open_questions."
+                )
             raise PrerequisiteError(
                 f"Spec has {question_count} unanswered open questions; answer them and "
                 "re-run generate_spec_plan before dispatch."
