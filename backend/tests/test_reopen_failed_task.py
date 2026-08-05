@@ -455,3 +455,42 @@ def test_reopen_still_refuses_a_healthy_task(service, db_session):
 
     with pytest.raises(PrerequisiteError, match="requires status 'failed'"):
         service.reopen_failed_task(task_id=task.id, actor="chat:test")
+
+
+def test_gate_blocked_rounds_are_not_evidence_of_a_stall(db_session):
+    """Approving an escalation must not immediately re-trip the stall guard.
+
+    Rounds where the driver was blocked by a pending gate did not try, so they
+    cannot show the task is stuck.  Counting them made a loop: escalate -> a
+    human approves -> the driver runs, sees the very rounds its own escalation
+    caused, and escalates again.  CTV2-1389 went round it twice on 2026-08-05
+    while holding a finished, critic-accepted plan.
+    """
+
+    from app.db.models import AuditLog
+    from app.workers.agent_runner import _advance_task_stalled
+
+    def _round(outcome: str) -> None:
+        db_session.add(
+            AuditLog(
+                task_id="STALL-001",
+                action="advance_task:manual",
+                actor="system:orchestration-driver",
+                details={
+                    "status_before": "todo",
+                    "status_after": "todo",
+                    "outcome": outcome,
+                },
+            )
+        )
+
+    for outcome in ("gate_pending", "escalated_stall", "gate_pending"):
+        _round(outcome)
+    db_session.commit()
+    assert _advance_task_stalled(db_session, "STALL-001", "todo") is False
+
+    # Rounds that genuinely tried and got nowhere still trip it.
+    for _ in range(3):
+        _round("brake:autonomy_disabled")
+    db_session.commit()
+    assert _advance_task_stalled(db_session, "STALL-001", "todo") is True

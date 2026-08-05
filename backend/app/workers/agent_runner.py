@@ -253,21 +253,34 @@ def advance_task(task_id: str, trigger: str) -> str:
         db.close()
 
 
+# Rounds that were never allowed to try.  A round blocked by a pending gate,
+# or one that did nothing but raise the escalation itself, says nothing about
+# whether the task can progress -- counting them turns the guard into a loop:
+# escalate -> a human approves -> the driver runs again, sees the blocked
+# rounds it just caused, and escalates on the spot.  CTV2-1389 went round that
+# loop twice on 2026-08-05 with a finished, critic-accepted plan in hand.
+_NOT_EVIDENCE_OF_STALL = {"gate_pending", "escalated_stall"}
+
+
 def _advance_task_stalled(db: Session, task_id: str, current_status: str) -> bool:
     if current_status not in _ACTIONABLE_STATUSES:
         return False
-    recent = (
-        db.query(AuditLog)
-        .filter(AuditLog.task_id == task_id, AuditLog.action.like("advance_task:%"))
-        .order_by(AuditLog.id.desc())
-        .limit(AUTO_MAX_ROUNDS)
-        .all()
-    )
+    recent = [
+        entry
+        for entry in (
+            db.query(AuditLog)
+            .filter(AuditLog.task_id == task_id, AuditLog.action.like("advance_task:%"))
+            .order_by(AuditLog.id.desc())
+            .limit(AUTO_MAX_ROUNDS * 4)
+            .all()
+        )
+        if isinstance(entry.details, dict)
+        and entry.details.get("outcome") not in _NOT_EVIDENCE_OF_STALL
+    ][:AUTO_MAX_ROUNDS]
     if len(recent) < AUTO_MAX_ROUNDS:
         return False
     return all(
-        isinstance(entry.details, dict)
-        and entry.details.get("status_before") == current_status
+        entry.details.get("status_before") == current_status
         and entry.details.get("status_after") == current_status
         for entry in recent
     )
