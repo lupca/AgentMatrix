@@ -431,12 +431,32 @@ def _dispatch_execute(db: Session, service: TaskOrchestrationService, task: Task
         return "escalated_no_agent"
 
     round_ = service.changes_round_count(task.id)
+    # Each attempt AND each executor gets its own key (CTV2-1407).
+    #
+    # This is the same defect CTV2-1389 fixed on the review leg, left standing
+    # on this one.  `(task_id, idempotency_key)` is UNIQUE and the conflict
+    # check compares only the stored `input_hash` -- it does not look at the
+    # gate's status or at its decision child.  So a key keyed solely on
+    # task+round was spent forever the moment the first request was stored:
+    # rejecting that gate freed nothing, and dispatching a *different*
+    # executor raised `IdempotencyConflictError` because the same key now
+    # carried a different hash.
+    #
+    # `round_` could not rescue it either -- it counts changes-requested
+    # rounds, which a task that cannot dispatch will never reach.  Measured
+    # 2026-08-06 on UIKI-012: a coordinator rejected the auto-selected
+    # executor, and every later dispatch failed, escalated, was cleared by a
+    # human, and escalated again -- the identical closed loop, on the leg that
+    # had not been fixed.
+    attempt = service.dispatch_gate_count(task.id)
     try:
         result = service.request_dispatch(
             task_id=task.id,
             agent_id=agent_id,
             actor="system:orchestration-driver",
-            idempotency_key=f"advance:{task.id}:dispatch:r{round_}",
+            idempotency_key=(
+                f"advance:{task.id}:dispatch:r{round_}:a{attempt}:agent:{agent_id}"
+            ),
         )
     except OrchestrationError as exc:
         _escalate(db, task, f"dispatch failed: {exc}")

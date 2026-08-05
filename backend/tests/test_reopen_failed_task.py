@@ -622,3 +622,45 @@ def test_review_retry_after_a_resolved_attempt_gets_a_fresh_key(service, db_sess
 
     # The counter moved, so the next attempt cannot collide with the first.
     assert service.review_gate_count(task.id, round_=0) == 1
+
+
+def test_dispatch_retry_with_a_different_executor_gets_a_fresh_key(service, db_session):
+    """Rejecting a dispatch gate must not brick the task's dispatch path.
+
+    CTV2-1389 gave the review leg an attempt counter and a reviewer in its
+    key; the dispatch leg kept one key per (task, round) and so kept the bug.
+    The conflict check compares only the stored `input_hash` -- it never looks
+    at the gate's status or its decision child -- so the key was spent the
+    moment the first request landed. Rejecting that gate freed nothing, and
+    naming a different executor raised IdempotencyConflictError instead.
+
+    `round_` was no escape: it counts changes-requested rounds, which a task
+    that cannot dispatch will never reach. Measured 2026-08-06 on UIKI-012 --
+    a coordinator rejected the auto-selected executor and the task looped
+    dispatch-fail -> escalate -> human clears -> escalate, with no way out.
+    """
+
+    task = _add_task(db_session, "IDEM-DISPATCH", status="todo", mode="supervised")
+
+    assert service.dispatch_gate_count(task.id) == 0
+
+    service.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="system:orchestration-driver",
+        idempotency_key="advance:IDEM-DISPATCH:dispatch:r0:a0:agent:@executor",
+    )
+
+    # The counter moved, so a retry cannot collide with the spent key...
+    assert service.dispatch_gate_count(task.id) == 1
+
+    # ...and a different executor is a different request, which is the case
+    # that used to be refused outright.
+    second = service.request_dispatch(
+        task_id=task.id,
+        agent_id="@reviewer",
+        actor="system:orchestration-driver",
+        idempotency_key="advance:IDEM-DISPATCH:dispatch:r0:a1:agent:@reviewer",
+    )
+    assert second.gate_record is not None
+    assert service.dispatch_gate_count(task.id) == 2

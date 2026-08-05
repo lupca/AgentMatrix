@@ -2633,24 +2633,31 @@ class TaskStateMachine:
             or 0
         )
 
-    def review_gate_count(self, task_id: str, *, round_: int) -> int:
-        """Count review_order requests already made for this task.
+    def request_gate_count(self, task_id: str, *, gate_type: str) -> int:
+        """Count gate *requests* of one type for a task.
 
-        Feeds the attempt number in the driver's idempotency key so a retry
-        after a resolved attempt does not reuse a spent key -- see
-        `_advance_awaiting_review`.  Counts request rows only (``parent_id IS
-        NULL``); decision children are not attempts.
+        Feeds the attempt number in the driver's idempotency keys so a retry
+        after a resolved attempt does not reuse a spent key.  Counts request
+        rows only (``parent_id IS NULL``); decision children are not attempts.
         """
         return int(
             self.db.query(func.count(GateRecord.id))
             .filter(
                 GateRecord.task_id == task_id,
-                GateRecord.gate_type == "review_order",
+                GateRecord.gate_type == gate_type,
                 GateRecord.parent_id.is_(None),
             )
             .scalar()
             or 0
         )
+
+    def review_gate_count(self, task_id: str, *, round_: int) -> int:
+        """Attempt counter for the review leg -- see `_advance_awaiting_review`."""
+        return self.request_gate_count(task_id, gate_type="review_order")
+
+    def dispatch_gate_count(self, task_id: str) -> int:
+        """Attempt counter for the dispatch leg -- see `_dispatch_execute`."""
+        return self.request_gate_count(task_id, gate_type="dispatch")
 
     def add_dependency(
         self,

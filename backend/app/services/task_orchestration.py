@@ -453,6 +453,14 @@ class TaskOrchestrationService:
         """
         return self.state_machine.review_gate_count(task_id, round_=round_)
 
+    def dispatch_gate_count(self, task_id: str) -> int:
+        """How many dispatch requests this task already made.
+
+        Same purpose as `review_gate_count` on the other leg: give each retry
+        its own idempotency key -- see the comment at its call site.
+        """
+        return self.state_machine.dispatch_gate_count(task_id)
+
     def add_dependency(
         self,
         *,
