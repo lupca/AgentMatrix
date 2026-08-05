@@ -33,6 +33,11 @@ from app.db.base import SessionLocal
 from app.db.models import AdminGateRecord, GateRecord, Session as SessionModel, Task
 from app.graph.context import invalidate_context_snapshot
 from app.services.command_router import CommandRouter
+from app.services.task_state_machine import (
+    TaskStateMachine,
+    build_gate_brief,
+    verdict_ac_checks,
+)
 from app.services.tool_argument_validator import (
     describe_problems,
     validate_tool_arguments,
@@ -288,6 +293,99 @@ _GATE_CHECKS = {
 }
 
 
+# Tools whose result is itself a gate decision worth explaining in full --
+# unlike `pending_approvals` (attached to every result), these are the one
+# call that just created or decided the gate in question.
+_GATE_RESULT_TOOLS = {"dispatch_task", "request_review", "record_verdict", "approve_gate"}
+
+
+def _resolve_pending_gate_record(db, kwargs: Mapping[str, Any]) -> GateRecord | None:
+    """Same lookup approve_gate itself uses: gate_record_id, else task_id's pending row."""
+    raw_id = kwargs.get("gate_record_id") or kwargs.get("task_id")
+    if not raw_id or str(raw_id).startswith("admin:"):
+        return None
+    try:
+        return db.get(GateRecord, int(raw_id))
+    except (TypeError, ValueError):
+        return (
+            db.query(GateRecord)
+            .filter(GateRecord.task_id == str(raw_id), GateRecord.status == "pending")
+            .order_by(GateRecord.id.desc())
+            .first()
+        )
+
+
+def _verdict_evidence_block(db, kwargs: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Refuse to approve a verdict gate with no evidence -- with a brief, not silence.
+
+    Returns None when the call may proceed (not a verdict approval, evidence
+    was supplied, or nothing pending to check against).
+    """
+    decision = str(kwargs.get("decision") or "approved").strip().lower()
+    if decision not in {"approved", "approve", "yes", "y"}:
+        return None
+    if kwargs.get("evidence"):
+        return None
+    record = _resolve_pending_gate_record(db, kwargs)
+    if record is None or record.gate_type != "verdict" or record.status != "pending":
+        return None
+    brief = build_gate_brief(db, record)
+    checks = verdict_ac_checks(record) or [_GATE_CHECKS["verdict"]]
+    return {
+        "ok": False,
+        "data": None,
+        "error": {
+            "code": "evidence_required",
+            "message": (
+                "Approving a verdict gate requires evidence: the checks you "
+                "actually ran, not a re-statement of the reviewer's claim."
+            ),
+            "hint": (
+                "Call approve_gate again with evidence=[{check, result}, ...] "
+                "covering the checks below."
+            ),
+        },
+        "brief": brief["summary"],
+        "unknowns": brief["unknowns"],
+        "checks": checks,
+    }
+
+
+def _attach_gate_brief(db, tool_name: str, result: Mapping[str, Any], response: dict[str, Any]) -> None:
+    """Give the ONE call that just made this gate decision the full brief.
+
+    Not attached to every result (that's `pending_approvals`, summary-only) --
+    only to the tool call that dispatched/ordered-review/recorded a verdict/
+    approved a gate, where the full brief is exactly what was asked for.
+    """
+    if result.get("error") or tool_name not in _GATE_RESULT_TOOLS:
+        return
+    gate_record_id = result.get("gate_record_id")
+    if not gate_record_id:
+        return
+    record = db.get(GateRecord, gate_record_id)
+    if record is None:
+        return
+    brief = build_gate_brief(db, record)
+    data = response.get("data")
+    if isinstance(data, dict):
+        data["gate_brief"] = brief["summary"]
+        data["unknowns"] = brief["unknowns"]
+
+
+def _persist_verdict_evidence(db, tool_name: str, kwargs: Mapping[str, Any], result: Mapping[str, Any]) -> None:
+    if tool_name != "approve_gate" or result.get("error"):
+        return
+    evidence = kwargs.get("evidence")
+    gate_record_id = result.get("gate_record_id")
+    if not evidence or not gate_record_id:
+        return
+    record = db.get(GateRecord, gate_record_id)
+    if record is None or record.gate_type != "verdict":
+        return
+    TaskStateMachine(db).record_gate_evidence(gate_record_id, evidence)
+
+
 def _gate_decider(db, row) -> tuple[str, str | None]:
     """Who decides this gate -- coordinator, human, or not determinable.
 
@@ -412,6 +510,17 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
             if row.gate_type == "review_order":
                 payload = row.input_payload or {}
                 entry["prompt"] = payload.get("approval_prompt")
+            # Summary only, not the full brief -- every tool result carries
+            # this list, so a full brief here is exactly the noise CTV2-1393
+            # is fixing. unknowns is the one part worth repeating in full: it
+            # is the thing most likely to change the decision.
+            try:
+                brief = build_gate_brief(db, row)
+                entry["summary"] = brief["summary"][:200]
+                if brief["unknowns"]:
+                    entry["unknowns"] = brief["unknowns"]
+            except Exception:
+                pass
             pending.append(entry)
         decided_admin = db.query(AdminGateRecord.parent_id).filter(
             AdminGateRecord.parent_id.isnot(None)
@@ -517,7 +626,12 @@ def make_tool_handler(
         db = SessionLocal()
         try:
             session_id = _ensure_session(db, claims)
+            if spec.name == "approve_gate":
+                blocked = _verdict_evidence_block(db, scoped_kwargs)
+                if blocked is not None:
+                    return blocked
             result = await CommandRouter(db).execute_tool(spec.name, scoped_kwargs, session_id)
+            _persist_verdict_evidence(db, spec.name, scoped_kwargs, result)
             if (
                 runtime_version is not None
                 and spec.name in {
@@ -535,6 +649,7 @@ def make_tool_handler(
             # context cache the old /api/mcp/tools/call path invalidated.
             invalidate_context_snapshot(db, project_id=None)
             response = envelope(result, next_step=_next_step(result))
+            _attach_gate_brief(db, spec.name, result, response)
             pending = _pending_approvals(db)
             if pending:
                 response["pending_approvals"] = pending

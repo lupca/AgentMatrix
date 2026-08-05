@@ -162,10 +162,16 @@ def test_pending_review_order_includes_the_persisted_approval_prompt(db_session)
         # see test_coordinator_authority.py (CTV2-1391).
         "decided_by": pending[0]["decided_by"],
         "prompt": result.gate_record.input_payload["approval_prompt"],
+        # CTV2-1393: a short derived summary, and unknowns since this task
+        # has no spec_task_link -- see test_gate_briefs.py for the full brief.
+        "summary": pending[0]["summary"],
+        "unknowns": pending[0]["unknowns"],
     }]
     assert pending[0]["decided_by"] in {"coordinator", "human"}
     assert "Reviewer đề xuất: @pending-reviewer" in pending[0]["prompt"]
     assert "best capability match" in pending[0]["prompt"]
+    assert "@pending-reviewer" in pending[0]["summary"]
+    assert pending[0]["unknowns"]
 
 
 @pytest.mark.asyncio

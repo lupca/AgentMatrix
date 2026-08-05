@@ -21,7 +21,9 @@ from app.db.models import (
     DispatchDecision,
     GateRecord,
     ImplDesign,
+    LLMUsage,
     Project,
+    SpecTaskLink,
     Task,
     TaskDependency,
     TaskRound,
@@ -51,6 +53,208 @@ from app.services.task_validators import (
 logger = logging.getLogger(__name__)
 
 GateDecision = Literal["approved", "rejected"]
+
+
+# --- Gate briefs (CTV2-1393) -------------------------------------------------
+#
+# A gate used to hand the decider an idempotency key ("Approve dispatch gate
+# for task CTV2-1389 (request chat:mcp-...:dispatch:7d913a...)?") -- nothing
+# to actually decide with. `brief` is derived read-only from what is already
+# in the ledger/task/run rows; it is never hand-written and never stored as
+# the thing that made the decision (the append-only GateRecord row still is).
+
+
+def _task_cost_and_tokens(db: Session, task_id: str) -> tuple[float, int]:
+    cost = (
+        db.query(func.coalesce(func.sum(LLMUsage.cost_usd), 0))
+        .filter(LLMUsage.task_id == task_id)
+        .scalar()
+    )
+    tokens = (
+        db.query(
+            func.coalesce(
+                func.sum(LLMUsage.input_tokens + LLMUsage.output_tokens), 0
+            )
+        )
+        .filter(LLMUsage.task_id == task_id)
+        .scalar()
+    )
+    return float(cost or 0), int(tokens or 0)
+
+
+def gate_unknowns(db: Session, task: Task | None) -> list[str]:
+    """What the system knows it cannot answer for this task.
+
+    Required whenever the task carries no spec_task_link at all: without a
+    spec_item/impl_design anchor there is no basis to say whether the result
+    matches intent. Does not block task creation -- it is disclosure, not a
+    gate.
+    """
+    if task is None:
+        return []
+    has_link = (
+        db.query(SpecTaskLink.id).filter(SpecTaskLink.task_id == task.id).first()
+        is not None
+    )
+    if has_link:
+        return []
+    return [
+        "task này không gắn spec_item/impl_design — không có căn cứ để nói kết "
+        "quả có đúng ý định hay không"
+    ]
+
+
+def _verdict_diffstat(db: Session, task: Task | None) -> str | None:
+    if task is None or not task.result_ref or ".." not in task.result_ref:
+        return None
+    project = db.get(Project, task.project) if task.project else None
+    repo_root = getattr(project, "repo_root", None)
+    if not repo_root:
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "diff", "--stat", task.result_ref],
+            cwd=os.path.abspath(repo_root),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()[:2000] or None
+
+
+def verdict_ac_checks(record: GateRecord) -> list[str]:
+    """The per-AC checks worth running before approving a verdict gate.
+
+    Reuses the reviewer's own `ac_results` (what it claims to have checked)
+    rather than inventing a generic list -- these are the checks THIS
+    decision actually needs.
+    """
+    payload = record.input_payload or {}
+    checks: list[str] = []
+    for ac in payload.get("ac_results") or []:
+        if isinstance(ac, dict):
+            checks.append(
+                f"AC {ac.get('id', '?')} ({ac.get('status', '?')}): re-run "
+                "whatever the reviewer says proves it"
+            )
+    return checks
+
+
+def build_gate_brief(db: Session, record: GateRecord) -> dict[str, Any]:
+    """Derive a human-readable brief for one gate record from live state.
+
+    Every field comes from data already on the record/task/run -- nothing
+    here is free text a caller supplied. Per gate_type:
+      dispatch: chosen executor + why (score, who was passed over), plan
+        summary, AC count, cost/tokens spent so far, risk.
+      review_order: chosen reviewer + why, four-eyes check.
+      verdict: verdict, each AC with its evidence, findings by severity,
+        git diff --stat.
+      escalation: what blocked it and what would clear it.
+      safety_brake: the numbers against the limit, whether a result exists.
+    """
+    task = db.get(Task, record.task_id)
+    payload = record.input_payload or {}
+    gate_type = record.gate_type
+    unknowns = gate_unknowns(db, task)
+
+    if gate_type == "dispatch":
+        cost, tokens = _task_cost_and_tokens(db, record.task_id)
+        agent_id = payload.get("agent_id")
+        kind = payload.get("kind", "execute")
+        decision_id = payload.get("dispatch_decision_id")
+        chosen_score = None
+        passed_over: list[str] = []
+        if decision_id:
+            decision = db.get(DispatchDecision, decision_id)
+            if decision is not None:
+                for candidate in decision.candidates:
+                    if candidate.agent_id == agent_id:
+                        chosen_score = candidate.final_score
+                        continue
+                    if candidate.eligible:
+                        passed_over.append(
+                            f"{candidate.agent_id} (score={candidate.final_score})"
+                        )
+                    else:
+                        passed_over.append(
+                            f"{candidate.agent_id} (loại: "
+                            f"{candidate.rejection_reason or 'không đủ điều kiện'})"
+                        )
+        ac_count = len(task.acceptance_criteria or []) if task else 0
+        plan_summary = ((task.plan or "").strip()[:280]) if task else ""
+        summary = (
+            f"Executor: {agent_id} ({kind})"
+            + (f", score={chosen_score}" if chosen_score is not None else "")
+            + (
+                f"; ứng viên bị loại: {', '.join(passed_over)}"
+                if passed_over
+                else "; không có ứng viên khác"
+            )
+            + f". Plan: {plan_summary or '(chưa có plan)'}"
+            + f". Số AC: {ac_count}."
+            + f" Đã tiêu: ${cost:.4f} / {tokens} tokens."
+            + (f" Risk: {task.risk}." if task and task.risk else "")
+        )
+    elif gate_type == "review_order":
+        reviewer = payload.get("reviewer")
+        reason = payload.get("selection_reason") or "không nêu"
+        executor = task.executor if task else None
+        four_eyes_ok = bool(executor and reviewer and executor != reviewer)
+        summary = (
+            f"Reviewer: {reviewer} — lý do: {reason}. "
+            f"Four-eyes (executor={executor} != reviewer={reviewer}): "
+            + ("OK" if four_eyes_ok else "VI PHẠM")
+            + "."
+        )
+    elif gate_type == "verdict":
+        ac_results = payload.get("ac_results") or []
+        findings = payload.get("findings") or []
+        ac_lines = [
+            f"{ac.get('id', '?')}: {ac.get('status', '?')} — "
+            f"{ac.get('evidence') or 'không có bằng chứng'}"
+            for ac in ac_results
+            if isinstance(ac, dict)
+        ]
+        by_severity: dict[str, int] = {}
+        for finding in findings:
+            if isinstance(finding, dict):
+                sev = str(finding.get("severity", "unknown"))
+                by_severity[sev] = by_severity.get(sev, 0) + 1
+        diffstat = _verdict_diffstat(db, task)
+        summary = (
+            f"Reviewer {payload.get('reviewer')} chấm: {payload.get('verdict')}. "
+            f"AC ({len(ac_results)}): " + ("; ".join(ac_lines) or "(không có)") + ". "
+            "Findings: "
+            + (", ".join(f"{k}={v}" for k, v in by_severity.items()) or "none")
+            + "."
+            + (f"\ngit diff --stat:\n{diffstat}" if diffstat else "")
+        )
+    elif gate_type == "escalation":
+        blocker = (task.approval_prompt if task else None) or payload.get(
+            "reason"
+        ) or record.error_message or "(không rõ)"
+        summary = (
+            f"Vướng: {blocker}. Gỡ được bằng cách xử lý nguyên nhân trên rồi gọi "
+            "lại tool đã bị chặn (get_status cho biết tool nào)."
+        )
+    elif gate_type == "safety_brake":
+        code = payload.get("code")
+        reason = payload.get("reason")
+        delivered = payload.get("result_delivered")
+        summary = (
+            f"Brake {code}: {reason}. Đã có result_ref: "
+            + ("có" if delivered else "chưa")
+            + "."
+        )
+    else:
+        summary = record.error_message or f"Gate {gate_type} (task {record.task_id})"
+
+    return {"summary": summary, "unknowns": unknowns}
 
 
 def _plan_critic_token_budget() -> int:
@@ -273,6 +477,41 @@ class TaskStateMachine:
             error_message=error_message,
         )
         self.db.add(record)
+        return record
+
+    def record_gate_evidence(
+        self, gate_record_id: int, evidence: list[dict[str, Any]]
+    ) -> GateRecord:
+        """Attach the checks a decider actually ran to the decision.
+
+        GateRecord enforces append-only at the DB level (a `before_update`
+        listener rejects any UPDATE, not just a status/parent change) -- so
+        this cannot rewrite the decision row's `output_payload` in place. It
+        appends a new child row instead, pointing at the decision via
+        `parent_id`, carrying the same idempotency/mode/executor/reviewer
+        lineage. Read it back via that `parent_id` link, not by re-reading
+        the decision row.
+        """
+        decision = self.db.get(GateRecord, gate_record_id)
+        if decision is None:
+            raise TaskNotFoundError(f"Gate record {gate_record_id} not found")
+        record = GateRecord(
+            task_id=decision.task_id,
+            gate_type="verdict_evidence",
+            status="approved",
+            actor=decision.actor,
+            mode=decision.mode,
+            idempotency_key=f"{decision.idempotency_key}:evidence",
+            input_hash=TaskValidator.input_hash({"evidence": evidence}),
+            parent_id=decision.id,
+            executor=decision.executor,
+            reviewer=decision.reviewer,
+            input_payload={"evidence": evidence},
+            output_payload={"evidence": evidence},
+        )
+        self.db.add(record)
+        self.db.commit()
+        self.db.refresh(record)
         return record
 
     def sync_awaiting_approval(self, task: Task) -> bool:

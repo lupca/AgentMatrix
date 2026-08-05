@@ -444,6 +444,23 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                         "enum": ["approved", "rejected"],
                         "description": "Human decision for the gate; defaults to approved.",
                     },
+                    "evidence": {
+                        "type": "array",
+                        "description": (
+                            "Required to approve a verdict gate: the checks you "
+                            "actually ran. Each item is {check, result} -- check "
+                            "is the command you ran, result is its real output. "
+                            "Stored on the ledger row of this decision."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "check": {"type": "string"},
+                                "result": {"type": "string"},
+                            },
+                            "required": ["check", "result"],
+                        },
+                    },
                 },
                 "required": [],
             },
