@@ -288,8 +288,8 @@ _GATE_CHECKS = {
 }
 
 
-def _gate_decider(db, row) -> str:
-    """Who is expected to decide this gate: the coordinator, or the human.
+def _gate_decider(db, row) -> tuple[str, str | None]:
+    """Who decides this gate -- coordinator, human, or not determinable.
 
     Derived from the task's effective mode rather than asserted.  This used to
     be a hardcoded sentence -- "these gates are WAITING for the human, repeat
@@ -298,40 +298,76 @@ def _gate_decider(db, row) -> str:
     times per session, so it outweighed any instruction saying otherwise
     (CTV2-1391): the most repeated string in the system was also the one that
     contradicted the coordinator's actual authority.
+
+    Three outcomes, not two.  The first cut fell back to "coordinator" when the
+    lookup raised, which leans the wrong way: unable to tell whether a human is
+    required, it would have said "this one is yours" and invited a
+    self-approval on a task that wanted a human.  Failing silently toward the
+    permissive answer is the worse half of the two.  Now an unresolved mode
+    says so, and carries the reason -- catching an exception and returning an
+    ordinary label is how a real fault gets swallowed.
+
+    Returns (decider, reason_when_unknown).
     """
     try:
         from app.services.task_validators import TaskValidator
 
         task = db.get(Task, row.task_id)
         if task is None:
-            return "coordinator"
-        return "human" if TaskValidator(db).mode_for_task(task) == "supervised" else "coordinator"
-    except Exception:  # boundary: a projection must never break a tool result
-        return "coordinator"
+            return "unknown", f"task {row.task_id} not found"
+        mode = TaskValidator(db).mode_for_task(task)
+        return ("human" if mode == "supervised" else "coordinator"), None
+    except Exception as exc:  # boundary: a projection must never break a tool result
+        return "unknown", f"{type(exc).__name__}: {exc}"
 
 
 def _pending_approvals_note(pending: list[dict[str, Any]]) -> str:
     """Say who decides, and -- when that is the coordinator -- what to check."""
+    deciders = {entry.get("decided_by") for entry in pending}
     kinds = {
         str(entry.get("kind", "")).split(":", 1)[-1]
         for entry in pending
-        if entry.get("decided_by") != "human"
+        if entry.get("decided_by") == "coordinator"
     }
     checks = [_GATE_CHECKS[kind] for kind in sorted(kinds) if kind in _GATE_CHECKS]
-    if not any(entry.get("decided_by") == "human" for entry in pending):
+
+    parts: list[str] = []
+    if "unknown" in deciders:
+        # Say what could not be determined and why, rather than picking a side
+        # quietly.  An unresolved mode is a fault worth surfacing, not a
+        # default worth guessing.
+        reasons = sorted(
+            {
+                str(entry.get("decider_unknown_reason"))
+                for entry in pending
+                if entry.get("decided_by") == "unknown"
+                and entry.get("decider_unknown_reason")
+            }
+        )
+        detail = f" ({'; '.join(reasons)})" if reasons else ""
+        parts.append(
+            "Could not determine who decides some of these gates" + detail + " -- "
+            "treat them as needing the human, and look into why the lookup failed."
+        )
+    if "human" in deciders:
+        parts.append(
+            "Some need the human's decision (the task's mode says so) -- restate "
+            "those at the END of every reply until they are decided."
+        )
+    if "coordinator" in deciders:
         note = (
-            "These gates are yours to decide. Verify the claims yourself, then "
-            "call approve_gate. If a gate does not give you enough to decide, "
-            "ask the human and do not approve it."
+            "The rest are yours to decide: verify the claims yourself, then call "
+            "approve_gate. If a gate does not give you enough to decide, ask the "
+            "human and do not approve it."
+            if len(parts)
+            else "These gates are yours to decide. Verify the claims yourself, "
+            "then call approve_gate. If a gate does not give you enough to "
+            "decide, ask the human and do not approve it."
         )
         if checks:
             note += " Worth checking here: " + "; ".join(checks) + "."
-        return note
-    return (
-        "Some of these gates need the human's decision (the task's mode says "
-        "so) -- restate those at the END of every reply until they are decided. "
-        "The rest are yours: verify, then call approve_gate."
-    )
+        parts.append(note)
+    return " ".join(parts)
 
 
 def _pending_approvals(db) -> list[dict[str, Any]]:
@@ -364,12 +400,15 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
             .order_by(GateRecord.created_at.asc())
             .limit(5)
         ):
+            decided_by, unknown_reason = _gate_decider(db, row)
             entry = {
                 "id": row.task_id,
                 "kind": f"task:{row.gate_type}",
                 "waiting_since": row.created_at.isoformat() if row.created_at else None,
-                "decided_by": _gate_decider(db, row),
+                "decided_by": decided_by,
             }
+            if unknown_reason:
+                entry["decider_unknown_reason"] = unknown_reason
             if row.gate_type == "review_order":
                 payload = row.input_payload or {}
                 entry["prompt"] = payload.get("approval_prompt")

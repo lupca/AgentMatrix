@@ -67,8 +67,9 @@ def _task(db, task_id, mode):
 def test_note_is_derived_from_mode_not_hardcoded(db_session):
     _task(db_session, "AUTH-1", "bypass")
 
-    decider = _gate_decider(db_session, _Row("AUTH-1", "verdict"))
+    decider, reason = _gate_decider(db_session, _Row("AUTH-1", "verdict"))
     assert decider == "coordinator"
+    assert reason is None
 
     note = _pending_approvals_note(
         [{"id": "AUTH-1", "kind": "task:verdict", "decided_by": decider}]
@@ -81,10 +82,39 @@ def test_note_is_derived_from_mode_not_hardcoded(db_session):
 def test_a_supervised_task_still_asks_the_human(db_session):
     _task(db_session, "AUTH-2", "supervised")
 
-    decider = _gate_decider(db_session, _Row("AUTH-2", "dispatch"))
+    decider, reason = _gate_decider(db_session, _Row("AUTH-2", "dispatch"))
     assert decider == "human"
+    assert reason is None
 
     note = _pending_approvals_note(
         [{"id": "AUTH-2", "kind": "task:dispatch", "decided_by": decider}]
     )
     assert "human" in note
+
+
+def test_an_unresolvable_mode_leans_toward_the_human_and_says_why(db_session):
+    """Unable to tell who decides is not a licence to decide.
+
+    The first cut fell back to "coordinator" whenever the lookup raised, which
+    leans the wrong way: it would have said "this one is yours" on a task that
+    actually wanted a human, and swallowed the underlying fault while doing it.
+    """
+
+    decider, reason = _gate_decider(db_session, _Row("NO-SUCH-TASK", "verdict"))
+    assert decider == "unknown"
+    assert reason and "not found" in reason
+
+    note = _pending_approvals_note(
+        [
+            {
+                "id": "NO-SUCH-TASK",
+                "kind": "task:verdict",
+                "decided_by": decider,
+                "decider_unknown_reason": reason,
+            }
+        ]
+    )
+    assert "needing the human" in note
+    assert "yours to decide" not in note
+    # The reason travels with it -- a swallowed fault is the thing to avoid.
+    assert "not found" in note
