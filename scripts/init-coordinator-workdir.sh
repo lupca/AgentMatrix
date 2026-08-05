@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Create a standalone coordinator workspace OUTSIDE the Control Tower repo.
+# Create a coordinator workspace INSIDE the repository it coordinates.
 #
-# Usage: init-coordinator-workdir.sh [dir] [ttl_seconds] [--with name=url]...
-#   dir           workspace to create (default: ~/ct-coordinator)
+# Usage: PROJECT_ID=<id> init-coordinator-workdir.sh [dir] [ttl] [--with n=url]...
+#   PROJECT_ID    look the workspace up from `project.repo_root` (preferred:
+#                 the coordinator may edit the repo it coordinates, so it
+#                 belongs there)
+#   dir           explicit workspace path, overrides PROJECT_ID
 #   ttl_seconds   coordinator token lifetime (default: 28800 = one working day)
 #   --with n=url  add an extra HTTP MCP server to the workspace config
 #                 (repeatable), e.g. --with code-review-graph=http://localhost:9200/mcp
@@ -45,6 +48,32 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+# The workspace belongs INSIDE the repository it coordinates.
+#
+# It used to default to $HOME/ct-coordinator, deliberately outside the repo --
+# which contradicted the coordinator's actual authority: it may edit the project
+# it coordinates, so standing outside that project made the default arrangement
+# fight the rule (CTV2-1391).
+#
+# Pass a project id and the repo is looked up from the database, so the
+# boundary comes from `project.repo_root` rather than from whoever ran this.
+if [[ -z "$WORKDIR" && -n "${PROJECT_ID:-}" ]]; then
+  WORKDIR=$(
+    "$PROJECT_DIR/backend/venv/bin/python" - "$PROJECT_ID" <<'PY'
+import sys
+from app.db.base import SessionLocal
+from app.db.models import Project
+
+with SessionLocal() as db:
+    project = db.get(Project, sys.argv[1])
+    print((getattr(project, "repo_root", "") or "").strip())
+PY
+  ) || WORKDIR=""
+  if [[ -z "$WORKDIR" ]]; then
+    echo "Project '${PROJECT_ID}' has no repo_root in the database." >&2
+    exit 1
+  fi
+fi
 WORKDIR="${WORKDIR:-$HOME/ct-coordinator}"
 
 if [[ -z "${MCP_TOKEN_SECRET:-}" && -f "$PROJECT_DIR/.env" ]]; then

@@ -158,8 +158,12 @@ def test_pending_review_order_includes_the_persisted_approval_prompt(db_session)
         "id": "PENDING-REVIEW",
         "kind": "task:review_order",
         "waiting_since": pending[0]["waiting_since"],
+        # Who decides is derived from the task's mode rather than assumed --
+        # see test_coordinator_authority.py (CTV2-1391).
+        "decided_by": pending[0]["decided_by"],
         "prompt": result.gate_record.input_payload["approval_prompt"],
     }]
+    assert pending[0]["decided_by"] in {"coordinator", "human"}
     assert "Reviewer đề xuất: @pending-reviewer" in pending[0]["prompt"]
     assert "best capability match" in pending[0]["prompt"]
 

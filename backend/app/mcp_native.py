@@ -44,34 +44,27 @@ from app.services.tool_registry import ToolSpec, get_mcp_tool_specs
 # keep the whole text under 2KB (Claude Code truncates) and make the first
 # ~512 characters self-contained (Codex's effective window).
 SERVER_INSTRUCTIONS = (
-    "AGMX task orchestration. Your role comes from your token: a "
-    "coordinator token makes you the orchestrator (create, dispatch, review, "
-    "approve); an executor token is scoped to one task — work it and report, "
-    "coordinator-only tools will reject you. These tools are the ONLY interface: "
-    "never read or modify AGMX's source code, database, .env, or "
-    "processes via shell — a missing capability is a feature request for the "
-    "human, not permission to bypass; report errors instead of patching the "
-    "platform. Tasks flow todo > dispatched > awaiting-review > in-review > "
-    "done, enforced server-side with four-eyes review (reviewer != executor) "
-    "and approval gates. Follow the `next` field in every tool result; call "
-    "get_status when unsure. In supervised mode a pending gate needs the "
-    "human's explicit approval in chat before you call approve_gate. "
-    "Read with query_db/get_status/get_stats/get_task_events/get_run_output; "
-    "after dispatching, block on wait_for_task instead of polling on a timer; "
-    "act with create_task, generate_spec_plan, suggest_agents, dispatch_task, "
-    "request_review, record_verdict, approve_gate, cancel_task, archive_task, "
-    "update_task; capture raw ideas with manage_inbox (add/list/promote) — ideas "
-    "are free text, no gate; admin via manage_project/manage_agent/manage_knowledge/"
-    "update_settings (a pending admin gate returns 'admin:<id>' — pass it to "
-    "approve_gate). If a result carries pending_approvals, restate them to "
-    "the human at the END of every reply, as a question, until each is "
-    "decided. If a result carries runtime_warning, report it verbatim and "
-    "never restart processes yourself. Errors are structured with a hint: "
-    "follow the hint, do "
-    "not retry blindly. The verdict belongs to the reviewer: never record a "
-    "verdict for a review you did not run, never merge ct-run/* branches "
-    "yourself, and report the task status from get_status verbatim — a "
-    "failed task is failed even if the diff looks right."
+    "AGMX task orchestration. Your token sets your role: a coordinator token "
+    "makes you the orchestrator; an executor token is scoped to one task. "
+    "As coordinator you decide -- a gate is where you stop and check the "
+    "evidence, then call approve_gate yourself. Not enough to decide? Ask the "
+    "human and do NOT approve; see `unknowns` in the gate brief. You may edit "
+    "the repo you coordinate (its `repo_root`), and tasks are the record of "
+    "work, not a permission queue. Never bends: four-eyes on code (an "
+    "independent reader before main), the verdict belongs to whoever ran the "
+    "review, GateRecord is append-only. Tasks flow todo > dispatched > "
+    "awaiting-review > in-review > done. Follow the `next` field in every "
+    "result and the tool named in every error -- they say what to do next. "
+    "Call get_status when unsure; after dispatching, block on wait_for_task. "
+    "Read the spec before deciding anything unusual: spec_get is the truth, "
+    "anchored to code. Read with query_db/get_status/get_stats/"
+    "get_task_events/get_run_output; act with create_task/generate_spec_plan/"
+    "dispatch_task/request_review/record_verdict/approve_gate/reopen_task/"
+    "cancel_task/update_task; capture ideas with manage_inbox (no gate); admin "
+    "via manage_project/manage_agent/manage_knowledge/update_settings (a "
+    "pending admin gate returns 'admin:<id>' -- pass it to approve_gate). "
+    "Report task status from get_status verbatim: a failed task is failed even "
+    "if the diff looks right."
 )
 
 TOKEN_PREFIX = "ct1"
@@ -269,6 +262,78 @@ def envelope(result: Mapping[str, Any], *, next_step: str | None = None) -> dict
     return {"ok": True, "data": dict(result), **({"next": next_step} if next_step else {})}
 
 
+# What the coordinator is expected to check before deciding each kind of gate.
+# Named per gate type so the reminder is about THIS decision, not a generic
+# "please verify" -- the note is attached to every tool result, so a vague one
+# is noise the reader learns to skip.
+_GATE_CHECKS = {
+    "verdict": (
+        "re-run the numbers the reviewer quoted, open the exact lines its "
+        "findings point at, and read the body of any test it credits"
+    ),
+    "dispatch": (
+        "confirm the plan matches the intent and the chosen executor suits the "
+        "work"
+    ),
+    "review_order": (
+        "confirm the reviewer is independent of the executor and suits the work"
+    ),
+    "escalation": (
+        "read what blocked it and whether that condition still holds"
+    ),
+    "safety_brake": (
+        "compare the recorded numbers against the limit, and check whether a "
+        "result was already delivered"
+    ),
+}
+
+
+def _gate_decider(db, row) -> str:
+    """Who is expected to decide this gate: the coordinator, or the human.
+
+    Derived from the task's effective mode rather than asserted.  This used to
+    be a hardcoded sentence -- "these gates are WAITING for the human, repeat
+    them at the END of every reply until decided" -- appended to every tool
+    result regardless of mode.  A coordinator session reads that line dozens of
+    times per session, so it outweighed any instruction saying otherwise
+    (CTV2-1391): the most repeated string in the system was also the one that
+    contradicted the coordinator's actual authority.
+    """
+    try:
+        from app.services.task_validators import TaskValidator
+
+        task = db.get(Task, row.task_id)
+        if task is None:
+            return "coordinator"
+        return "human" if TaskValidator(db).mode_for_task(task) == "supervised" else "coordinator"
+    except Exception:  # boundary: a projection must never break a tool result
+        return "coordinator"
+
+
+def _pending_approvals_note(pending: list[dict[str, Any]]) -> str:
+    """Say who decides, and -- when that is the coordinator -- what to check."""
+    kinds = {
+        str(entry.get("kind", "")).split(":", 1)[-1]
+        for entry in pending
+        if entry.get("decided_by") != "human"
+    }
+    checks = [_GATE_CHECKS[kind] for kind in sorted(kinds) if kind in _GATE_CHECKS]
+    if not any(entry.get("decided_by") == "human" for entry in pending):
+        note = (
+            "These gates are yours to decide. Verify the claims yourself, then "
+            "call approve_gate. If a gate does not give you enough to decide, "
+            "ask the human and do not approve it."
+        )
+        if checks:
+            note += " Worth checking here: " + "; ".join(checks) + "."
+        return note
+    return (
+        "Some of these gates need the human's decision (the task's mode says "
+        "so) -- restate those at the END of every reply until they are decided. "
+        "The rest are yours: verify, then call approve_gate."
+    )
+
+
 def _pending_approvals(db) -> list[dict[str, Any]]:
     """Every open human decision, attached to every tool result.
 
@@ -303,6 +368,7 @@ def _pending_approvals(db) -> list[dict[str, Any]]:
                 "id": row.task_id,
                 "kind": f"task:{row.gate_type}",
                 "waiting_since": row.created_at.isoformat() if row.created_at else None,
+                "decided_by": _gate_decider(db, row),
             }
             if row.gate_type == "review_order":
                 payload = row.input_payload or {}
@@ -433,11 +499,7 @@ def make_tool_handler(
             pending = _pending_approvals(db)
             if pending:
                 response["pending_approvals"] = pending
-                response["pending_approvals_note"] = (
-                    "Các gate này đang CHỜ human quyết định — nhắc lại cho "
-                    "human ở CUỐI mỗi câu trả lời (kèm câu hỏi approve?) cho "
-                    "đến khi chúng được approve/reject qua approve_gate."
-                )
+                response["pending_approvals_note"] = _pending_approvals_note(pending)
             return response
         except Exception as exc:  # boundary: MCP must always return structured JSON
             return {"ok": False, "data": None, "error": {"code": "internal_error", "message": str(exc)}}
