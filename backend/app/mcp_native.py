@@ -289,20 +289,56 @@ def _error_code(message: str) -> str:
 
 
 def _next_step(result: Mapping[str, Any]) -> str | None:
+    """Say what to do next, derived from the WHOLE state -- not one column.
+
+    This used to be a lookup on `status` alone, which cannot tell apart three
+    very different situations that all read 'todo': nothing has started, a
+    planner is running right now, and a gate is waiting for a decision. It
+    answered "call generate_spec_plan, then dispatch_task" to all three.
+
+    On 2026-08-05 that advice was actively wrong for four voma tasks whose
+    planners were mid-flight (CTV2-1404): the coordinator was told to start
+    work that was already underway, and never told that waiting was the
+    correct move or that `wait_for_task` is how you wait. A coordinator that
+    does not know its next step is usually a system that told it the wrong one.
+    """
     task = result.get("task")
     if not isinstance(task, Mapping):
         if result.get("action") == "created":
             return "Gọi generate_spec_plan cho task mới, sau đó dispatch_task."
         return None
-    status = task.get("status")
+
+    status = str(task.get("status") or "")
+    gate = str(task.get("current_gate") or "")
+    waiting_human = bool(task.get("awaiting_approval"))
+
+    # A pending gate outranks the status: every transition tool will refuse
+    # until it is decided, so pointing at one of them just wastes a call.
+    if waiting_human and status not in {"done", "cancelled"}:
+        return (
+            f"Task đang chờ quyết định ở gate {gate!r}. Đọc gate brief qua get_status, "
+            "kiểm chứng bằng chứng, rồi tự gọi approve_gate nếu không vấn đề — "
+            "gate là chỗ dừng lại xác nhận, không phải chỗ xin phép. "
+            "Các tool chuyển trạng thái sẽ bị từ chối cho tới khi gate được quyết."
+        )
+
+    if status == "todo":
+        if gate in {"plan", "spec"}:
+            return (
+                "Planner đang chạy cho task này — gọi wait_for_task để chờ plan xong "
+                "trong một lần gọi, đừng gọi lại generate_spec_plan (sẽ chạy trùng) "
+                "và đừng poll get_status theo nhịp."
+            )
+        return "Gọi generate_spec_plan nếu task chưa có plan, sau đó dispatch_task."
+
     return {
-        "todo": "Gọi generate_spec_plan nếu task chưa có plan, sau đó dispatch_task.",
         "dispatched": "Gọi wait_for_task để chờ executor xong và nhận kết quả trong một lần gọi.",
         "awaiting-review": "Gọi request_review để bắt đầu review độc lập.",
         "in-review": "Gọi wait_for_task để chờ verdict của reviewer.",
         "changes-requested": "Gọi dispatch_task để chạy lại task sau khi cập nhật.",
+        "failed": "Gọi reopen_task để đưa task về trạng thái làm tiếp được.",
         "done": "Task đã done; không cần gọi thêm transition.",
-    }.get(str(status))
+    }.get(status)
 
 
 def envelope(result: Mapping[str, Any], *, next_step: str | None = None) -> dict[str, Any]:
