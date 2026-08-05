@@ -135,8 +135,23 @@ def _human_question_hold(db: Session, task: Task) -> ApprovalHold | None:
     )
 
 
-def _spec_clarity_hold(task: Task) -> ApprovalHold | None:
-    """The Spec Clarity Loop: the planner said it does not know enough yet."""
+def _spec_clarity_hold(task: Task, status: str) -> ApprovalHold | None:
+    """The Spec Clarity Loop: the planner said it does not know enough yet.
+
+    Planning-phase only.  This hold exists to stop a *dispatch* that would send
+    an agent off with unanswered questions, so it is meaningless once the task
+    has left ``todo``: the work is already done, and what judges it is review,
+    not the planner's old doubts.
+
+    Restricting it here is not cosmetic.  The pre-CTV2-1401 code cleared the
+    flag at dispatch and never revived it; deriving it from `spec_clarity`
+    alone resurrected it on tasks that had already delivered a result --
+    UIKI-007 sat at `awaiting-review` with a commit attached and a `medium`
+    clarity from its planning round, and the derived hold would have blocked
+    the review it was waiting for, permanently.
+    """
+    if status != "todo":
+        return None
     open_questions = [
         str(q).strip() for q in (task.open_questions or []) if str(q).strip()
     ]
@@ -161,8 +176,16 @@ def _spec_clarity_hold(task: Task) -> ApprovalHold | None:
     )
 
 
-def _plan_critic_hold(task: Task) -> ApprovalHold | None:
-    """The plan critic rejected this exact plan and nobody has replanned."""
+def _plan_critic_hold(task: Task, status: str) -> ApprovalHold | None:
+    """The plan critic rejected this exact plan and nobody has replanned.
+
+    Planning-phase only, for the same reason as `_spec_clarity_hold`: the
+    critic guards dispatch (`task_state_machine` refuses to dispatch an
+    execute run while `plan_critic_status != 'accept'`), so past `todo` it has
+    nothing left to guard.
+    """
+    if status != "todo":
+        return None
     if task.plan_critic_status != "reject":
         return None
     findings = task.plan_critic_findings or []
@@ -212,13 +235,14 @@ def derive_approval_hold(
     that writes `status='done'`, so the projection has to be written *before*
     the status flip, from the status the task is about to have.
     """
-    if (as_status or task.status) in TERMINAL_STATUSES:
+    status = as_status or task.status
+    if status in TERMINAL_STATUSES:
         return None
     return (
         _gate_hold(db, task)
         or _human_question_hold(db, task)
-        or _spec_clarity_hold(task)
-        or _plan_critic_hold(task)
+        or _spec_clarity_hold(task, status)
+        or _plan_critic_hold(task, status)
         or _landing_hold(task)
     )
 

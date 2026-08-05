@@ -165,6 +165,36 @@ def test_open_questions_hold_through_the_spec_clarity_loop(db):
     assert derive_approval_hold(db, task) is None
 
 
+def test_a_planning_question_does_not_block_a_delivered_result(db):
+    """UIKI-007, measured 2026-08-06: the shape this must never take again.
+
+    The task sat at `awaiting-review` with a commit attached and a `medium`
+    clarity left over from its planning round.  A hold derived from
+    `spec_clarity` alone would have blocked the review it was waiting for,
+    forever -- the planner's old doubt outliving the work that answered it.
+    """
+    task = _task(db)
+    task.spec_clarity = "medium"
+    task.open_questions = ["repo nào?"]
+    task.result_ref = "base..head"
+    task.status = "awaiting-review"
+    db.commit()
+
+    assert derive_approval_hold(db, task) is None
+
+
+def test_a_critic_rejection_does_not_block_a_delivered_result(db):
+    """Same rule for the plan critic: it guards dispatch, nothing after it."""
+    task = _task(db)
+    task.plan_critic = "@critic"
+    task.plan_critic_status = "reject"
+    task.plan_critic_findings = [{"title": "thiếu bằng chứng", "evidence": "x"}]
+    task.status = "awaiting-review"
+    db.commit()
+
+    assert derive_approval_hold(db, task) is None
+
+
 def test_missing_spec_clarity_is_not_a_low_spec_clarity(db):
     """Legacy tasks predate the column; absence of a measurement is not a bad one."""
     task = _task(db)

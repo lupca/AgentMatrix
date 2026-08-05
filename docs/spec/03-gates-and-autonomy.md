@@ -209,9 +209,16 @@ riêng — không nguồn nào lấy chính cái cờ làm bằng chứng:
 |---|---|---|
 | `gate` | `gate_records` `status='pending'` chưa có hàng con quyết định | `approve_gate` |
 | `human_question` | `task_events` `human_question` mới hơn `human_answer` gần nhất | `ask_human {answer}` |
-| `spec_clarity` | `spec_clarity != 'high'` hoặc `open_questions` khác rỗng | `generate_spec_plan` lại |
-| `plan_critic` | `plan_critic_status == 'reject'` | `generate_spec_plan` lại |
+| `spec_clarity` | `spec_clarity != 'high'` hoặc `open_questions` khác rỗng — **chỉ ở `todo`** | `generate_spec_plan` lại |
+| `plan_critic` | `plan_critic_status == 'reject'` — **chỉ ở `todo`** | `generate_spec_plan` lại |
 | `landing` | `task.error` bắt đầu `landing_failed:` | sửa repo rồi `land_task` |
+
+Hai nguồn `spec_clarity` và `plan_critic` **chỉ sống ở `todo`** (CTV2-1406). Cả
+hai canh DISPATCH; qua khỏi `todo` thì không còn gì để canh, và cái phán xử công
+việc là review chứ không phải nghi ngờ cũ của planner. Bỏ điều kiện này là dựng
+lại một block mà code trước CTV2-1401 đã xoá lúc dispatch: đo 2026-08-06,
+`UIKI-007` ngồi ở `awaiting-review` với commit đã gắn và `spec_clarity='medium'`
+sót lại từ vòng planning — hold suy ra sẽ chặn đúng cái review nó đang chờ.
 
 Task terminal (`done`/`cancelled`) không bao giờ hold — constraint
 `ck_tasks_terminal_not_awaiting_approval`. `transition_to_done` ghi projection
@@ -235,6 +242,21 @@ chờ ai.
 `_pending_approvals` (mcp_native) vẫn quét nhánh escalation
 (`kind: "task:escalation"`) qua cột này. `auto_max_rounds` (default 3) round
 changes-requested → status `failed` + escalation "human replan".
+
+### Escalation KHÔNG assert `expected_status` (CTV2-1406)
+
+`apply_gate` đòi task đứng đúng status đã đăng ký trong `input_payload.expected_status`
+— đúng cho mọi gate cấp phép một TRANSITION. Escalation không cấp phép gì cả:
+nó chỉ nói "human đã nhìn, thôi chặn". Nếu task đã tự tiến lên, đó là cái block
+ĐƯỢC GỠ, không phải xung đột.
+
+Giữ assert cho escalation tạo vòng khoá chết: `advance_task` escalate lúc task
+còn `todo` → `attach_result` đẩy lên `awaiting-review` nhưng không đóng gate →
+gate pending giữ `awaiting_approval` → `request_review` bị từ chối ("Task has a
+pending gate") → `approve_gate` gặp `awaiting-review != todo` →
+`task_transition_conflict`. Gate chặn review, status chặn gate, không tool nào
+thoát. Đo 2026-08-06: 7 task (`UIKI-001/003/004/005/006/008/010`), mỗi cái đã có
+commit thật, đều kẹt đúng ở đây.
 
 ## Brakes (`check_brakes`, task_orchestration ~1580)
 

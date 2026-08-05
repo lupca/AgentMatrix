@@ -28,6 +28,7 @@ from app.services.task_orchestration import (
     PrerequisiteError,
     TaskOrchestrationService,
 )
+from app.services.task_state_machine import TaskStateMachine
 from app.services.task_validators import BrakeDecision, TaskValidator
 
 
@@ -422,6 +423,50 @@ def test_escalation_can_be_cleared_by_approving_it(service, db_session):
     assert task.error is None
     assert task.status == "todo"
     # Append-only: the escalation row itself is untouched.
+    assert db_session.get(GateRecord, record.id).status == "pending"
+
+
+def test_escalation_clears_even_after_the_task_moved_on(service, db_session):
+    """The task making progress is the block resolving, not a conflict.
+
+    Measured 2026-08-06 on seven live tasks (UIKI-001/003/004/005/006/008/010):
+    `advance_task` escalated each at `todo`, then `attach_result` raised them
+    to `awaiting-review` with a real commit -- and they locked solid. The
+    pending escalation kept `awaiting_approval` true so `request_review` was
+    refused, while `approve_gate` asserted the escalation's recorded
+    `expected_status='todo'` and answered `task_transition_conflict`. Gate
+    blocked review, status blocked gate, and no tool could break the ring.
+
+    An escalation authorises no transition, so it has no business asserting
+    one.
+    """
+
+    task = _add_task(db_session, "ESC-MOVED", status="todo")
+
+    record = service.escalate_task(
+        task_id=task.id,
+        reason="advance_task made no progress after 3 calls at status 'todo'",
+        actor="system:worker",
+    )
+    assert record.input_payload["expected_status"] == "todo"
+
+    # The work lands anyway -- exactly what the escalation was asking for.
+    task.result_ref = "base-sha..head-sha"
+    task.executor = "@executor"
+    TaskStateMachine(db_session).cas_status(task, "awaiting-review")
+    db_session.commit()
+
+    result = service.decide_gate(
+        gate_record_id=record.id,
+        decision="approved",
+        actor="chat:test",
+        idempotency_key="esc-moved:approve",
+    )
+    db_session.refresh(task)
+
+    assert result.gate_record.parent_id == record.id
+    assert task.awaiting_approval is False
+    assert task.status == "awaiting-review"
     assert db_session.get(GateRecord, record.id).status == "pending"
 
 

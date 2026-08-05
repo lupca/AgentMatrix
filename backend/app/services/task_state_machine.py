@@ -1031,7 +1031,22 @@ class TaskStateMachine:
         idempotency_key: str | None = None,
         approval_record: GateRecord | None = None,
     ) -> tuple[AgentRun | None, str | None]:
-        self.validator.assert_status(task, str(payload["expected_status"]))
+        if gate_type != "escalation":
+            # Escalations are exempt on purpose (CTV2-1406).
+            #
+            # Every other gate authorises a *transition*, so it must start
+            # from the status it was requested against.  An escalation
+            # authorises nothing: it means "a human looked at this, stop
+            # blocking".  Asserting its old status turns the good case into a
+            # deadlock -- if the task moved forward on its own (`attach_result`
+            # raising `todo` to `awaiting-review`), that is the block being
+            # resolved, not a conflict, yet the assert rejects the approval and
+            # the still-pending gate keeps `request_review` refused.  Gate
+            # blocks review, status blocks gate, no tool escapes.
+            #
+            # Measured 2026-08-06: UIKI-001/003/004/005/006/008/010 -- seven
+            # tasks, each with a commit attached, each stuck exactly here.
+            self.validator.assert_status(task, str(payload["expected_status"]))
         now = datetime.now(timezone.utc)
         if gate_type == "dispatch":
             run_id = str(uuid.uuid4())
@@ -1200,10 +1215,10 @@ class TaskStateMachine:
             return None, verdict
         if gate_type == "escalation":
             # Approving an escalation means "someone looked at this"; it clears
-            # the block without moving the task.  The `expected_status` assert
-            # at the top already confirmed the task has not moved since the
-            # escalation was raised, so work simply resumes from where it
-            # stopped.
+            # the block without moving the task, so work resumes from wherever
+            # the task actually is now -- which is not necessarily where it was
+            # when the escalation was raised (see the `expected_status`
+            # exemption at the top of this method).
             task.error = None
             return None, None
         raise OrchestrationError(f"Unsupported gate type: {gate_type}")
