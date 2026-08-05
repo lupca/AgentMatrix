@@ -190,6 +190,26 @@ def _run_plan_step(
         planner=agent.id,
     )
     db.refresh(task)
+    # Announce completion.
+    #
+    # `wait_for_task` returns on a status change, a terminal status, a pending
+    # gate, or a NEW TaskEvent.  A plan run changes none of the first three --
+    # the task sits at `todo` throughout -- so without this event a caller that
+    # blocks on `wait_for_task` waits out its whole timeout and gets
+    # `changed=false` even though the plan is finished.  It only appeared to
+    # work when the plan escalated, because that sets `awaiting_approval`:
+    # the tool signalled trouble and stayed silent on success (CTV2-1398).
+    emit_task_event(
+        task_id=task.id,
+        event_type="spec_plan_completed",
+        kind="decision" if result.open_questions else "info",
+        payload={
+            "run_id": run.id,
+            "spec_clarity": result.spec_clarity,
+            "open_questions": len(result.open_questions),
+        },
+        db=db,
+    )
     _dispatch_critic_step(db, task, repo_root, planner_agent=agent)
 
 
@@ -355,6 +375,20 @@ def _run_critic_step(
         findings=[item.model_dump(mode="json") for item in critic_result.findings],
         summary=critic_result.summary,
         tokens=critic_tokens,
+    )
+    # Same reason as the plan step: the critic finishing changes no task status,
+    # so `wait_for_task` would sit out its timeout without this (CTV2-1398).
+    emit_task_event(
+        task_id=task.id,
+        event_type="plan_critic_completed",
+        kind="decision" if critic_result.verdict != "accept" else "info",
+        payload={
+            "run_id": run.id,
+            "critic": critic_agent.id,
+            "verdict": critic_result.verdict,
+            "findings": len(critic_result.findings),
+        },
+        db=db,
     )
 
 

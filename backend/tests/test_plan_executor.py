@@ -142,3 +142,29 @@ def test_execute_plan_run_marks_run_failed_without_touching_task_status_on_crash
 
     updated_task = db_session.get(Task, "TASK-PE-2")
     assert updated_task.status == "todo"
+
+
+def test_plan_and_critic_announce_completion(db_session, tmp_path):
+    """wait_for_task must learn that a plan finished.
+
+    It returns on a status change, a terminal status, a pending gate, or a new
+    TaskEvent.  A plan run trips none of the first three -- the task sits at
+    `todo` the whole way -- so without an event the caller blocks until its
+    timeout and gets `changed=false` on a plan that is already done.  It only
+    looked like it worked when the plan escalated, because that sets
+    `awaiting_approval`: the tool announced trouble and stayed silent on
+    success (CTV2-1398).
+    """
+
+    from app.db.models import TaskEvent
+    from app.workers import plan_executor as pe
+    import inspect
+
+    source = inspect.getsource(pe)
+    assert "spec_plan_completed" in source, "plan step announces nothing"
+    assert "plan_critic_completed" in source, "critic step announces nothing"
+
+    # Both events must carry what the waiter needs to choose a next move.
+    assert "spec_clarity" in source
+    assert "open_questions" in source
+    assert "verdict" in source
