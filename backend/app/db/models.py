@@ -1241,6 +1241,14 @@ class SpecItem(ArchivableMixin, Base):
     # which symbol, in which commit, so an agent never has to ask "is this
     # still true" (CTV2-1342).
     stale_reason = Column(Text, nullable=True)
+    # Independent axis from `status`: whether the claim has become code, not
+    # whether the claim is still correct. Always 'agreed' at write time and
+    # never updated by a column write -- `spec_get` derives the live value
+    # from anchors + linked task status on every read (CTV2-1395). Never set
+    # by spec_write; see the reject-realization guard in spec_service.
+    realization = Column(
+        String(10), nullable=False, default="agreed", server_default="agreed"
+    )
     supersedes_id = Column(
         String(36), ForeignKey("spec_item.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -1274,6 +1282,12 @@ class SpecItem(ArchivableMixin, Base):
     )
     task_links = relationship(
         "SpecTaskLink", back_populates="spec_item", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "realization IN ('agreed', 'built')", name="ck_spec_item_realization"
+        ),
     )
 
 

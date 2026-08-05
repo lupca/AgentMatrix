@@ -494,6 +494,14 @@ async def generate_spec_plan(
     graph_warning: str | None = None
     if repo_root:
         search_query = _build_search_query(task)
+        # CTV2-1389: the caller's boundary commit expires ORM objects; the
+        # attribute accesses above (agent_type validation, _build_search_query)
+        # may have reopened a transaction via lazy loads.  semantic_search
+        # shells out to code-review-graph (a subprocess that can take 100s of
+        # seconds), so we must not carry an idle-in-transaction session into
+        # it.  Commit any open transaction right before the subprocess call.
+        if db is not None and db.in_transaction():
+            db.commit()
         try:
             found = await semantic_search(
                 repo_root, search_query, limit=15, raise_on_error=True

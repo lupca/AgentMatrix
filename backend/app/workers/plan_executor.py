@@ -155,6 +155,13 @@ def _run_plan_step(
     # 2026-08-04; it only stopped being an outage because CTV2-1382 moved this
     # work into the worker.  Commit before any long call, not just before the
     # LLM one.
+    #
+    # CTV2-1389: the boundary commit expires ORM objects (expire_on_commit),
+    # and lazy loads inside generate_spec_plan can reopen a transaction before
+    # semantic_search runs.  generate_spec_plan now commits any open
+    # transaction right before the graph call, so the caller's boundary commit
+    # plus the inner guard together guarantee no idle-in-transaction session
+    # survives into the subprocess.
     db.commit()
 
     result, flows = asyncio.run(

@@ -13,6 +13,7 @@ from sqlalchemy import select
 
 from app.db.models import SpecAnchor, SpecItem, SpecRelation, SpecTaskLink, Task
 from app.services.spec_anchor import (
+    anchor_resolves,
     compute_anchor_sha,
     is_python_path,
     resolve_repo_root,
@@ -26,6 +27,11 @@ SPEC_CONFIDENCES = {"asserted", "derived", "verified"}
 RELATION_KINDS = {"conflicts_with", "duplicates", "refines", "depends_on"}
 ANCHOR_RELATION_KINDS = {"implements", "constrains", "tests", "documents"}
 TASK_LINK_RELATIONS = {"implements", "modifies", "violates", "references"}
+# Independent axis from SPEC_STATUSES -- whether the claim has become code,
+# not whether the claim is still correct (CTV2-1395). Never a spec_write
+# field: see _reject_realization_field. Only ever produced by
+# _realization_projection, which derives it from anchors + task status.
+REALIZATION_STATES = {"agreed", "built"}
 _ANCHOR_SHA_RE = re.compile(r"[0-9a-fA-F]{64}")
 
 _ITEM_FIELDS = {
@@ -52,6 +58,27 @@ def _clean_string(value: Any, field: str, *, required: bool = False) -> str | No
     if required and not result:
         raise SpecError(f"{field} is required")
     return result or None
+
+
+def _reject_realization_field(operation: Mapping[str, Any]) -> None:
+    """Refuse any op that tries to set `realization` by hand (CTV2-1395).
+
+    `realization` is derived, never asserted -- the same discipline already
+    applied to `stale_reason`. Checked before any op-specific parsing so a
+    rejected op never partially mutates an item; the outer write_specs
+    try/except rolls the whole batch back regardless.
+    """
+    if "realization" in operation:
+        raise SpecError(
+            "realization is derived from repo anchors and linked task status; "
+            "it cannot be set via spec_write"
+        )
+    nested = operation.get("item", operation.get("new_item", operation.get("patch")))
+    if isinstance(nested, Mapping) and "realization" in nested:
+        raise SpecError(
+            "realization is derived from repo anchors and linked task status; "
+            "it cannot be set via spec_write"
+        )
 
 
 def _validate_item_fields(fields: Mapping[str, Any], *, partial: bool) -> dict[str, Any]:
@@ -130,6 +157,7 @@ def _item_snapshot(
     relations: list[dict[str, str]] | None = None,
     task_links: list[dict[str, Any]] | None = None,
     anchors: list[dict[str, str]] | None = None,
+    realization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "id": item.id, "project_id": item.project_id, "kind": item.kind,
@@ -145,7 +173,103 @@ def _item_snapshot(
         "relations": relations or [],
         "task_links": task_links or [],
         "anchors": anchors or [],
+        "realization": realization or _NO_ANCHOR_REALIZATION,
     }
+
+
+# Returned for any item with no implements anchor at all -- the common case,
+# computed with no query, so callers that build a snapshot without running
+# _realization_projection (there are none left, but this is the honest
+# default rather than a silent `None`) still get a truthful missing-anchor
+# reading instead of an empty/absent field.
+_NO_ANCHOR_REALIZATION = {
+    "state": "agreed",
+    "why": "chưa có anchor relation='implements' nào",
+    "next": "land code rồi neo bằng spec_write (op='anchor', relation='implements')",
+}
+
+
+def _realization_projection(db: Session, item_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Derive {state, why, next} per spec_item id -- pure code, no LLM (CTV2-1395).
+
+    Three machine-checked conditions gate 'built', all required:
+      1. at least one spec_anchor with relation='implements'
+      2. that anchor resolves against the main repo's current tree
+         (`anchor_resolves`, not the worktree an executor may be sitting in)
+      3. at least one spec_task_link with relation='implements' whose task
+         has status='done'
+    The first condition that fails is reported in `why`/`next` -- checking
+    stops there, so a missing anchor never gets misreported as a resolution
+    or task-status failure. This never re-derives or accepts an asserted
+    value; the caller is the only source of truth this reads.
+    """
+    if not item_ids:
+        return {}
+
+    anchors = (
+        db.query(SpecAnchor)
+        .filter(SpecAnchor.spec_item_id.in_(item_ids), SpecAnchor.relation == "implements")
+        .all()
+    )
+    anchors_by_item: dict[str, list[SpecAnchor]] = {}
+    for anchor in anchors:
+        anchors_by_item.setdefault(anchor.spec_item_id, []).append(anchor)
+
+    done_task_item_ids = {
+        item_id
+        for (item_id,) in (
+            db.query(SpecTaskLink.spec_item_id)
+            .join(Task, Task.id == SpecTaskLink.task_id)
+            .filter(
+                SpecTaskLink.spec_item_id.in_(item_ids),
+                SpecTaskLink.relation == "implements",
+                Task.status == "done",
+            )
+            .distinct()
+            .all()
+        )
+    }
+
+    result: dict[str, dict[str, Any]] = {}
+    for item_id in item_ids:
+        implements_anchors = anchors_by_item.get(item_id, [])
+        if not implements_anchors:
+            result[item_id] = dict(_NO_ANCHOR_REALIZATION)
+            continue
+
+        resolved = [
+            anchor for anchor in implements_anchors
+            if anchor_resolves(db, anchor.repo, anchor.path, anchor.symbol)
+        ]
+        if not resolved:
+            example = implements_anchors[0]
+            result[item_id] = {
+                "state": "agreed",
+                "why": (
+                    f"anchor implements trỏ tới {example.path}:{example.symbol} "
+                    "nhưng không giải được trong repo chính (file/symbol không tồn tại)"
+                ),
+                "next": "kiểm tra path/symbol còn đúng không, hoặc code chưa land vào repo chính",
+            }
+            continue
+
+        if item_id not in done_task_item_ids:
+            result[item_id] = {
+                "state": "agreed",
+                "why": (
+                    "anchor implements đã giải được nhưng chưa có task "
+                    "relation='implements' nào ở trạng thái done"
+                ),
+                "next": "hoàn thành task liên kết (relation='implements') rồi trạng thái sẽ tự chuyển built",
+            }
+            continue
+
+        result[item_id] = {
+            "state": "built",
+            "why": "có anchor implements giải được trong repo chính và task liên kết relation='implements' đã done",
+            "next": None,
+        }
+    return result
 
 
 def _relation_snapshot(relation: SpecRelation) -> dict[str, str]:
@@ -188,6 +312,8 @@ def write_specs(
             if not isinstance(operation, Mapping):
                 raise SpecError("each op must be an object")
             name = _operation_name(operation)
+            if name in ("create", "update", "supersede"):
+                _reject_realization_field(operation)
             if name == "create":
                 fields = _item_payload(operation)
                 if common_project_id and "project_id" not in fields:
@@ -376,9 +502,13 @@ def write_specs(
         raise
 
     unique_items = list(dict.fromkeys(written))
+    realization_by_item = _realization_projection(db, [item.id for item in unique_items])
     return {
         "action": "spec_written", "count": len(operations),
-        "items": [_item_snapshot(item) for item in unique_items],
+        "items": [
+            _item_snapshot(item, realization=realization_by_item.get(item.id))
+            for item in unique_items
+        ],
         "relations": [_relation_snapshot(relation) for relation in written_relations],
         "anchors": [_anchor_snapshot(anchor) for anchor in written_anchors],
         "task_links": [_task_link_snapshot(link) for link in written_task_links],
@@ -393,6 +523,15 @@ def get_specs(
 ) -> dict[str, Any]:
     """Return active specs selected by ids, filters, or a linked task."""
     filters = dict(filters or {})
+    # `backlog`/`realization` are not spec_item columns -- they select on the
+    # derived projection computed below, so they are pulled out of the
+    # equality-filter loop before the unknown-field check.
+    backlog = bool(filters.pop("backlog", False))
+    realization_filter = filters.pop("realization", None)
+    if realization_filter is not None:
+        realization_filter = _clean_string(realization_filter, "realization filter")
+        if realization_filter not in REALIZATION_STATES:
+            raise SpecError(f"realization filter must be one of {sorted(REALIZATION_STATES)}")
     unknown = set(filters) - _FILTER_FIELDS
     if unknown:
         raise SpecError(f"Unknown spec filter(s): {', '.join(sorted(unknown))}")
@@ -408,6 +547,11 @@ def get_specs(
             raise SpecError(f"Task '{task_id}' not found")
 
     query = db.query(SpecItem).filter(SpecItem.archived_at.is_(None))
+    if backlog:
+        # backlog = active + not yet built (docs/spec/08-living-spec.md,
+        # truc THUC HOA). status is a real column so this half is pushed
+        # into SQL; "not built" is derived and applied after projection.
+        query = query.filter(SpecItem.status == "active")
     if task_id is not None:
         query = query.join(
             SpecTaskLink, SpecTaskLink.spec_item_id == SpecItem.id
@@ -465,6 +609,33 @@ def get_specs(
         items = db.query(SpecItem).filter(
             SpecItem.id.in_(item_ids), SpecItem.archived_at.is_(None)
         ).order_by(SpecItem.project_id.asc(), SpecItem.id.asc()).all()
+
+    realization_by_item = _realization_projection(db, item_ids)
+    if backlog or realization_filter is not None:
+        def _matches_realization(spec_item_id: str) -> bool:
+            state = realization_by_item.get(spec_item_id, _NO_ANCHOR_REALIZATION)["state"]
+            if backlog and state == "built":
+                return False
+            if realization_filter is not None and state != realization_filter:
+                return False
+            return True
+
+        kept_ids = {item_id for item_id in item_ids if _matches_realization(item_id)}
+        item_ids = [item_id for item_id in item_ids if item_id in kept_ids]
+        items = [item for item in items if item.id in kept_ids]
+        # A relation whose other endpoint got pruned would otherwise leave
+        # by_item[relation["from_id"]] pointing at an id no longer in
+        # item_ids, and the dict-comprehension below would KeyError on it.
+        all_relations = {
+            key: relation for key, relation in all_relations.items()
+            if relation.from_id in kept_ids and relation.to_id in kept_ids
+        }
+        if not items:
+            return {
+                "action": "spec_fetched", "count": 0, "items": [],
+                "relations": [], "anchors": [], "task_links": [],
+            }
+
     relations = sorted(
         all_relations.values(),
         key=lambda relation: (relation.from_id, relation.to_id, relation.kind),
@@ -510,6 +681,7 @@ def get_specs(
                 by_item[item.id],
                 links_by_item[item.id],
                 anchors_by_item[item.id],
+                realization_by_item.get(item.id),
             )
             for item in items
         ],

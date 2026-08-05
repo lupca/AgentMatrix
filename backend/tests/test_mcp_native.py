@@ -247,6 +247,85 @@ async def test_spec_task_link_round_trip_through_real_mcp_client(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_realization_projection_round_trip_through_real_mcp_client(
+    monkeypatch, git_repo_root
+):
+    """spec_get must expose the derived agreed/built projection, and
+    spec_write must reject any attempt to set it, over the real MCP
+    tool-call path (CTV2-1395)."""
+    from pathlib import Path
+
+    (Path(git_repo_root) / "mod.py").write_text("def foo():\n    return 1\n")
+    subprocess.run(["git", "add", "."], cwd=git_repo_root, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "add mod"],
+        cwd=git_repo_root, check=True, capture_output=True,
+    )
+
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    seed = session_factory()
+    seed.add(Project(id="real-mcp", name="Real MCP", repo_root=git_repo_root))
+    seed.add(Task(
+        id="REAL-MCP-1", title="Implement it", project="real-mcp", status="done",
+        executor="@executor", reviewer="@reviewer", result_ref="base..head",
+    ))
+    seed.commit()
+    seed.close()
+
+    monkeypatch.setattr(mcp_native, "SessionLocal", session_factory)
+    monkeypatch.setattr(mcp_native.settings, "MCP_TOKEN_SECRET", "test-secret")
+    server = build_server(default_token=issue_token("test-secret", role="coordinator"))
+
+    async with Client(server) as client:
+        rejected = await client.call_tool("spec_write", {"ops": [{
+            "op": "create", "id": "real-mcp-item", "project_id": "real-mcp",
+            "kind": "design", "title": "x", "body": "x", "realization": "built",
+        }]})
+        written = await client.call_tool("spec_write", {"ops": [
+            {
+                "op": "create", "id": "real-mcp-built", "project_id": "real-mcp",
+                "kind": "design", "title": "built", "body": "x", "status": "active",
+            },
+            {
+                "op": "anchor", "spec_item_id": "real-mcp-built", "repo": "real-mcp",
+                "path": "mod.py", "symbol": "foo", "relation": "implements",
+            },
+            {
+                "op": "task_link", "spec_item_id": "real-mcp-built", "task_id": "REAL-MCP-1",
+                "relation": "implements", "confidence": "asserted", "created_by": "@executor",
+            },
+            {
+                "op": "create", "id": "real-mcp-agreed", "project_id": "real-mcp",
+                "kind": "design", "title": "agreed", "body": "x", "status": "active",
+            },
+        ]})
+        fetched = await client.call_tool(
+            "spec_get", {"filter": {"project_id": "real-mcp", "backlog": True}}
+        )
+
+    rejected_body = json.loads(rejected.content[0].text)
+    written_body = json.loads(written.content[0].text)
+    fetched_body = json.loads(fetched.content[0].text)
+
+    assert rejected_body["ok"] is False, rejected_body
+    error = rejected_body["error"]
+    error_text = error["message"] if isinstance(error, dict) else str(error)
+    assert "realization" in error_text
+
+    assert written_body["ok"] is True, written_body
+    by_id = {item["id"]: item for item in written_body["data"]["items"]}
+    assert by_id["real-mcp-built"]["realization"]["state"] == "built"
+    assert by_id["real-mcp-agreed"]["realization"]["state"] == "agreed"
+
+    assert fetched_body["ok"] is True, fetched_body
+    assert [item["id"] for item in fetched_body["data"]["items"]] == ["real-mcp-agreed"]
+
+
+@pytest.mark.asyncio
 async def test_executor_can_call_graph_tools_without_task_id_argument(monkeypatch):
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool

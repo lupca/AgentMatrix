@@ -1324,7 +1324,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "confidence when recording a claim. If an op is rejected for a "
                 "missing field (e.g. a task_link missing relation/confidence/"
                 "created_by), fix that op and resubmit -- spec_get shows what "
-                "already exists so you can check before you supersede it."
+                "already exists so you can check before you supersede it. "
+                "`realization` (agreed/built, whether the claim has become "
+                "code) is never a field you can set here -- any op carrying "
+                "it, top level or inside item/patch, is rejected outright. "
+                "It is derived read-only by spec_get from anchors and linked "
+                "task status; land code and anchor it instead of asserting it."
             ),
             parameters={
                 "type": "object",
@@ -1364,7 +1369,14 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "invalidation engine rather than returning the general active "
                 "set. Read-only, no status precondition. If ids/filter/task_id "
                 "match nothing, that's a valid empty result, not an error -- "
-                "check spec_stale if you expected something that used to exist."
+                "check spec_stale if you expected something that used to exist. "
+                "Every returned item carries a server-derived `realization` "
+                "object ({state: agreed|built, why, next}) answering 'has this "
+                "actually become code', separate from `status` (which only "
+                "tracks whether the claim is still correct). Use "
+                "filter={'backlog': true} to see active items that are not yet "
+                "built -- what still needs to land -- or filter={'realization': "
+                "'built'|'agreed'} to select on that state directly."
             ),
             parameters={
                 "type": "object",
@@ -1376,7 +1388,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                     },
                     "filter": {
                         "type": "object",
-                        "description": "Filter by project_id, kind, status, confidence, or provenance fields.",
+                        "description": (
+                            "Filter by project_id, kind, status, confidence, or "
+                            "provenance fields, plus two derived pseudo-fields: "
+                            "backlog (bool, active items not yet built) and "
+                            "realization ('agreed'|'built')."
+                        ),
                     },
                     "task_id": {
                         "type": "string",

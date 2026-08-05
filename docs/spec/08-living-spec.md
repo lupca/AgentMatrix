@@ -1,15 +1,17 @@
 # 08 — Hệ spec sống
 
 > **TRẠNG THÁI: MỘT PHẦN ĐÃ TRIỂN KHAI.** Đã có thật trong code (CTV2-1341,
-> CTV2-1342, CTV2-1355, CTV2-1367): bảng
+> CTV2-1342, CTV2-1355, CTV2-1367, CTV2-1395): bảng
 > `spec_item`/`spec_relation`/`spec_anchor`/`spec_task_link`/`impl_design`, cột
-> `spec_item.stale_reason`, tool `spec_write`/`spec_get`/`spec_stale`, và cơ
-> chế mất hiệu lực thuần code ở mục *Cơ chế mất hiệu lực* dưới đây
-> (`backend/app/services/spec_anchor.py`, hook vào `_publish_graph_rebuild`
-> trong `backend/app/services/outbox.py`). Phần còn lại của file (spec_search,
-> spec_link như tool riêng, pm_wbs_node, pm_document) **vẫn chỉ
-> là thiết kế, chưa triển khai** — mọi bảng/tool có tiền tố đó khác các bảng
-> liệt kê ở trên đều chưa tồn tại.
+> `spec_item.stale_reason` và `spec_item.realization`, tool
+> `spec_write`/`spec_get`/`spec_stale`, cơ chế mất hiệu lực thuần code ở mục
+> *Cơ chế mất hiệu lực* dưới đây (`backend/app/services/spec_anchor.py`, hook
+> vào `_publish_graph_rebuild` trong `backend/app/services/outbox.py`), và
+> trục thực hoá thuần code ở mục *Trục THỰC HOÁ* dưới đây
+> (`_realization_projection` trong `backend/app/services/spec_service.py`).
+> Phần còn lại của file (spec_search, spec_link như tool riêng, pm_wbs_node,
+> pm_document) **vẫn chỉ là thiết kế, chưa triển khai** — mọi bảng/tool có
+> tiền tố đó khác các bảng liệt kê ở trên đều chưa tồn tại.
 >
 > Bản trước của file này tên `08-pm-layer.md`, xoay quanh WBS/lịch/critical
 > path. Đã cắt phần lớn — xem mục *Đã cắt gì và vì sao* ở cuối.
@@ -262,6 +264,79 @@ Hệ quả quan trọng: **truy vấn spec trở nên rẻ và ổn định**. H
 ở cùng thời điểm sẽ nhận cùng câu trả lời, khác hẳn tình trạng "mỗi lần đọc ra
 một kết luận".
 
+## Trục THỰC HOÁ
+
+`status` (draft/active/stale/superseded) chỉ nói về vòng đời của MỆNH ĐỀ —
+đã viết chưa, còn đúng không, bị thay chưa. Không giá trị nào trong đó nói
+được "đã thành code chưa". Bằng chứng nó có hại thật: 2026-08-05 điều phối
+viết nhiều spec_item mô tả cơ chế (brief, unknowns, available_actions, và
+chính trục này) mà không cái nào có một dòng code — không có gì trong
+`status` từng khai báo điều đó.
+
+**`spec_item.realization`** (CTV2-1395) là trục thứ hai, độc lập với
+`status`: `agreed` (đã chốt mệnh đề) hoặc `built` (đã thành code). Một item
+có thể `active` (đúng, đã chốt) mà vẫn `agreed` (chưa code) — gộp vào
+`status` sẽ phá `stale`, vốn chỉ có nghĩa với code ĐÃ TỒN TẠI.
+
+Đúng kỷ luật đã áp cho `stale_reason`: **`realization` chỉ được DẪN XUẤT,
+không bao giờ ghi tay.** `spec_write` từ chối thẳng bất kỳ op nào mang
+`realization` — top-level hay lồng trong `item`/`patch`/`new_item` của
+create/update/supersede — không phân biệt nguồn (LLM hay tool caller). Cột
+DB luôn mặc định `agreed` và không có đường ghi nào khác; giá trị THẬT được
+`spec_get` tính lại từ đầu ở mỗi lần đọc (`_realization_projection` trong
+`spec_service.py`), không đọc từ cột.
+
+Ba điều kiện, cả ba máy kiểm được, ĐỦ để thành `built`:
+
+```
+1. có ít nhất một spec_anchor với relation='implements'
+2. anchor đó GIẢI ĐƯỢC trong repo CHÍNH hiện tại (anchor_resolves trong
+   spec_anchor.py -- luôn đọc working tree đã checkout, KHÔNG phải worktree
+   executor đang ngồi)
+3. có ít nhất một spec_task_link relation='implements' mà task đó
+   status='done'
+```
+
+Thiếu điều kiện nào thì dừng kiểm ngay ở đó và trả `agreed` — không kiểm tiếp
+các điều kiện sau, để `why` không bao giờ báo sai lý do (ví dụ báo "task chưa
+done" trong khi thực ra chưa có anchor nào). Theo spec_item 78397775: mọi kết
+quả dẫn xuất phải mang `why` + `next` NGAY TRONG CÙNG PAYLOAD:
+
+```json
+"realization": {
+  "state": "agreed",
+  "why": "chưa có anchor relation='implements' nào",
+  "next": "land code rồi neo bằng spec_write (op='anchor', relation='implements')"
+}
+```
+
+**Truy vấn backlog** (điều phối tự chọn việc không cần người nói):
+
+```
+backlog = spec_item active + chưa built
+xong    = không còn item nào như vậy
+```
+
+Qua `spec_get`, hai pseudo-field trong `filter` (không phải cột SQL, lọc sau
+khi dẫn xuất): `filter.backlog: true` (active + chưa built, tương đương
+truy vấn backlog ở trên) và `filter.realization: "agreed"|"built"` (lọc trực
+tiếp theo trạng thái đã tính). Mỗi item trả về từ `spec_get`/`spec_write`
+luôn kèm khối `realization` — không cần filter riêng mới thấy được.
+
+**Đo trên dữ liệu thật (2026-08-05, `_realization_projection` chạy qua
+`spec_get` trên DB thật, không phải giả lập):** 14 spec_item project
+`agenticmatix` được tạo ngày đó → **13 `agreed`, 1 `built`**. Item `built`
+duy nhất là "Hợp đồng mô tả tool" (neo `describe_problems` trong
+`tool_argument_validator.py`, liên kết task CTV2-1392 đã `done`). 13 item
+còn lại đều `agreed` — không phải vì thiếu anchor (một số đã có anchor
+`implements` giải được) mà vì **task `implements` liên kết vẫn `todo`**,
+đúng điều kiện 3 chưa thoả. Số liệu này KHÁC giả định ban đầu lúc viết task
+CTV2-1395 (ước lượng "4 agreed" tức ngầm định phần lớn đã `built`) — số thật
+thấp hơn nhiều vì phần lớn task hiện thực hoá các spec_item đó (CTV2-1390,
+1391, 1393, 1394, 1396, 1397) chưa `done`. Đây không phải lỗi cơ chế: đúng là
+mục đích của trục này — lộ ra chính xác cái gì mới CHỐT chứ chưa THÀNH CODE,
+kể cả khi con số đó khó nhìn hơn dự kiến.
+
 ## Phát hiện trùng và xung đột
 
 Luồng khi có ý tưởng chức năng mới — thay thế việc "nhờ agent đọc spec":
@@ -393,6 +468,7 @@ Nguyên tắc: **LLM soạn và phán đoán; code kiểm tra, tính toán, và 
 | Việc | Ai làm |
 |---|---|
 | Gắn cờ spec lỗi thời khi commit | Code |
+| Dẫn xuất `realization` (agreed/built) của spec_item | Code |
 | Chấm `completeness` của impl_design | Code |
 | Kiểm tra quy tắc 100% của WBS | Code |
 | Sinh mã WBS `1.2.3`, rollup tiến độ | Code / SQL |
@@ -505,6 +581,7 @@ Xếp sao cho thứ rẻ và chặn cửa đi trước:
    1.3  Neo + cơ chế mất hiệu lực       2.3  Thí nghiệm đối chứng: đo vòng
         [xong — CTV2-1342]                  trước/sau khi có impl_design
    1.4  spec_search (cần 0.2)
+   1.5  Trục THỰC HOÁ [xong — CTV2-1395]
 
 3. Khung nhìn việc
    3.1  pm_wbs_node + quy tắc 100%

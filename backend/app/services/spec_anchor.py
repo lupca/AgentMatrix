@@ -243,6 +243,19 @@ def compute_anchor_sha(
     return hash_symbol_source(source) if source is not None else None
 
 
+def anchor_resolves(db: Session | None, repo: str, path: str, symbol: str) -> bool:
+    """Whether an anchor's file/symbol exists in the current tree of the main repo.
+
+    Used by the realization projection (CTV2-1395, condition 2: "neo do GIAI
+    DUOC") to decide agreed vs. built. This always reads the checked-out
+    working tree (``commit_sha=None``), never a worktree branch -- realization
+    answers "does this exist in the repo now", the same question
+    ``compute_anchor_sha`` answers for a fresh anchor write.
+    """
+    repo_root = resolve_repo_root(db, repo)
+    return compute_anchor_sha(repo_root, path, symbol) is not None
+
+
 def _diff_range(commit_sha: str) -> tuple[str, str]:
     """The (before, after) revisions to diff for one commit event.
 

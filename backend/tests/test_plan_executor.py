@@ -168,3 +168,148 @@ def test_plan_and_critic_announce_completion(db_session, tmp_path):
     assert "spec_clarity" in source
     assert "open_questions" in source
     assert "verdict" in source
+
+def test_plan_step_releases_transaction_before_semantic_search(db_session, tmp_path):
+    """CTV2-1389: the read transaction opened by db.get(Agent,...) and
+    build_project_context must be committed before asyncio.run enters
+    generate_spec_plan -- semantic_search shells out to code-review-graph
+    and must not inherit an idle-in-transaction session."""
+
+    db_session.add(Project(id="proj-tx1", name="TX Project", repo_root=str(tmp_path)))
+    db_session.add(
+        Agent(id="@tx-planner", name="Planner", role="coordinator", cli="claude", capabilities=["coordinator"])
+    )
+    task = Task(id="TASK-TX-1", project="proj-tx1", title="TX test", status="todo")
+    db_session.add(task)
+    db_session.commit()
+
+    agent = db_session.get(Agent, "@tx-planner")
+    run = plan_executor.create_plan_run(db_session, task, agent=agent, step="plan")
+    run.status = "running"
+    db_session.commit()
+
+    transaction_state_during_search = {}
+
+    async def capture_transaction_state(*args, **kwargs):
+        transaction_state_during_search["in_transaction"] = db_session.in_transaction()
+        return []
+
+    with patch(
+        "app.services.spec_plan_generator.semantic_search",
+        new=AsyncMock(side_effect=capture_transaction_state),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(_valid_plan_payload())),
+    ):
+        plan_executor.execute_plan_run(db_session, run, task, 900)
+
+    assert transaction_state_during_search.get("in_transaction") is False, (
+        "semantic_search was called with an open DB transaction; "
+        "the boundary commit before asyncio.run is missing or ineffective"
+    )
+
+    db_session.refresh(run)
+    assert run.status == "success"
+
+def test_critic_step_releases_transaction_before_llm_call(db_session, tmp_path):
+    """CTV2-1389: same boundary rule for the critic step -- the reads for
+    planner_agent, critic_agent, and build_project_context must be committed
+    before asyncio.run enters criticize_spec_plan."""
+
+    db_session.add(Project(id="proj-tx2", name="TX Project 2", repo_root=str(tmp_path)))
+    db_session.add(
+        Agent(id="@tx-planner2", name="Planner2", role="coordinator", cli="claude", capabilities=["coordinator"])
+    )
+    db_session.add(
+        Agent(id="@tx-critic2", name="Critic2", role="reviewer", cli="claude", capabilities=["reviewer"])
+    )
+    task = Task(
+        id="TASK-TX-2",
+        project="proj-tx2",
+        title="Critic TX test",
+        status="todo",
+        planner="@tx-planner2",
+        plan="Build widget.",
+        acceptance_criteria=["Widget renders"],
+        evidence=[{
+            "fact": "Widget module exists", "source_type": "file",
+            "source": "backend/app/widget.py:1", "result": "module exists",
+        }],
+        risk="low",
+        spec_clarity="high",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    critic_agent = db_session.get(Agent, "@tx-critic2")
+    run = plan_executor.create_plan_run(db_session, task, agent=critic_agent, step="critic")
+    run.status = "running"
+    db_session.commit()
+
+    transaction_state_during_llm = {}
+
+    def fake_complete(agent, messages, *args, **kwargs):
+        transaction_state_during_llm["in_transaction"] = db_session.in_transaction()
+        on_start = kwargs.get("on_start")
+        if on_start is not None:
+            on_start(123456)
+        return _response({
+            "schema_version": "1.0",
+            "verdict": "accept",
+            "findings": [],
+            "summary": "Plan is sound.",
+        })
+
+    with patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(side_effect=fake_complete),
+    ):
+        plan_executor.execute_plan_run(db_session, run, task, 900)
+
+    assert transaction_state_during_llm.get("in_transaction") is False, (
+        "critic LLM call was entered with an open DB transaction; "
+        "the boundary commit before asyncio.run is missing or ineffective"
+    )
+
+    db_session.refresh(run)
+    assert run.status == "success"
+
+def test_planner_persists_task_after_boundary_commit_expires_orm_objects(
+    db_session, tmp_path
+):
+    """CTV2-1389: after the boundary commit, expire_on_commit=True invalidates
+    all cached ORM state.  The planner must still write the plan to the task
+    and mark the run successful -- it must refresh/reload objects rather than
+    relying on stale in-memory attributes."""
+
+    db_session.add(Project(id="proj-tx3", name="TX Project 3", repo_root=str(tmp_path)))
+    db_session.add(
+        Agent(id="@tx-planner3", name="Planner3", role="coordinator", cli="claude", capabilities=["coordinator"])
+    )
+    task = Task(id="TASK-TX-3", project="proj-tx3", title="Expire test", status="todo")
+    db_session.add(task)
+    db_session.commit()
+
+    agent = db_session.get(Agent, "@tx-planner3")
+    run = plan_executor.create_plan_run(db_session, task, agent=agent, step="plan")
+    run.status = "running"
+    db_session.commit()
+
+    with patch(
+        "app.services.spec_plan_generator.semantic_search", new=AsyncMock(return_value=[]),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(return_value=_response(_valid_plan_payload(
+            plan="Refreshed plan after expiry.",
+            acceptance_criteria=["Fresh criterion"],
+        ))),
+    ):
+        plan_executor.execute_plan_run(db_session, run, task, 900)
+
+    db_session.refresh(run)
+    assert run.status == "success"
+
+    updated_task = db_session.get(Task, "TASK-TX-3")
+    assert updated_task.plan == "Refreshed plan after expiry."
+    assert updated_task.planner == "@tx-planner3"
+    assert "Fresh criterion" in (updated_task.acceptance_criteria or [])
