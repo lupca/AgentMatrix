@@ -206,6 +206,7 @@ class Task(ArchivableMixin, Base):
     tests = Column(JSON, default=list)
     flows = Column(JSON, default=list)
     plan = Column(Text, nullable=True)
+    coordinator_notes = Column(Text, nullable=True)
     result_ref = Column(String(100), nullable=True)
     findings = Column(JSON, default=list)
     verdict = Column(String(10), nullable=True)

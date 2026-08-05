@@ -10,6 +10,7 @@ from app.db.models import (
     Agent,
     AgentOutputChunk,
     AgentRun,
+    AuditLog,
     GateRecord,
     Project,
     Session as SessionModel,
@@ -881,6 +882,17 @@ class TaskHandlersMixin:
         actor = f"chat:{session_id or 'anonymous'}"
         service = TaskOrchestrationService(self.db)
 
+        # coordinator_notes (CTV2-1397) is a coordinator-only column that the
+        # planner reads but write_spec_plan never overwrites -- it does not
+        # belong in state_machine.update_task_fields's generic patch
+        # whitelist (that whitelist covers fields any actor at any status may
+        # touch; coordinator_notes has its own, narrower rule: never touched
+        # by the planner's write path). Handle it here instead so a plan run
+        # in flight can't silently clobber it -- that was the original bug.
+        has_coordinator_notes = 'coordinator_notes' in patch
+        coordinator_notes_value = patch.pop('coordinator_notes', None)
+        wrote_plan_field = 'plan' in patch
+
         try:
             for dep_id in add_deps:
                 service.add_dependency(
@@ -897,6 +909,21 @@ class TaskHandlersMixin:
                 if patch
                 else self.db.get(Task, task_id)
             )
+            if task is None:
+                task = self.db.get(Task, task_id)
+            if has_coordinator_notes and task is not None:
+                task.coordinator_notes = coordinator_notes_value
+                task.updated_at = datetime.now(timezone.utc)
+                self.db.add(
+                    AuditLog(
+                        task_id=task.id,
+                        action='update_task_coordinator_notes',
+                        actor=actor,
+                        details={'coordinator_notes': coordinator_notes_value},
+                    )
+                )
+                self.db.commit()
+                self.db.refresh(task)
         except OrchestrationError as exc:
             return {'error': str(exc)}
         if task is None:
@@ -908,16 +935,46 @@ class TaskHandlersMixin:
             .filter(TaskDependency.task_id == task_id)
             .all()
         ]
-        return {
+        response: dict[str, Any] = {
             'action': 'updated',
             'task_id': task.id,
             'plan': task.plan,
+            'coordinator_notes': task.coordinator_notes,
             'acceptance_criteria': task.acceptance_criteria,
             'priority': task.priority,
             'tags': task.tags,
             'raw_input': task.raw_input,
             'depends_on': depends_on,
         }
+
+        warnings: list[str] = []
+        if wrote_plan_field:
+            warnings.append(
+                "'plan' is planner output -- write_spec_plan overwrites it on the "
+                "next run. If this was a reply/decision for the planner to read, "
+                "put it in 'coordinator_notes' instead."
+            )
+        if has_coordinator_notes:
+            active_run = (
+                self.db.query(AgentRun)
+                .filter(
+                    AgentRun.task_id == task_id,
+                    AgentRun.status.in_(['queued', 'running']),
+                    AgentRun.idempotency_key.like('planner:%'),
+                )
+                .order_by(AgentRun.queued_at.desc())
+                .first()
+            )
+            if active_run is not None:
+                started = active_run.started_at or active_run.queued_at
+                warnings.append(
+                    f"plan run {active_run.id} đang chạy, nó khởi động lúc {started} "
+                    "nên sẽ KHÔNG đọc thay đổi này. Chờ run xong rồi chạy lại "
+                    "generate_spec_plan."
+                )
+        if warnings:
+            response['warnings'] = warnings
+        return response
 
     async def _handle_get_status(self, args: str, session_id: str) -> dict:
         if not self.db:

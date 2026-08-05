@@ -1099,16 +1099,22 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             name="update_task",
             description=(
                 "Use this to correct or extend a task's own content -- "
-                "raw_input, plan, acceptance_criteria, priority, tags, or "
-                "dependencies -- while it sits at whatever status it's "
-                "already at. This is not manage_project, which edits the "
-                "project the task lives in, not the task itself; also, "
-                "update_task never changes task status -- use dispatch_task, "
-                "record_verdict, or approve_gate for status transitions. No "
-                "status precondition, but the task id must exist. If the patch "
-                "is rejected (e.g. a dependency cycle), fix the patch content "
-                "and call update_task again -- there's no separate recovery "
-                "tool."
+                "raw_input, plan, coordinator_notes, acceptance_criteria, "
+                "priority, tags, or dependencies -- while it sits at whatever "
+                "status it's already at. This is not manage_project, which "
+                "edits the project the task lives in, not the task itself; "
+                "also, update_task never changes task status -- use "
+                "dispatch_task, record_verdict, or approve_gate for status "
+                "transitions. No status precondition, but the task id must "
+                "exist. If the patch is rejected (e.g. a dependency cycle), "
+                "fix the patch content and call update_task again -- there's "
+                "no separate recovery tool. Prefer coordinator_notes over "
+                "plan for a coordinator reply/decision meant for the planner "
+                "to read: plan is planner OUTPUT and generate_spec_plan's "
+                "write_spec_plan overwrites it wholesale on the next run, "
+                "silently discarding anything written there in the meantime; "
+                "coordinator_notes is coordinator-owned and the planner only "
+                "ever reads it."
             ),
             parameters={
                 "type": "object",
@@ -1117,7 +1123,8 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                     "patch": {
                         "type": "object",
                         "description": (
-                            "Fields to update: raw_input (replace semantics), plan, acceptance_criteria, "
+                            "Fields to update: raw_input (replace semantics), plan, "
+                            "coordinator_notes, acceptance_criteria, "
                             "priority, tags. Dependency edits: "
                             "add_depends_on / remove_depends_on (arrays of "
                             "task ids; cycles are rejected)."

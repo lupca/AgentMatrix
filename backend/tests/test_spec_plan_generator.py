@@ -579,7 +579,7 @@ def test_build_prompt_includes_prior_round_task_plan():
     )
     prompt = _build_prompt(task, ["app/auth.py"])
 
-    assert "Prior-round plan and coordinator decisions" in prompt
+    assert "YOUR OWN PRIOR-ROUND PLAN" in prompt
     assert "task.plan" in prompt
     assert distinctive_constraint in prompt
     assert "Delete the wake path entirely" in prompt
@@ -591,7 +591,44 @@ def test_build_prompt_omits_prior_plan_block_when_task_plan_is_empty():
 
     task = Task(id="T-PLAN-2", project="p1", title="No prior plan")
     prompt = _build_prompt(task, [])
-    assert "Prior-round plan" not in prompt
+    assert "YOUR OWN PRIOR-ROUND PLAN" not in prompt
+
+
+def test_build_prompt_labels_plan_and_coordinator_notes_distinctly():
+    """CTV2-1397: task.plan (planner's own prior output) and
+    task.coordinator_notes (coordinator's command) must be labeled so the
+    planner never mistakes its own draft for an instruction, and vice versa."""
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_prompt
+
+    task = Task(
+        id="T-PLAN-NOTES-1",
+        project="p1",
+        title="Distinguish plan from notes",
+        plan="Prior draft: implement via approach A.",
+        coordinator_notes="Use approach B instead, per the security review.",
+    )
+    prompt = _build_prompt(task, [])
+
+    assert "YOUR OWN PRIOR-ROUND PLAN" in prompt
+    assert "Prior draft: implement via approach A." in prompt
+    assert "COORDINATOR DIRECTION" in prompt
+    assert "COMMAND FROM THE COORDINATOR, NOT YOUR OWN DRAFT" in prompt
+    assert "Use approach B instead, per the security review." in prompt
+    # The coordinator's directive text must appear after (i.e. takes
+    # precedence framing over) the planner's own prior draft.
+    assert prompt.index("YOUR OWN PRIOR-ROUND PLAN") < prompt.index(
+        "COORDINATOR DIRECTION"
+    )
+
+
+def test_build_prompt_omits_coordinator_notes_block_when_empty():
+    from app.db.models import Task
+    from app.services.spec_plan_generator import _build_prompt
+
+    task = Task(id="T-PLAN-NOTES-2", project="p1", title="No notes")
+    prompt = _build_prompt(task, [])
+    assert "COORDINATOR DIRECTION" not in prompt
 
 
 def test_build_prompt_truncates_oversized_task_plan():

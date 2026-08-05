@@ -1392,6 +1392,116 @@ async def test_update_task_edits_plan_and_rejects_status(db_session):
 
 
 @pytest.mark.asyncio
+async def test_update_task_writes_coordinator_notes_without_touching_plan(db_session):
+    """CTV2-1397: coordinator_notes is a coordinator-owned column, distinct
+    from plan (planner output)."""
+    from app.db.models import Project, Task
+
+    db_session.add(Project(id="proj-notes", name="Notes Project"))
+    db_session.add(
+        Task(
+            id="TASK-401",
+            project="proj-notes",
+            title="Patchable",
+            status="todo",
+            plan="Planner's draft plan",
+        )
+    )
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    result = await router.execute_tool(
+        "update_task",
+        {
+            "task_id": "TASK-401",
+            "patch": {"coordinator_notes": "Use approach B, per security review."},
+        },
+        "session-1",
+    )
+
+    assert result["action"] == "updated"
+    assert result["coordinator_notes"] == "Use approach B, per security review."
+    assert result["plan"] == "Planner's draft plan"
+
+    task = db_session.query(Task).filter(Task.id == "TASK-401").first()
+    assert task.coordinator_notes == "Use approach B, per security review."
+    assert task.plan == "Planner's draft plan"
+
+
+@pytest.mark.asyncio
+async def test_update_task_warns_writing_plan_field_directly(db_session):
+    from app.db.models import Project, Task
+
+    db_session.add(Project(id="proj-warn", name="Warn Project"))
+    db_session.add(Task(id="TASK-402", project="proj-warn", title="T", status="todo"))
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    result = await router.execute_tool(
+        "update_task",
+        {"task_id": "TASK-402", "patch": {"plan": "coordinator's reply"}},
+        "session-1",
+    )
+
+    assert result["action"] == "updated"
+    assert any("coordinator_notes" in w for w in result.get("warnings", []))
+
+
+@pytest.mark.asyncio
+async def test_update_task_warns_but_succeeds_when_plan_run_in_flight(db_session):
+    """CTV2-1397: writing coordinator_notes while a plan run is queued/running
+    must succeed (no hard block -- a stuck run must not wedge the
+    coordinator) but must surface a warning naming the run and its start
+    time, since that run will not read this write."""
+    from datetime import datetime, timezone
+
+    from app.db.models import Agent, AgentRun, Project, Task
+
+    db_session.add(Project(id="proj-run", name="Run Project"))
+    db_session.add(Task(id="TASK-403", project="proj-run", title="T", status="todo"))
+    db_session.add(
+        Agent(
+            id="@planner",
+            name="Planner",
+            role="executor",
+            cli="claude",
+            agent_type="cli",
+        )
+    )
+    db_session.commit()
+
+    started = datetime(2026, 8, 5, 9, 44, 57, tzinfo=timezone.utc)
+    run = AgentRun(
+        id="run-plan-1",
+        task_id="TASK-403",
+        agent_id="@planner",
+        cli="claude",
+        command="echo hi",
+        kind="execute",
+        status="running",
+        started_at=started,
+        idempotency_key="planner:TASK-403:execute:abcdef0123456789",
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    router = CommandRouter(db_session)
+    result = await router.execute_tool(
+        "update_task",
+        {"task_id": "TASK-403", "patch": {"coordinator_notes": "New direction"}},
+        "session-1",
+    )
+
+    assert result["action"] == "updated"
+    assert result["coordinator_notes"] == "New direction"
+    warnings = result.get("warnings", [])
+    assert any("run-plan-1" in w and "09:44:57" in w for w in warnings)
+
+    task = db_session.query(Task).filter(Task.id == "TASK-403").first()
+    assert task.coordinator_notes == "New direction"
+
+
+@pytest.mark.asyncio
 async def test_get_impact_radius_requires_project_scope(db_session):
     router = CommandRouter(db_session)
     result = await router.execute_tool(

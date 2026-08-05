@@ -1404,6 +1404,44 @@ def test_write_spec_plan_populates_task_and_opens_dispatch_gate(
     assert result.task.status == "dispatched"
 
 
+def test_write_spec_plan_never_overwrites_coordinator_notes(orchestration, db_session):
+    """CTV2-1397 regression: task.plan used to be the only place a
+    coordinator could leave a reply for the planner, and write_spec_plan
+    overwrote the whole cell on every run -- silently discarding a
+    coordinator reply written while a plan run was in flight (observed on
+    UIKI-006: a 09:46:54 update_task was never read by the run that started
+    at 09:44:57, and was wiped by that run's 09:49:23 write_spec_plan).
+    coordinator_notes is coordinator-owned; write_spec_plan must never touch
+    it. This test must go RED if that guarantee is removed."""
+    task = Task(
+        id="SPEC-NOTES-001",
+        project="project",
+        title="Needs a spec",
+        mode="bypass",
+        acceptance_criteria=[],
+        coordinator_notes="Use approach B, per the security review.",
+    )
+    db_session.add(task)
+    db_session.commit()
+
+    updated = orchestration.write_spec_plan(
+        task_id=task.id,
+        actor="@coordinator",
+        acceptance_criteria=["Endpoint returns 200"],
+        **_critic_contract(),
+        plan="1. Add route. 2. Add tests.",
+        files=[],
+        tests=[],
+        risk="low",
+        flows=[],
+        spec_clarity="high",
+        open_questions=[],
+    )
+
+    assert updated.plan == "1. Add route. 2. Add tests."
+    assert updated.coordinator_notes == "Use approach B, per the security review."
+
+
 def test_write_spec_plan_rejects_empty_acceptance_criteria(orchestration, db_session):
     task = Task(
         id="SPEC-002",

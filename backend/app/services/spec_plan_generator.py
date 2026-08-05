@@ -331,16 +331,31 @@ def _build_prompt(
             keep = _PRIOR_PLAN_MAX_CHARS - len(_PRIOR_PLAN_TRUNCATION_NOTICE)
             prior_plan_text = prior_plan_text[: max(0, keep)] + _PRIOR_PLAN_TRUNCATION_NOTICE
         prior_plan_block = (
-            "Prior-round plan and coordinator decisions (from task.plan — this is the "
-            "result the coordinator saved from a previous generate_spec_plan run, "
-            "including any answers to open questions the coordinator placed here via "
-            "update_task). Use it as input: respect stated constraints and coordinator "
-            "answers, do not copy the plan text blindly, and produce a fresh plan that "
-            "reflects these decisions):\n"
+            "=== YOUR OWN PRIOR-ROUND PLAN (from task.plan — this is what YOU "
+            "generated in a previous generate_spec_plan run; treat it as a draft you "
+            "wrote, not an instruction). Use it as background: don't copy it blindly, "
+            "produce a fresh plan that reflects the current input): ===\n"
             f"{prior_plan_text}\n\n"
         )
     else:
         prior_plan_block = ""
+    coordinator_notes_text = (getattr(task, "coordinator_notes", None) or "").strip()
+    if coordinator_notes_text:
+        if len(coordinator_notes_text) > _PRIOR_PLAN_MAX_CHARS:
+            keep = _PRIOR_PLAN_MAX_CHARS - len(_PRIOR_PLAN_TRUNCATION_NOTICE)
+            coordinator_notes_text = (
+                coordinator_notes_text[: max(0, keep)] + _PRIOR_PLAN_TRUNCATION_NOTICE
+            )
+        coordinator_notes_block = (
+            "=== COORDINATOR DIRECTION (from task.coordinator_notes) — THIS IS A "
+            "COMMAND FROM THE COORDINATOR, NOT YOUR OWN DRAFT. It may answer open "
+            "questions, override earlier decisions, or add new constraints. It "
+            "takes precedence over your own prior-round plan above wherever they "
+            "conflict: ===\n"
+            f"{coordinator_notes_text}\n\n"
+        )
+    else:
+        coordinator_notes_block = ""
     project_id_json = json.dumps(task.project, ensure_ascii=False)
     return (
         "You are a software spec/plan generator for a task-coordination system.\n"
@@ -349,6 +364,7 @@ def _build_prompt(
         f"{details_block}"
         f"{context_block}"
         f"{prior_plan_block}"
+        f"{coordinator_notes_block}"
         f"{warning_block}"
         "Bạn đang đứng TRONG repo của project. Hãy ĐỌC (read-only, không sửa gì) "
         "các file liên quan tới task — bắt đầu từ README/docs/entry points rồi "
