@@ -995,15 +995,14 @@ class TaskHandlersMixin:
             task_id = gate_rec.task_id
         except ValueError:
             task_id = raw_id
-            pending = (
-                self.db.query(GateRecord)
-                .filter(
-                    GateRecord.task_id == task_id,
-                    GateRecord.status == "pending",
-                )
-                .order_by(GateRecord.id.desc())
-                .first()
-            )
+            # Must use the SAME "pending and childless" rule as `_pending_gate`
+            # and `derive_approval_hold`: the ledger is append-only, so a
+            # decided gate's root row still says `pending`. Picking the newest
+            # `pending` row without that filter lands on a gate that was
+            # already decided, and `decide_gate` then answers "was already
+            # approved" while a genuinely open gate sits on the same task --
+            # 11 live tasks were in exactly that state (CTV2-1408).
+            pending = self._pending_gate(task_id)
             if pending is None:
                 return {'error': f'No pending gate found for task {task_id}'}
             gate_record_id = pending.id

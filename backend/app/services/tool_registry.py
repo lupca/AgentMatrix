@@ -302,13 +302,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
                 "- agent_runs (id, task_id, agent_id, kind [execute, review], status [queued, running, success, failed, cancelled], attempt)\n"
                 "- review_cycles (id, task_id, task_round_id, reviewer_id, reviewer_agent_run_id, status [requested, running, submitted, pass, changes, abandoned], verdict, source_gate_record_id, requested_at, submitted_at, completed_at) — one row per review pass over one task_round; the queryable home for verdicts (gate_records.input_payload used to be the only place this lived)\n"
                 "- review_findings (id, review_cycle_id, severity, title, detail, status [open, fixed, waived], waived_reason) — one row per reviewer finding; waived rows always carry waived_reason\n"
+                "- gate_records (id, task_id, gate_type, status, actor, mode, executor, reviewer, parent_id, created_at) — APPEND-ONLY: the original row keeps status='pending' FOREVER, the decision is a CHILD row carrying parent_id. Filtering on status='pending' therefore returns gates decided long ago (650 rows vs 8 truly open, measured). Same trap in admin_gate_records.\n"
+                "- open_gates (scope [task, admin], gate_record_id, task_id, gate_type, actor, mode, executor, reviewer, created_at, project, task_status, moot) — USE THIS to find gates that are genuinely undecided (pending with no decision child, task + admin gates together). gate_record_id is already in the form approve_gate takes ('admin:<id>' for admin gates); add WHERE NOT moot to drop gates on archived/done/cancelled tasks.\n"
                 "- knowledge_items (id, title, category, project, author, content)\n"
                 "- audit_log (id, task_id, action, actor, created_at)\n"
                 "- tool_metrics (id, tool, source, task_id, ok, cache_hit, duration_ms, result_count, bytes_out, error, payload JSON, created_at) — telemetry for graph/ocr/review tooling\n"
                 "- settings (key, value)\n\n"
                 "Examples:\n"
                 "SELECT project, count(*) FROM tasks WHERE status='dispatched' GROUP BY project\n"
-                "SELECT id, roles, capabilities_array FROM agents_view WHERE 'executor' = ANY(roles)"
+                "SELECT id, roles, capabilities_array FROM agents_view WHERE 'executor' = ANY(roles)\n"
+                "SELECT gate_record_id, task_id, gate_type, created_at FROM open_gates WHERE NOT moot ORDER BY created_at"
             ),
             parameters={
                 "type": "object",

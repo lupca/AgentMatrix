@@ -44,7 +44,7 @@ Envelope kết quả: `{ok, data, error{code,message}, next, pending_approvals?}
 |---|---|
 | `manage_project` / `manage_agent` | create/update/archive/disable qua admin gate. Update nhận `{id, patch}`. API agent đòi api_key khi approve create. Agent roles: `executor`/`reviewer`/`coordinator`/`spec_plan` — truyền `role` (singular, legacy) hoặc `roles` (array, preferred). Capabilities: ~50 giá trị ENUM (code, backend, review, architecture...) — xem `capability_types` table. |
 | `update_settings` | `{key, value}` trong SETTINGS_WHITELIST → admin gate. |
-| `query_db` | Raw SQL read-only (1 câu SELECT/WITH), chạy bằng `ct_readonly_user`, cap 500 rows + statement timeout. Bảng mới phải được GRANT (đã có default privileges). |
+| `query_db` | Raw SQL read-only (1 câu SELECT/WITH), chạy bằng `ct_readonly_user`, cap 500 rows + statement timeout. Bảng mới phải được GRANT (đã có default privileges). Schema summary trong description là mặt tiền chống bẫy: nó nói `gate_records` append-only (`status='pending'` KHÔNG có nghĩa chưa quyết) và chỉ sang view `open_gates` — xem 02. View mới phải GRANT tường minh cho `ct_readonly_user` như 039/041/058; view do superuser `ct` sở hữu nên chạy bằng quyền owner, vượt qua column-grant của bảng gốc → chỉ liệt kê cột thật sự muốn lộ, không `SELECT *`. |
 | `get_stats` | Token/cost/run stats từ LLMUsage, cộng tỷ lệ plan bị critic trả và số vòng execute thừa của cohort trước/sau critic. |
 | (bảng `tool_metrics`) | Telemetry công cụ tiết-kiệm-token: graph calls + review results (findings, AC pass/fail, tests). Truy vấn qua query_db. Reviewer được prompt chạy `.claude/review-toolchain.md` (ocr...) — thiếu binary = ghi chú và đi tiếp, không phải lỗi. |
 | `suggest_agents` | AgentSuggester — xếp hạng theo capabilities/success_rate. |

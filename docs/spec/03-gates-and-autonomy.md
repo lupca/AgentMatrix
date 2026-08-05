@@ -163,6 +163,12 @@ verdict approved tồn tại — vì vậy KHÔNG được emit event giữa ch�
 
 - Args: `gate_record_id` (hoặc `task_id` → gate pending của task; dạng
   `admin:<id>` cho admin gate) + **`decision`: approved | rejected**.
+- Fallback theo `task_id` resolve bằng ĐÚNG luật pending-and-childless của
+  `_pending_gate`/`derive_approval_hold` (CTV2-1408). Trước đó nó lấy row
+  `status='pending'` mới nhất — mà sổ append-only nên root của gate ĐÃ quyết
+  vẫn ghi `pending`, kết quả là trả "was already approved" trong khi task còn
+  gate thật sự mở (11 task đang dính lúc phát hiện). Muốn tra id chắc chắn
+  đúng: `query_db` trên view `open_gates` (xem 02).
 - LỊCH SỬ ĐEN (CTV2-233): schema từng KHÔNG có `decision` — mọi reject bị ghi
   thành approve. Đã sửa; nếu thấy hành vi lạ quanh reject, nghi chỗ này trước.
 - Approve dispatch/review_order = REPLAY payload đã ghi trong gate → tạo AgentRun.

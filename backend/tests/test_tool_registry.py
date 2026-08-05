@@ -195,6 +195,21 @@ def test_update_settings_description_documents_autonomy_and_rejects_default_mode
     assert 'plan-only' in spec.description
 
 
+def test_query_db_schema_summary_warns_about_append_only_gate_ledger():
+    """CTV2-1408: the schema summary is the only place a coordinator reads
+    before writing gate SQL, so the append-only trap has to be stated THERE.
+    `WHERE status='pending'` on gate_records returned 650 rows against 8 truly
+    open gates on the live DB -- two coordinators lost a day to it."""
+    spec = TOOL_REGISTRY['query_db']
+    assert 'gate_records' in spec.description
+    assert 'APPEND-ONLY' in spec.description
+    assert 'parent_id' in spec.description
+    # ...and the summary must point at the view that answers the question,
+    # not just warn about the query that does not.
+    assert 'open_gates' in spec.description
+    assert 'moot' in spec.description
+
+
 def test_attach_result_description_has_situation_confusable_precondition_recovery():
     spec = TOOL_REGISTRY['attach_result']
     # (a) caller-situation trigger

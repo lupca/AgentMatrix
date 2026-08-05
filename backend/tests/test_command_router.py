@@ -1071,6 +1071,86 @@ async def test_get_status_reports_only_unresolved_pending_gate(db_session):
 
 
 @pytest.mark.asyncio
+async def test_approve_gate_by_task_id_skips_already_decided_gate_root(db_session):
+    """CTV2-1408: `approve_gate {task_id}` used to pick the newest row whose
+    status said `pending` -- but the ledger is append-only, so a decided gate's
+    ROOT row says `pending` forever.  When a task carried a newer decided gate
+    alongside an older open one (11 live tasks did), the fallback resolved the
+    decided one and answered "was already approved" while the real gate stayed
+    shut.  It must use the same pending-and-childless rule as `_pending_gate`.
+    """
+    from app.db.models import Agent, GateRecord, Task
+
+    db_session.add(Agent(id="@stale-agent", name="Stale Agent", role="executor", cli="codex"))
+    db_session.add(
+        Task(
+            id="STALE-GATE-1",
+            project="missing-stale-project",
+            title="Stale gate task",
+            status="todo",
+            mode="supervised",
+            acceptance_criteria=["Tests pass"],
+        )
+    )
+    db_session.commit()
+    router = CommandRouter(db_session)
+
+    with patch(
+        "app.services.task_orchestration.build_dispatch_command",
+        return_value=("codex exec task", "/tmp", "codex"),
+    ):
+        open_gate = await router.execute_tool(
+            "dispatch_task",
+            {"task_id": "STALE-GATE-1", "executor": "@stale-agent"},
+            "session-1",
+        )
+
+    # A NEWER gate root that was already decided -- its child carries the
+    # decision, the root keeps saying `pending`.
+    decided_root = GateRecord(
+        task_id="STALE-GATE-1",
+        gate_type="dispatch",
+        status="pending",
+        actor="system:test",
+        mode="supervised",
+        idempotency_key="stale-root",
+        input_hash="hash-stale-root",
+    )
+    db_session.add(decided_root)
+    db_session.commit()
+    db_session.add(
+        GateRecord(
+            task_id="STALE-GATE-1",
+            gate_type="dispatch",
+            status="rejected",
+            actor="system:test",
+            mode="supervised",
+            idempotency_key="stale-decision",
+            input_hash="hash-stale-decision",
+            parent_id=decided_root.id,
+        )
+    )
+    db_session.commit()
+    assert decided_root.id > open_gate["gate_record_id"]
+
+    with patch("app.workers.agent_runner.run_agent.send"):
+        approval = await router.execute_tool(
+            "approve_gate",
+            {"task_id": "STALE-GATE-1", "decision": "approved"},
+            "session-1",
+        )
+
+    assert "error" not in approval, approval
+    assert approval["decision"] == "approved"
+    decision_row = (
+        db_session.query(GateRecord)
+        .filter(GateRecord.parent_id == open_gate["gate_record_id"])
+        .one()
+    )
+    assert decision_row.status == "approved"
+
+
+@pytest.mark.asyncio
 async def test_query_db_via_tool_call_matches_slash_command(db_session):
     from app.db.models import Project, Task
 

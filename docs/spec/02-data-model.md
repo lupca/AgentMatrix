@@ -122,6 +122,19 @@ finding, `query_db` là mặt đọc tổng quát.
 
 - Append-only (trigger chặn UPDATE). Quyết định = row con `parent_id` → parent.
 - Gate mở = `status='pending'` AND childless AND task chưa archive.
+- **View `open_gates`** (migration 058) là câu trả lời chính thức cho "gate nào
+  chưa quyết", gộp cả hai sổ: `scope` (task|admin), `gate_record_id` **đã ở đúng
+  dạng `approve_gate` nhận** (`admin:<id>` cho admin gate), `moot` = task đã
+  archive/done/cancelled. Lý do phải có view: đo trên DB thật 06/08/2026 —
+  `WHERE status='pending'` trả **650** row task-gate và **94** row admin-gate,
+  trong khi thật sự chưa quyết chỉ **25** (và còn sống: **8**) và **0**. Câu SQL
+  "hiển nhiên" sai 98–100%, nên hai dòng cảnh báo được đưa thẳng vào schema
+  summary của `query_db` — chỗ duy nhất coordinator đọc ngay trước khi viết SQL.
+- Mọi đường code hỏi "task này còn gate mở không" PHẢI dùng luật
+  pending-and-childless: `derive_approval_hold`, `_pending_gate`, và nhánh
+  fallback `task_id` của `approve_gate` (CTV2-1408 — nhánh này từng thiếu, lấy
+  nhầm gate đã quyết rồi báo "was already approved" trong khi gate thật vẫn mở;
+  11 task đang dính lúc phát hiện).
 - `gate_type`: dispatch | execution | review_order | review_result | verdict. Admin:
   `<entity>/<action>` (agents/update, settings/update, ...).
 - Row `review_result/rejected.input_payload.error_details` lưu mã lỗi, path và
