@@ -2246,6 +2246,25 @@ class TaskStateMachine:
             or 0
         )
 
+    def review_gate_count(self, task_id: str, *, round_: int) -> int:
+        """Count review_order requests already made for this task.
+
+        Feeds the attempt number in the driver's idempotency key so a retry
+        after a resolved attempt does not reuse a spent key -- see
+        `_advance_awaiting_review`.  Counts request rows only (``parent_id IS
+        NULL``); decision children are not attempts.
+        """
+        return int(
+            self.db.query(func.count(GateRecord.id))
+            .filter(
+                GateRecord.task_id == task_id,
+                GateRecord.gate_type == "review_order",
+                GateRecord.parent_id.is_(None),
+            )
+            .scalar()
+            or 0
+        )
+
     def add_dependency(
         self,
         *,

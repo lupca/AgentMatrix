@@ -535,3 +535,39 @@ def test_review_request_is_idempotent_when_only_the_score_text_moves(
     )
 
     assert second.gate_record.id == first.gate_record.id
+
+
+
+def test_review_retry_after_a_resolved_attempt_gets_a_fresh_key(service, db_session):
+    """A retry must not reuse a spent idempotency key.
+
+    `(task_id, idempotency_key)` is UNIQUE, so a key is spent the moment its
+    request is stored and no hash behind it can ever be rewritten.  CTV2-1389
+    looped on exactly that: the driver reused one key per (task, round,
+    reviewer), the stored hash stopped matching, and every pass raised the
+    conflict, escalated, was cleared, and escalated again -- while the task held
+    a finished commit waiting to be reviewed.
+    """
+
+    task = _add_task(
+        db_session,
+        "IDEM-002",
+        status="awaiting-review",
+        executor="@executor",
+        result_ref="base..head",
+        current_gate="review_order",
+        mode="supervised",
+    )
+
+    assert service.review_gate_count(task.id, round_=0) == 0
+
+    service.request_review(
+        task_id=task.id,
+        reviewer="@reviewer",
+        actor="system:orchestration-driver",
+        idempotency_key="advance:IDEM-002:review:r0:a0:reviewer:@reviewer",
+        selection_reason="matcher pick",
+    )
+
+    # The counter moved, so the next attempt cannot collide with the first.
+    assert service.review_gate_count(task.id, round_=0) == 1

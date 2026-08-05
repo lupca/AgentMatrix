@@ -441,6 +441,14 @@ class TaskOrchestrationService:
     def changes_round_count(self, task_id: str) -> int:
         return self.state_machine.changes_round_count(task_id)
 
+    def review_gate_count(self, task_id: str, *, round_: int) -> int:
+        """How many review_order requests this task already made this round.
+
+        The orchestration driver uses this to give each retry its own
+        idempotency key -- see the comment at its call site.
+        """
+        return self.state_machine.review_gate_count(task_id, round_=round_)
+
     def add_dependency(
         self,
         *,

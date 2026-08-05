@@ -459,16 +459,29 @@ def _advance_awaiting_review(
     )
 
     round_ = service.changes_round_count(task.id)
+    # Each attempt gets its own key.
+    #
+    # `(task_id, idempotency_key)` is UNIQUE, so a key is spent the moment its
+    # request is stored -- nothing can rewrite the hash behind it.  Keying only
+    # on task+round+reviewer meant a retry after a failed attempt reused a spent
+    # key and raised IdempotencyConflictError forever.
+    #
+    # CTV2-1389, 2026-08-05: the stored hash covered `selection_reason`, which
+    # embeds live `success_rate` telemetry.  Once those numbers moved, every
+    # driver pass hit the conflict, escalated, was cleared by a human, and
+    # escalated again on the next pass -- a closed loop, while the task held a
+    # finished commit waiting to be reviewed.
+    #
+    # A retry after a resolved attempt IS a different request, so it says so.
+    attempt = service.review_gate_count(task.id, round_=round_)
     try:
-        # Reviewer identity is part of the idempotency input.  Replacing a
-        # matcher suggestion in the same review round is valid; using only
-        # task+round made that legal request collide after the first review
-        # gate had already consumed tokens.
         result = service.request_review(
             task_id=task.id,
             reviewer=reviewer,
             actor="system:orchestration-driver",
-            idempotency_key=f"advance:{task.id}:review:r{round_}:reviewer:{reviewer}",
+            idempotency_key=(
+                f"advance:{task.id}:review:r{round_}:a{attempt}:reviewer:{reviewer}"
+            ),
             selection_reason=selection_reason,
         )
     except OrchestrationError as exc:
