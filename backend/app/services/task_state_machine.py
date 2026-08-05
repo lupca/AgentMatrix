@@ -917,6 +917,21 @@ class TaskStateMachine:
             )
             if not decision.allowed and not decision.queue:
                 raise BrakeViolationError(decision.reason or "Safety brake engaged")
+        elif gate_type == "review_order":
+            # A delivered result is still protected by the same budget and
+            # autonomy brakes as an execution dispatch.  Without this check,
+            # a caller could bypass the brake by requesting a reviewer
+            # directly: ``request_review`` creates an AgentRun through this
+            # gate, even though ``check_brakes`` had already said no more
+            # spending was allowed.
+            decision = self.validator.check_brakes(
+                task,
+                for_spawn=True,
+                audit=True,
+                agent_id=payload.get("reviewer"),
+            )
+            if not decision.allowed and not decision.queue:
+                raise BrakeViolationError(decision.reason or "Safety brake engaged")
         if gate_type == "dispatch":
             active_run = (
                 self.db.query(AgentRun)
@@ -1599,6 +1614,19 @@ class TaskStateMachine:
         delivered = bool((task.result_ref or "").strip())
         target = "awaiting-review" if delivered else "todo"
         previous_error = task.error
+        failure_record = (
+            self.db.query(GateRecord)
+            .filter(
+                GateRecord.task_id == task.id,
+                GateRecord.parent_id.is_(None),
+                GateRecord.status == "rejected",
+                GateRecord.gate_type.in_(
+                    ["safety_brake", "execution", "escalation", "dispatch_queue"]
+                ),
+            )
+            .order_by(GateRecord.id.desc())
+            .first()
+        )
         payload = {
             "from_status": "failed",
             "to_status": target,
@@ -1620,6 +1648,7 @@ class TaskStateMachine:
             input_hash=TaskValidator.input_hash(payload),
             payload=payload,
             output_payload={"status": target},
+            parent_id=failure_record.id if failure_record is not None else None,
         )
         self._sync_after_transition(task)
         self.audit(task, record, reason=f"reopened from failed -> {target}")
