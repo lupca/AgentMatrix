@@ -681,3 +681,46 @@ def test_parse_failure_separates_a_cut_stream_from_bad_json(raw, expected):
     detail = _describe_parse_failure(excinfo.value, raw, run_id="run-under-test")
     assert expected in detail
     assert f"raw_len={len(raw)}" in detail
+
+
+def test_prior_art_accepts_structured_spec_item_citations():
+    """A dict citation must not throw away an otherwise-good plan.
+
+    CTV2-1388, 2026-08-05: the planner answered `prior_art` with the shape it
+    had just read from the living spec -- `{"spec_item": "...", "note": "..."}`
+    -- and `strict=True` rejected all five entries, failing a 215-second run
+    whose content was fine.
+    """
+
+    from app.schemas.task import SpecPlanResult
+
+    payload = _valid_payload(
+        prior_art=[
+            {
+                "spec_item": "spec_item:1779ef5f-de15-4b3c-8dd5-c08825b055bf",
+                "note": "GateRecord append-only ledger",
+            },
+            "A plain string still works",
+        ]
+    )
+
+    result = SpecPlanResult.model_validate(payload)
+
+    assert result.prior_art == [
+        "spec_item:1779ef5f-de15-4b3c-8dd5-c08825b055bf — GateRecord append-only ledger",
+        "A plain string still works",
+    ]
+
+
+def test_strictness_still_holds_where_structure_matters():
+    """Only prior_art is lenient; the rest of the contract is unchanged."""
+
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    from app.schemas.task import SpecPlanResult
+
+    with _pytest.raises(ValidationError):
+        SpecPlanResult.model_validate(
+            _valid_payload(acceptance_criteria=[{"text": "not a string"}])
+        )

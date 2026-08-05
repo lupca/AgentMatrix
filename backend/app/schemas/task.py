@@ -9,6 +9,7 @@ from pydantic import (
     StrictInt,
     StrictStr,
     StringConstraints,
+    field_validator,
     model_validator,
 )
 
@@ -69,6 +70,42 @@ class SpecPlanResult(BaseModel):
     risk: Literal["low", "medium", "high"]
     spec_clarity: Literal["high", "medium", "low"]
     open_questions: list[StrictStr]
+
+    @field_validator("prior_art", mode="before")
+    @classmethod
+    def _flatten_prior_art_entries(cls, value: Any) -> Any:
+        """Accept structured prior-art entries, not just prose strings.
+
+        ``prior_art`` is a free-text citation list, but since living specs were
+        wired into the planner (CTV2-1373) the model naturally answers with the
+        shape it just read::
+
+            {"spec_item": "spec_item:1779ef5f-...", "note": "GateRecord is ..."}
+
+        Under ``strict=True`` that failed the whole plan.  CTV2-1388,
+        2026-08-05: five such entries threw away a 215-second planner run whose
+        content was fine -- the only problem was that the citation was a dict
+        instead of a sentence.
+
+        Flattening costs nothing (the field is prose either way) and is
+        deliberately narrow: every other field keeps its strict contract, so a
+        model that invents structure where structure *matters* still fails.
+        """
+
+        if not isinstance(value, list):
+            return value
+        flattened = []
+        for entry in value:
+            if isinstance(entry, dict):
+                parts = [
+                    str(item).strip()
+                    for item in entry.values()
+                    if item is not None and str(item).strip()
+                ]
+                flattened.append(" — ".join(parts))
+            else:
+                flattened.append(entry)
+        return flattened
 
     @model_validator(mode="after")
     def _enforce_plan_contract(self) -> "SpecPlanResult":
