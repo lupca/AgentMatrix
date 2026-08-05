@@ -141,6 +141,38 @@ def test_reopen_sends_an_undelivered_task_back_to_todo(service, db_session):
     assert result.task.current_gate == "dispatch"
 
 
+@pytest.mark.asyncio
+async def test_reopen_handler_returns_a_serializable_payload(service, db_session):
+    """Cover the handler, not just the service.
+
+    The first cut of these tests exercised ``reopen_failed_task`` directly and
+    passed, while the MCP handler still read ``result.record`` (the field is
+    ``gate_record``).  Every real call blew up with an internal_error *after*
+    the transition had already committed -- the task moved, the caller was
+    told it had not.  A green service-level test proved nothing about the path
+    users actually take.
+    """
+
+    from app.services.command_router import CommandRouter
+
+    _add_task(
+        db_session,
+        "REOPEN-005",
+        status="failed",
+        executor="@executor",
+        result_ref="abc123",
+    )
+
+    response = await CommandRouter(db_session)._handle_reopen_task(
+        "REOPEN-005", "test-session"
+    )
+
+    assert "error" not in response
+    assert response["action"] == "reopened"
+    assert response["status"] == "awaiting-review"
+    assert isinstance(response["gate_record_id"], int)
+
+
 def test_reopen_refuses_a_task_that_is_not_failed(service, db_session):
     task = _add_task(db_session, "REOPEN-003", status="dispatched", executor="@executor")
 

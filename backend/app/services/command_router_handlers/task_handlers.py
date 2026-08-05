@@ -696,7 +696,7 @@ class TaskHandlersMixin:
             'action': 'reopened',
             'task_id': task_id,
             'status': task.status,
-            'gate_record_id': result.record.id,
+            'gate_record_id': result.gate_record.id,
             'task': self._task_snapshot(task),
         }
 
