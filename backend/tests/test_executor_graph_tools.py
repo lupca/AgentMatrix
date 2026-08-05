@@ -205,5 +205,55 @@ async def test_executor_graph_tool_persists_metric_to_db(executor_db, monkeypatc
     for row in rows:
         assert row.ok is True
         assert row.task_id == "task-graph-1"
-        assert row.source == "graph_client"
+    # Two layers record the same call on purpose (CTV2-1340): `graph_client`
+    # measures the graph backend, the MCP handler measures who asked for it.
+    # Only the second can answer "did an executor use this?".
+    sources = {row.source for row in rows}
+    assert "graph_client" in sources, sources
+    assert "mcp:executor" in sources, sources
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_research_calls_are_recorded_under_the_tool_the_caller_invoked(
+    executor_db, monkeypatch
+):
+    """CTV2-1340 could not be answered because nothing measured its question.
+
+    `graph_client` records under its own internal names, so a
+    `get_minimal_context` call lands as `semantic_search` -- in the same
+    bucket as the planner's own searches from `spec_plan_generator`. Measured
+    2026-08-06: 172 `semantic_search` rows and no way to attribute a single
+    one. "Do executors use the code graph?" had no instrument, so the task
+    asking it could never close either way.
+
+    The handler now writes its own row, named after the tool the caller
+    actually invoked, with `source` carrying who called.
+    """
+    from app.services import tool_metrics as tool_metrics_mod
+
+    captured = []
+    monkeypatch.setattr(
+        tool_metrics_mod, "record_tool_metric", lambda **kw: captured.append(kw)
+    )
+    monkeypatch.setattr(graph_client, "record_tool_metric", lambda **kw: None)
+    monkeypatch.setattr(graph_client, "MCPClient", lambda **kw: _FakeGraphMCP())
+    graph_client.clear_graph_cache()
+
+    token = issue_token("test-secret", role="executor", task_id="task-graph-1")
+    server = build_server(default_token=token)
+    async with Client(server) as client:
+        await client.call_tool("get_minimal_context", {"query": "graph_client", "limit": 5})
+        await client.call_tool(
+            "get_impact_radius", {"file": "backend/app/services/graph_client.py"}
+        )
+
+    by_tool = {m["tool"]: m for m in captured}
+    assert "get_minimal_context" in by_tool, captured
+    assert "get_impact_radius" in by_tool, captured
+    for metric in by_tool.values():
+        assert metric["ok"] is True
+        assert metric["task_id"] == "task-graph-1"
+        # The discriminator the question needs: a task-scoped session is an
+        # executor, so these rows can never be confused with planner traffic.
+        assert metric["source"] == "mcp:executor"

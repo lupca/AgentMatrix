@@ -36,6 +36,33 @@ def _get_semantic_search():
     return semantic_search
 
 
+def _record_research_call(
+    *, tool: str, task_id: str | None, started: float, ok: bool, error: str | None = None
+) -> None:
+    """One row per research-tool call, named after the tool the caller invoked.
+
+    Without this the question CTV2-1340 exists to answer -- "do executors
+    actually use the code graph?" -- has no instrument.  `graph_client` records
+    under its own internal names, so `get_minimal_context` calls land as
+    `semantic_search` in the same bucket as the planner's own searches
+    (`spec_plan_generator`), and the two cannot be told apart.  Measured
+    2026-08-06: 172 `semantic_search` rows, zero of them attributable.
+
+    `source` carries WHO called: a task-scoped session is an executor, anything
+    else is the coordinator.  That is the whole discriminator the question needs.
+    """
+    from app.services.tool_metrics import record_tool_metric
+
+    record_tool_metric(
+        tool=tool,
+        source="mcp:executor" if task_id else "mcp:coordinator",
+        ok=ok,
+        duration_ms=int((time.monotonic() - started) * 1000),
+        task_id=task_id,
+        error=error,
+    )
+
+
 class ContextHandlersMixin:
     def _research_task_id(self, session_id: str) -> str | None:
         session = self.db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -115,6 +142,8 @@ class ContextHandlersMixin:
         repo_root, error = self._research_repo_root(session_id)
         if error:
             return error
+        started = time.monotonic()
+        task_id = self._research_task_id(session_id)
         try:
             payload = json.loads(args)
             search_fn = _get_semantic_search()
@@ -122,7 +151,6 @@ class ContextHandlersMixin:
                 'raise_on_error': True,
                 'compress_output': True,
             }
-            task_id = self._research_task_id(session_id)
             if task_id:
                 search_kwargs['task_id'] = task_id
             result = await search_fn(
@@ -130,7 +158,14 @@ class ContextHandlersMixin:
                 **search_kwargs,
             )
         except Exception as exc:
+            _record_research_call(
+                tool='get_minimal_context', task_id=task_id, started=started,
+                ok=False, error=str(exc),
+            )
             return self._research_error(exc)
+        _record_research_call(
+            tool='get_minimal_context', task_id=task_id, started=started, ok=True,
+        )
         res = {'status': 'success', 'repo_root': repo_root, 'context': result}
         await self._apply_graph_staleness_check(repo_root, session_id, res)
         return res
@@ -139,6 +174,8 @@ class ContextHandlersMixin:
         repo_root, error = self._research_repo_root(session_id)
         if error:
             return error
+        started = time.monotonic()
+        task_id = self._research_task_id(session_id)
         try:
             try:
                 payload = json.loads(args)
@@ -150,14 +187,20 @@ class ContextHandlersMixin:
                 'raise_on_error': True,
                 'compress_output': True,
             }
-            task_id = self._research_task_id(session_id)
             if task_id:
                 impact_kwargs['task_id'] = task_id
             result = await impact_fn(
                 repo_root, str(payload['file']).strip(), **impact_kwargs
             )
         except Exception as exc:
+            _record_research_call(
+                tool='get_impact_radius', task_id=task_id, started=started,
+                ok=False, error=str(exc),
+            )
             return self._research_error(exc)
+        _record_research_call(
+            tool='get_impact_radius', task_id=task_id, started=started, ok=True,
+        )
         res = {'status': 'success', 'repo_root': repo_root, 'files': result}
         await self._apply_graph_staleness_check(repo_root, session_id, res)
         return res
