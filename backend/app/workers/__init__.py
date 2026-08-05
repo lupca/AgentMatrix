@@ -33,9 +33,13 @@ class _OutboxPollerBootstrap(Middleware):
             outbox_publisher,
             reconcile_orphaned_agent_runs,
         )
+        from app.workers.notification_dispatcher import (
+            notification_dispatcher,
+        )
 
         outbox_publisher.send()
         reconcile_orphaned_agent_runs.send()
+        notification_dispatcher.send()
 
 
 redis_broker.add_middleware(_OutboxPollerBootstrap())

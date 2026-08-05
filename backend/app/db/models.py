@@ -1494,3 +1494,53 @@ class ToolMetric(Base):
     error = Column(Text, nullable=True)
     payload = Column(JSON, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class NotificationDelivery(Base):
+    """Append-only ledger for Telegram notification deliveries (CTV2-1381).
+
+    One row per (task_event → Telegram message) attempt.  The HTTP call to
+    api.telegram.org happens outside any DB transaction: the row is claimed
+    (INSERT + COMMIT), the session released, the send performed, then a
+    second short session writes the outcome.  Telegram failure is recorded
+    here, never propagated to task state.
+    """
+
+    __tablename__ = "notification_deliveries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_id = Column(
+        String(20),
+        ForeignKey("tasks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    task_event_id = Column(
+        Integer,
+        ForeignKey("task_events.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    channel = Column(String(20), nullable=False, default="telegram")
+    chat_id = Column(String(50), nullable=True)
+    correlation_token = Column(
+        String(36),
+        nullable=False,
+        default=lambda: str(uuid.uuid4()),
+        unique=True,
+    )
+    status = Column(String(10), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    last_error = Column(Text, nullable=True)
+    provider_message_id = Column(String(50), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    sent_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'sent', 'failed', 'skipped')",
+            name="ck_notification_deliveries_status",
+        ),
+    )

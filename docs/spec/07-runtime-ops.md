@@ -42,6 +42,28 @@
   task thoát treo qua service chính thống.
 - Watchdog no-progress: xem `03-gates-and-autonomy.md` (bẫy CLI im lặng).
 
+## Telegram notification dispatcher
+
+Actor tự lên lịch `notification_dispatcher` (CTV2-1381), khởi động từ
+`_OutboxPollerBootstrap.after_worker_boot` cùng với outbox_publisher và
+reconcile. Mỗi tick (`NOTIFY_POLL_INTERVAL_MS`, mặc định 5s):
+
+1. **Stale**: events cũ hơn `TELEGRAM_MAX_EVENT_AGE_SECONDS` chưa có delivery →
+   ghi `status='skipped'`.
+2. **Retries**: delivery `failed` có `attempts < TELEGRAM_MAX_ATTEMPTS` → gửi
+   lại, tăng attempts.
+3. **New**: TaskEvent có `event_type ∈ DECISION_EVENT_TYPES` (gate_pending,
+   run_failed, escalated) chưa có delivery row → claim → gửi → ghi outcome.
+
+**Failure policy**: Telegram chết không ảnh hưởng task flow.
+- HTTP call KHÔNG nằm trong MCP request path — chỉ chạy trong Dramatiq worker.
+- KHÔNG giữ DB transaction mở khi gửi: claim → commit → đóng session → HTTP →
+  session mới ghi outcome.
+- Bot token KHÔNG xuất hiện trong `last_error` hay nội dung tin nhắn.
+- `TELEGRAM_NOTIFY_ENABLED=false` hoặc token/chat_id trống → actor no-op.
+- Retry tối đa `TELEGRAM_MAX_ATTEMPTS` (mặc định 3) lần; sau đó row giữ
+  `status='failed'` vĩnh viễn.
+
 ## Phạm vi đo chi phí LLM
 
 - `LLMUsage` của API ghi token/cost do provider API trả về. Với session

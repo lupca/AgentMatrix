@@ -43,6 +43,14 @@ class Settings(BaseSettings):
     MCP_NATIVE_URL: str = "http://localhost:8100/mcp"
     CT_MCP_PORT: int = 8100
 
+    # Telegram notifications (CTV2-1381)
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+    TELEGRAM_NOTIFY_ENABLED: bool = True
+    TELEGRAM_TIMEOUT_SECONDS: int = 10
+    TELEGRAM_MAX_ATTEMPTS: int = 3
+    TELEGRAM_MAX_EVENT_AGE_SECONDS: int = 3600
+
     class Config:
         env_file = ".env"
         case_sensitive = True

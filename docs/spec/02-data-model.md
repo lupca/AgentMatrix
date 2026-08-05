@@ -117,6 +117,25 @@ FK constraint đảm bảo chỉ insert giá trị hợp lệ vào junction tabl
 - `repo_root` bắt buộc để dispatch. `task_prefix`, `next_task_seq` cho id.
 - `context_md` + `context_generated` + quan hệ `project_rules` — xem `06-context-rules.md`.
 
+## NotificationDelivery
+
+Bảng lịch sử gửi thông báo Telegram (CTV2-1381). Mỗi row = một lần gửi cho một
+TaskEvent. Append-only theo nghĩa không sửa task state; chỉ ghi nhận kết quả gửi.
+
+- `task_event_id` UNIQUE FK → `task_events.id` ON DELETE CASCADE: mỗi event
+  chỉ có tối đa một delivery row.
+- `correlation_token` UNIQUE (uuid4): xuất hiện trong nội dung tin nhắn Telegram
+  để đối chiếu tin nhắn ↔ row.
+- `status`: `pending` | `sent` | `failed` | `skipped` (CheckConstraint).
+- `attempts`: số lần đã gửi (0 khi mới claim, tăng mỗi retry).
+- `chat_id` nullable: để mở routing tương lai, hiện tại lấy từ TELEGRAM_CHAT_ID.
+- `sent_at`: NULL khi chưa gửi thành công.
+- `last_error`: mô tả lỗi ngắn gọn, KHÔNG chứa bot token.
+
+Events older than `TELEGRAM_MAX_EVENT_AGE_SECONDS` được ghi `status='skipped'`
+thay vì gửi. Failed deliveries được retry với exponential backoff cho đến khi
+`attempts = TELEGRAM_MAX_ATTEMPTS` (mặc định 3).
+
 ## Session, TaskEvent, OutboxEvent, LLMUsage
 
 - Session: context_level global|project|task; token MCP nào cũng được cấp một
