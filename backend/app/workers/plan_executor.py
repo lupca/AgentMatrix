@@ -145,6 +145,18 @@ def _run_plan_step(
         raise ConfigurationError(f"Planner agent {run.agent_id} no longer exists")
     project_context = build_project_context(db, project, task.files)
 
+    # Close the read transaction the lines above opened before entering a call
+    # that shells out to code-review-graph and then to an LLM.
+    #
+    # `_begin_llm_run` commits (the 6cf5edf fix), but it runs *after*
+    # `await semantic_search(...)` inside generate_spec_plan -- so the reads
+    # here stayed open across the graph subprocess.  That is the same shape
+    # that held a transaction for 653s and hung the MCP server twice on
+    # 2026-08-04; it only stopped being an outage because CTV2-1382 moved this
+    # work into the worker.  Commit before any long call, not just before the
+    # LLM one.
+    db.commit()
+
     result, flows = asyncio.run(
         spec_plan_generator.generate_spec_plan(
             task, repo_root, agent, project_context=project_context, db=db, run=run,
@@ -302,6 +314,10 @@ def _run_critic_step(
 
     plan_from_db = spec_plan_generator.spec_plan_result_from_task(task)
     project_context = build_project_context(db, project, task.files)
+
+    # Same reason as _run_plan_step: release the read transaction before the
+    # long call, not somewhere inside it.
+    db.commit()
 
     critic_result, critic_tokens = asyncio.run(
         spec_plan_generator.criticize_spec_plan(

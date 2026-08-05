@@ -911,7 +911,20 @@ def test_cli_subscription_cost_does_not_trip_usd_brake_but_tokens_do(
     assert audit.task_id == task.id
 
 
-def test_plan_local_token_limit_tightens_global_brake(orchestration, db_session):
+def test_plan_local_token_estimate_reports_but_does_not_brake(orchestration, db_session):
+    """The planner's own budget is advisory; only the operator limit stops work.
+
+    This test used to assert the opposite -- that `task.limits["max_tokens"]`
+    was min()'d into the enforced limit.  CTV2-1388 (2026-08-05) showed why
+    that is unsafe: the planner wrote `max_tokens: 12000` for a task that had
+    already spent 282k running the planner itself, and every run afterwards
+    died on a limit the task could not change.  `limits` is only writable by
+    generate_spec_plan, which was the very thing being blocked, and update_task
+    refuses the field -- so the task had sentenced itself with no appeal.
+
+    An overrun against the plan's estimate must still be *visible*.
+    """
+
     task = _task(db_session, "GATE-PLAN-TOKENS", mode="bypass")
     task.limits = {"max_execution_rounds": 2, "max_tokens": 10}
     db_session.add(Setting(key="max_tokens_per_task", value="1000"))
@@ -928,18 +941,26 @@ def test_plan_local_token_limit_tightens_global_brake(orchestration, db_session)
     )
     db_session.commit()
 
-    with pytest.raises(BrakeViolationError):
-        orchestration.request_dispatch(
-            task_id=task.id,
-            agent_id="@executor",
-            actor="@operator",
-            idempotency_key="dispatch-over-plan-token-budget",
-        )
+    # 11 tokens spent, plan estimated 10, operator allows 1000 -> proceeds.
+    orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id="@executor",
+        actor="@operator",
+        idempotency_key="dispatch-over-plan-token-budget",
+    )
 
-    audit = db_session.query(AuditLog).filter(
-        AuditLog.action == "brake:token_limit"
-    ).one()
-    assert audit.details["decision"]["observations"]["token_limit"] == 10
+    assert (
+        db_session.query(AuditLog)
+        .filter(AuditLog.action == "brake:token_limit")
+        .count()
+        == 0
+    )
+
+    decision = orchestration.check_brakes(task, for_spawn=False)
+    assert decision.allowed is True
+    assert decision.observations["token_limit"] == 1000
+    assert decision.observations["plan_token_estimate"] == 10
+    assert decision.observations["over_plan_token_estimate"] is True
 
 
 def test_dependency_pending_brake_queues_dispatch_instead_of_raising(

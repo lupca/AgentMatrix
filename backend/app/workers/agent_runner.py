@@ -312,12 +312,28 @@ def _advance_todo(db: Session, service: TaskOrchestrationService, task: Task) ->
         )
         return "escalated_missing_ac"
     if task.planner and task.plan_critic_status != "accept":
-        _escalate(
-            db,
-            task,
-            "generated plan has no current independent critic acceptance; refusing to dispatch",
+        # Not having a critic verdict *yet* is a transient condition, not a
+        # dead task: a critic run is usually in flight, or the coordinator is
+        # about to start one with critique_spec_plan.  Escalating here marks
+        # the task `failed`, which is terminal -- it cancels every active run
+        # and rejects every pending gate, so the critic that was about to
+        # answer gets killed and can never be re-run.
+        #
+        # CTV2-1388, 2026-08-05: this fired on the task filed to fix exactly
+        # this class of bug, seconds after its plan was generated. The defect
+        # killed its own fix, and there was no way back.
+        #
+        # Just decline to dispatch and say why.  advance_task is re-driven on
+        # every state change, so it will dispatch as soon as a critic accepts;
+        # a plan that genuinely never gets one still cannot dispatch, which is
+        # the property this guard exists to preserve.
+        logger.info(
+            "advance_task: task %s waiting for an independent plan critic "
+            "(plan_critic_status=%r); not dispatching",
+            task.id,
+            task.plan_critic_status,
         )
-        return "escalated_critic_rejected"
+        return "waiting_plan_critic"
 
     brake = service.check_brakes(task, for_spawn=False, audit=True)
     if not brake.allowed:

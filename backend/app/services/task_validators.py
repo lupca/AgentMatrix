@@ -220,18 +220,26 @@ class TaskValidator:
         """Evaluate brakes in a stable order and return debugging context."""
         cost = self._task_cost(task)
         tokens = self._task_tokens(task)
+        # `task.limits` is the PLANNER's own estimate of what the task should
+        # cost.  It is advisory, never a hard stop.
+        #
+        # It used to be min()'d into the enforced limit, which let one number
+        # invented during a single plan generation permanently brick the task.
+        # CTV2-1388, 2026-08-05: the planner wrote `max_tokens: 12000`; the task
+        # had already spent 282k on the planner rounds themselves, so every
+        # subsequent run died with "Task token limit reached: 282,028 >= 12,000".
+        # And there was no way out -- `limits` is only writable by
+        # generate_spec_plan, which was the very thing being blocked, and
+        # update_task refuses the field.  A task could sentence itself to death
+        # and then be unable to appeal.
+        #
+        # The operator-configured limits below are the real brakes.  The plan's
+        # numbers are reported in `observations` so overruns stay visible.
         plan_limits = task.limits if isinstance(task.limits, dict) else {}
         token_limit = self.max_tokens_per_task
-        plan_token_limit = plan_limits.get("max_tokens")
-        if isinstance(plan_token_limit, int) and plan_token_limit > 0:
-            token_limit = min(token_limit, plan_token_limit)
         cost_limit = self.max_cost_usd_per_task
+        plan_token_limit = plan_limits.get("max_tokens")
         plan_cost_limit = plan_limits.get("max_cost_usd")
-        if plan_cost_limit is not None:
-            try:
-                cost_limit = min(cost_limit, max(Decimal("0"), Decimal(str(plan_cost_limit))))
-            except (ValueError, TypeError):
-                pass
         active_query = self.db.query(AgentRun.id).filter(AgentRun.status.in_(["queued", "running"]))
         if run_id:
             active_query = active_query.filter(AgentRun.id != run_id)
@@ -245,6 +253,15 @@ class TaskValidator:
             "cost_limit": str(cost_limit),
             "task_tokens": tokens,
             "token_limit": token_limit,
+            # Advisory only -- surfaced so an overrun against the plan's own
+            # estimate is visible without being able to stop the task.
+            "plan_token_estimate": plan_token_limit,
+            "plan_cost_estimate": str(plan_cost_limit) if plan_cost_limit is not None else None,
+            "over_plan_token_estimate": bool(
+                isinstance(plan_token_limit, int)
+                and plan_token_limit > 0
+                and tokens >= plan_token_limit
+            ),
             "agent_id": agent_id,
             "max_active_seconds_per_run": self.max_active_seconds_per_run,
             "max_tool_calls_per_run": self.max_tool_calls_per_run,

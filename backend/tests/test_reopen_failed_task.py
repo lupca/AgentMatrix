@@ -173,6 +173,37 @@ async def test_reopen_handler_returns_a_serializable_payload(service, db_session
     assert isinstance(response["gate_record_id"], int)
 
 
+def test_missing_plan_critic_acceptance_waits_instead_of_killing_the_task(
+    service, db_session
+):
+    """A critic that has not answered yet is a wait, not a death sentence.
+
+    ``_advance_todo`` used to escalate here, which sets ``failed`` -- terminal,
+    so ``_sync_after_transition`` cancelled the critic run that was about to
+    answer and rejected every pending gate.  On 2026-08-05 this fired on
+    CTV2-1388, the task filed to fix this very class of bug, seconds after its
+    plan was generated.
+    """
+
+    from app.workers.agent_runner import _advance_todo
+
+    task = _add_task(
+        db_session,
+        "CRITIC-001",
+        status="todo",
+        planner="@executor",
+        plan_critic_status=None,
+    )
+
+    outcome = _advance_todo(db_session, service, task)
+    db_session.refresh(task)
+
+    assert outcome == "waiting_plan_critic"
+    assert task.status == "todo"
+    # The guard still holds: no plan critic acceptance means no dispatch.
+    assert task.executor is None
+
+
 def test_reopen_refuses_a_task_that_is_not_failed(service, db_session):
     task = _add_task(db_session, "REOPEN-003", status="dispatched", executor="@executor")
 
