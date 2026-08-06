@@ -5,7 +5,8 @@
 > nhật ký sự cố nằm trong `knowledge_items` — tra bằng `manage_knowledge` hoặc
 > `query_db` khi cần chiều sâu (xem mục 6).
 >
-> Đọc file này TRƯỚC, rồi `docs/spec/01..08` khi cần chi tiết.
+> Đọc file này TRƯỚC, rồi tra `spec_get` khi cần chi tiết đặc tả. Đặc tả sống
+> trong DB (`spec_item`), không trong `docs/spec/*.md` — xem CLAUDE.md.
 
 ## 0. Người bạn đang làm việc cùng
 
@@ -172,12 +173,13 @@ Nguyên tắc khi sửa hệ: thêm field vào ToolSpec schema thì PHẢI thêm
 
 | Nguồn | Chứa gì |
 |---|---|
-| `docs/spec/01..07` | Đặc tả sống — PHẢI cập nhật cùng commit khi đổi hành vi |
-| `docs/spec/08-living-spec.md` | **THIẾT KẾ, chưa triển khai** — hệ spec sống. Vấn đề nó giải: **tái suy diễn** (đọc lại nhiều lần ra kết luận khác nhau) |
+| DB `spec_item` (`spec_get`/`spec_write`) | **Đặc tả sống** — PHẢI cập nhật cùng phiên khi đổi hành vi; có anchor vào code và trục `realization` suy ra |
 | DB `tasks` | Sổ công việc chính thức |
 | DB `knowledge_items` | **Bằng chứng, số liệu, nhật ký sự cố** — `manage_knowledge` hoặc `query_db` |
+| DB `inbox_items` (`manage_inbox`) | Ý tưởng thô chưa thành task, không cần gate |
 | `tool_metrics` | Telemetry graph/ocr/review — lộ đường code chưa ai chạy |
 | Memory của Claude | Cheatsheet vận hành + preference user |
+| `docs/*.md` | **Lịch sử, không phải chân lý** — lệch với DB thì DB đúng |
 
 Knowledge nên đọc khi cần chiều sâu:
 - *"Đo trước khi khẳng định"* — 5 lần tự sai trong một phiên và cách tránh
