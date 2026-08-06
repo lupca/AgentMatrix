@@ -210,6 +210,33 @@ class TaskValidator:
     def max_no_progress_seconds(self) -> int:
         return max(1, self._setting("max_no_progress_seconds", settings.MAX_NO_PROGRESS_SECONDS, int))
 
+    #: Holds that a planner run is the cure for, not a victim of.
+    #:
+    #: `_spec_clarity_hold` says "the planner did not know enough yet" and
+    #: `_plan_critic_hold` says "this plan was rejected"; the documented way
+    #: out of both is to run `generate_spec_plan` again. Letting them stop the
+    #: planner closes the loop: the run that would clear the hold is cancelled
+    #: *by* the hold, and no tool on the surface can break the tie.
+    #:
+    #: Measured 2026-08-06 on UIKI-011: spec_clarity=medium with 3 answered
+    #: open questions, four consecutive plan runs across three different agents
+    #: cancelled with `brake_stopped` / "pending_gate: Task is waiting on a
+    #: human (spec_clarity)". The task could not be planned, therefore could
+    #: not reach clarity=high, therefore could not be planned. CTV2-1410
+    #: introduced this by making plan runs honour brakes at all -- correct in
+    #: intent, but it inherited a hold that is aimed at *dispatch*, not at
+    #: planning.
+    _PLANNER_CLEARS_HOLDS = frozenset({"spec_clarity", "plan_critic"})
+
+    def _blocking_hold(self, task: Task, *, for_planning: bool):
+        """The hold that should stop THIS run, or None."""
+        hold = derive_approval_hold(self.db, task)
+        if hold is None:
+            return None
+        if for_planning and hold.source in self._PLANNER_CLEARS_HOLDS:
+            return None
+        return hold
+
     def check_brakes(
         self,
         task: Task,
@@ -218,8 +245,15 @@ class TaskValidator:
         audit: bool = False,
         run_id: str | None = None,
         agent_id: str | None = None,
+        for_planning: bool = False,
     ) -> BrakeDecision:
-        """Evaluate brakes in a stable order and return debugging context."""
+        """Evaluate brakes in a stable order and return debugging context.
+
+        ``for_planning`` says "the run being checked IS the planner". A planner
+        run is the documented *remedy* for the planning-phase holds
+        (`spec_clarity`, `plan_critic`), so those two must not stop it -- see
+        `_PLANNER_CLEARS_HOLDS`. Every other brake still applies.
+        """
         cost = self._task_cost(task)
         tokens = self._task_tokens(task)
         # `task.limits` is the PLANNER's own estimate of what the task should
@@ -274,7 +308,9 @@ class TaskValidator:
         pending_deps = [d for d in deps if d.status not in {"done", "failed"}]
         if task.status in {"done", "cancelled"}:
             decision = BrakeDecision(False, f"Task is terminal: {task.status}", "terminal", observations=observations)
-        elif (hold := derive_approval_hold(self.db, task)) is not None:
+        elif (
+            hold := self._blocking_hold(task, for_planning=for_planning)
+        ) is not None:
             # Derived, not read off `task.awaiting_approval` (CTV2-1401): a
             # stored flag that had drifted off the ledger used to stop every
             # run forever, with no tool able to clear it.  The reason names

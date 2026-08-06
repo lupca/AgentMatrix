@@ -134,9 +134,15 @@ class TaskOrchestrationService:
         audit: bool = False,
         run_id: str | None = None,
         agent_id: str | None = None,
+        for_planning: bool = False,
     ) -> BrakeDecision:
         return self.validator.check_brakes(
-            task, for_spawn=for_spawn, audit=audit, run_id=run_id, agent_id=agent_id
+            task,
+            for_spawn=for_spawn,
+            audit=audit,
+            run_id=run_id,
+            agent_id=agent_id,
+            for_planning=for_planning,
         )
 
     # Transition entry point

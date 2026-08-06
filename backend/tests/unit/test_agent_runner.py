@@ -1822,3 +1822,70 @@ def test_plan_run_proceeds_when_the_brakes_allow_it(
     assert len(executed) == 1
     # The deadline the worker was handed must be the one the planner gets.
     assert executed[0][3] == 5
+
+
+def test_plan_run_is_not_blocked_by_the_hold_it_exists_to_clear(
+    worker_db, monkeypatch, git_repo_root
+):
+    """UIKI-011: spec_clarity=medium cancelled the very run that would fix it.
+
+    CTV2-1410 made plan runs honour brakes -- right in intent, but it inherited
+    a hold aimed at dispatch. `spec_clarity` and `plan_critic` holds say "run
+    the planner again"; letting them cancel the planner closes the loop with no
+    tool able to break it. Measured 2026-08-06: four plan runs across three
+    agents, all `brake_stopped`.
+    """
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    run.idempotency_key = "planner:RUN-001:plan:abc123"
+    task = db.get(Task, "RUN-001")
+    # The spec_clarity hold only lives at `todo` (CTV2-1406) -- that is exactly
+    # where a planner run happens, so the deadlock needs the task at `todo`.
+    task.status = "todo"
+    task.spec_clarity = "medium"
+    task.open_questions = ["Câu hỏi chưa trả lời?"]
+    db.commit()
+    db.close()
+
+    executed = []
+    monkeypatch.setattr(
+        "app.workers.plan_executor.execute_plan_run",
+        lambda *args, **kwargs: executed.append(args),
+    )
+
+    runner.run_agent.fn("run-001", "RUN-001", "echo plan", git_repo_root, 5)
+
+    assert len(executed) == 1, "planner was cancelled by the hold it clears"
+    db = worker_db()
+    assert db.get(AgentRun, "run-001").failure_category != "brake_stopped"
+    db.close()
+
+
+def test_plan_run_is_still_blocked_by_a_real_pending_gate(
+    worker_db, monkeypatch, git_repo_root
+):
+    """The exemption is narrow: only spec_clarity/plan_critic, never a gate."""
+    from app.services.task_orchestration import TaskOrchestrationService
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    run.idempotency_key = "planner:RUN-001:plan:abc123"
+    db.commit()
+    task = db.get(Task, "RUN-001")
+    TaskOrchestrationService(db).escalate_task(
+        task_id=task.id, reason="human must look at this first"
+    )
+    db.close()
+
+    executed = []
+    monkeypatch.setattr(
+        "app.workers.plan_executor.execute_plan_run",
+        lambda *args, **kwargs: executed.append(args),
+    )
+
+    runner.run_agent.fn("run-001", "RUN-001", "echo plan", git_repo_root, 5)
+
+    assert executed == [], "a real pending gate must still stop the planner"
+    db = worker_db()
+    assert db.get(AgentRun, "run-001").failure_category == "brake_stopped"
+    db.close()

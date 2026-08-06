@@ -965,8 +965,12 @@ def execute_agent_run(
             # keeps it out of the concurrency accounting that genuinely is
             # dispatch-only, while still honouring the cost ceiling, the token
             # ceiling, `autonomy_enabled=false`, and agent/account health.
+            # `for_planning=True`: a planner run is the cure for the
+            # spec_clarity / plan_critic holds, so those two must not cancel
+            # it (UIKI-011 deadlocked exactly there). Cost, tokens, the kill
+            # switch and real pending gates still stop it.
             plan_brake = orch_svc_cls(db).check_brakes(
-                task, for_spawn=False, audit=True, run_id=run.id
+                task, for_spawn=False, audit=True, run_id=run.id, for_planning=True
             )
             if not plan_brake.allowed:
                 error = (
