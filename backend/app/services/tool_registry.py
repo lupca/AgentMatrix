@@ -21,21 +21,21 @@ from app.services.tool_specs import (
 
 # Re-export for backward compatibility and spec anchors
 __all__ = [
-    "Tier",
+    "DEFERRED_GROUPS",
+    "DEPRECATED_ALIASES",
+    "TOOL_REGISTRY",
     "Permission",
     "Role",
+    "Tier",
     "ToolSpec",
-    "DEFERRED_GROUPS",
-    "TOOL_REGISTRY",
-    "DEPRECATED_ALIASES",
-    "resolve_tool_name",
-    "get_spec",
-    "get_by_slash_alias",
-    "to_openai_tools",
-    "get_group_tool_definitions",
-    "get_group_for_tool",
-    "get_mcp_tool_specs",
     "dump_registry",
+    "get_by_slash_alias",
+    "get_group_for_tool",
+    "get_group_tool_definitions",
+    "get_mcp_tool_specs",
+    "get_spec",
+    "resolve_tool_name",
+    "to_openai_tools",
 ]
 
 

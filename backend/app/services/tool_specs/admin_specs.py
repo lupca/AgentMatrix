@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.tool_specs.base import DEFERRED_GROUPS, ToolSpec
+from app.services.tool_specs.base import ToolSpec
 
 ADMIN_TOOL_SPECS: list[ToolSpec] = [
             ToolSpec(

@@ -378,3 +378,33 @@ async def test_pm_create_task_alias_still_routes_to_create_task(db_session):
     )
     assert result['action'] == 'created'
     assert result['title'] == 'Legacy alias task'
+
+
+def test_a_tool_missing_from_canonical_order_is_not_silently_dropped():
+    """CTV2-1418: the ordering list must never decide membership.
+
+    The first split (CTV2-1417) built the registry by walking
+    `_CANONICAL_ORDER`, so a tool declared in a `*_specs.py` file but forgotten
+    there vanished from the MCP surface with no error. Caught on review while
+    both lists still matched 36/36 -- a trap armed, not yet sprung.
+    """
+    from dataclasses import replace
+
+    from app.services import tool_specs
+
+    sample = next(iter(tool_specs._unmerged_specs.values()))
+    stray = replace(sample, name="zz_tool_not_in_canonical_order")
+    assert stray.name not in tool_specs._CANONICAL_ORDER
+
+    original = dict(tool_specs._unmerged_specs)
+    try:
+        tool_specs._unmerged_specs[stray.name] = stray
+        rebuilt = tool_specs._ordered_specs()
+    finally:
+        tool_specs._unmerged_specs.clear()
+        tool_specs._unmerged_specs.update(original)
+
+    assert stray.name in rebuilt, "tool declared but missing from order was dropped"
+    # Strays go last; the canonical order of everything else is untouched.
+    assert list(rebuilt)[-1] == stray.name
+    assert [n for n in rebuilt if n != stray.name] == list(tool_specs.ALL_TOOL_SPECS)
