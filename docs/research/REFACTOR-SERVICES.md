@@ -15,7 +15,7 @@
 | 1 | `app/services/task_state_machine.py` | 2.998 | 69 | `request_gate` (206 LOC), `apply_gate` (201 LOC), `decide_gate` (147 LOC) |
 | 2 | `app/db/models.py` | 1.691 | - | Declarative ORM models & Table schemas |
 | 3 | `app/services/tool_registry.py` | 1.665 | 8 | `TOOL_REGISTRY` mapping (~1.500 dòng khai báo dữ liệu static) |
-| 4 | `app/workers/cli_executor.py` | 1.554 | 38 | `execute_agent_run` (~686 LOC outer function), closures `record_heartbeat` (399 LOC) & `cancel_check` (260 LOC) |
+| 4 | `app/workers/cli_executor.py` | 1.554 | 38 | `execute_agent_run` là hàm bao rất dài; hai closure `record_heartbeat` và `cancel_check` lồng bên trong (xem đính chính bên dưới về cách đo) |
 | 5 | `app/services/coordinator.py` | 1.482 | 35 | Closure `summarizer_with_usage` xuất hiện 2 lần trùng lặp (244 & 225 LOC) |
 | 6 | `app/services/command_router_handlers/task_handlers.py` | 1.276 | 24 | Handlers lệnh tác vụ coordinator |
 | 7 | `app/mcp_native.py` | 1.069 | 32 | FastMCP native tool entrypoints |
@@ -163,7 +163,13 @@ TOOL_REGISTRY: dict[str, ToolSpec] = ALL_TOOL_SPECS
 ## 4. PHÂN TÍCH VÀ GIẢI MÃ CLOSURE KHỔNG LỒ (Q4)
 
 ### 4.1 Closure `record_heartbeat` trong `cli_executor.py` (Line 1157)
-- **Bản chất:** Đóng (closure) nằm trong hàm `execute_agent_run` (~686 dòng).
+- **Bản chất:** Đóng (closure) nằm trong hàm `execute_agent_run`.
+
+> **ĐÍNH CHÍNH 2026-08-06 (sau khi CTV2-1419 thi công xong).** Các con số "399 LOC / 260 LOC / 686 LOC" trong báo cáo này là SAI. Chúng do coordinator cấp cho task, đo bằng KHOẢNG CÁCH GIỮA HAI DÒNG `def` chứ không phải độ dài thân hàm — nên phần code khác nằm xen giữa bị tính nhầm vào closure. Thân thật của hai closure chỉ khoảng 20-30 dòng mỗi cái: tách xong, `cli_executor.py` chỉ giảm 1.558 -> 1.519 (**-39 dòng**) và `run_tracker.py` mới chỉ **89 dòng**.
+>
+> LÝ DO REFACTOR VẪN ĐÚNG dù số sai: vấn đề chưa bao giờ là độ dài, mà là closure bám biến bao ngoài (`db`, `run_id`, `task_id`, `process_manager`) nên KHÔNG test riêng được — muốn chạm tới phải dựng worktree git, DB và subprocess CLI thật. Sau khi nâng thành `ExecutionTracker`, 6 test mới gọi thẳng `record_heartbeat`/`cancel_check` với 0 lần spawn CLI, 0 worktree.
+>
+> BÀI HỌC CHO BƯỚC 3 (`task_state_machine.py`): ĐỪNG xếp ưu tiên theo "độ dài hàm" đo bằng khoảng cách giữa hai `def`. Đo bằng thân hàm thật (AST), hoặc bỏ hẳn tiêu chí độ dài và chỉ dùng hai tiêu chí đã tỏ ra đúng: tần suất commit `fix(` và khả năng test riêng.
 - **Lý do phải là closure:** Cần bám vào các biến cục bộ ngoài phạm vi (`db`, `run_id`, `run`, `task_id`, `process_manager`, `attempt`).
 - **Tác hại:** Không thể unit test độc lập logic cập nhật heartbeat hay hủy process mà bắt buộc phải invoke toàn bộ hàm `execute_agent_run` với đầy đủ mock DB/Git worktree complex state.
 - **Giải pháp Refactor:** Chuyển closure thành Class `ExecutionTracker` (State Object pattern):
