@@ -71,6 +71,7 @@ from app.workers.output_streamer import (
     is_cancel_requested,
     redis_client,
 )
+from app.workers.executor.run_tracker import ExecutionTracker, _throttled_cancel_check
 
 logger = logging.getLogger("app.workers.agent_runner")
 
@@ -329,22 +330,6 @@ def _current_attempt(run: AgentRun) -> int:
     if run.started_at is not None and run.status in {"queued", "running", "failed"}:
         persisted_attempt += 1
     return max(broker_attempt, persisted_attempt)
-
-
-def _throttled_cancel_check(run_id: str, interval: float = 0.5):
-    last_check = 0.0
-    last_result = False
-    check_fn = _get_attr("is_cancel_requested", is_cancel_requested)
-
-    def check() -> bool:
-        nonlocal last_check, last_result
-        now = time.monotonic()
-        if last_result or now - last_check >= interval:
-            last_check = now
-            last_result = check_fn(run_id)
-        return last_result
-
-    return check
 
 
 def _cleanup_stale_process(run: AgentRun, grace_seconds: float = 2.0) -> None:
@@ -882,28 +867,12 @@ def execute_agent_run(
     emit_event_fn = _get_attr("emit_task_event", emit_task_event)
 
     db: Session = session_factory()
-    redis_cancel_check = _throttled_cancel_check(run_id)
-
-    def cancel_check() -> bool:
-        if redis_cancel_check():
-            return True
-        current_run_status = (
-            db.query(AgentRun.status)
-            .filter(AgentRun.id == run_id)
-            .scalar()
-        )
-        if current_run_status == "cancelled":
-            return True
-        current_task_status = (
-            db.query(Task.status)
-            .filter(Task.id == task_id)
-            .scalar()
-        )
-        return current_task_status in {"done", "failed", "cancelled"}
+    tracker_cls = _get_attr("ExecutionTracker", ExecutionTracker)
+    tracker = tracker_cls(db, run_id, task_id)
 
     process_manager = process_mgr_cls(
         timeout_seconds=timeout_seconds,
-        cancel_check=cancel_check,
+        cancel_check=tracker.cancel_check,
     )
     worktree_manager: WorktreeManager | None = None
     worktree_path: str | None = None
@@ -1158,16 +1127,8 @@ def execute_agent_run(
                 db=db,
             )
 
-        def record_heartbeat(pid: int) -> None:
-            try:
-                run.updated_at = datetime.now(timezone.utc)
-                db.commit()
-            except Exception:
-                db.rollback()
-                logger.warning("Failed to update heartbeat for run %s", run_id, exc_info=True)
-
         process_manager.on_start = record_pid
-        process_manager.on_heartbeat = record_heartbeat
+        process_manager.on_heartbeat = tracker.record_heartbeat
         publish_status(run_id, "running", attempt=attempt)
         logger.info(
             "Starting agent run %s for task %s (attempt %d/%d)",
