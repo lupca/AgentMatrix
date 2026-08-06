@@ -48,10 +48,24 @@ backend/venv/bin/python -m pytest backend/tests -q
 
 ## Documentation
 
-- `CLAUDE.md` - System reference for AI assistants
-- [docs/adr/](docs/adr/README.md) - Architecture Decision Records
-- [docs/design/](docs/design/README.md) - Active architecture designs
-- [docs/plans/](docs/plans/README.md) - Execution plans and roadmap
-- [docs/testing/](docs/testing/README.md) - QA scripts and test procedures
-- [docs/reviews/](docs/reviews/README.md) - Review notes and incident logs
-- [docs/archive/](docs/archive/README.md) - Deprecated designs and strategy papers
+The spec, the work log, the evidence and the raw ideas all live in the
+`control_tower` database and are read through the MCP tool surface, not in
+markdown files:
+
+| Question | Tool |
+|---|---|
+| How must the system behave? | `spec_get` / `spec_write` (spec_item, with code anchors) |
+| What is being worked on? | `get_status`, `query_db` on `tasks` |
+| Evidence, measurements, incident logs | `manage_knowledge` |
+| Raw ideas not yet a task | `manage_inbox` |
+
+Only two markdown files remain, because something reads them:
+
+- `CLAUDE.md` - system reference for AI assistants
+- `docs/coordinator-rules.md` - source of the coordinator workspace instruction
+  files, copied by `scripts/init-coordinator-workdir.sh`
+- `docs/AGENT-PLAYBOOK.md` - distilled working memory for an agent starting a
+  session
+
+Everything else was deleted on 2026-08-06 (it is still in git history) after
+its live content was moved into the database.

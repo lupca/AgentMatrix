@@ -1,6 +1,6 @@
 """Symbol anchoring and commit-triggered staleness for the living spec (CTV2-1342).
 
-Design: ``docs/spec/08-living-spec.md`` section "Cơ chế mất hiệu lực". The
+Design: spec_item "Trục THỰC HOÁ" (spec_get), section "Cơ chế mất hiệu lực". The
 whole module is deterministic subprocess/string work -- no LLM call anywhere.
 An LLM is never asked "is this still true"; that question is answered here,
 in code, from the git history.

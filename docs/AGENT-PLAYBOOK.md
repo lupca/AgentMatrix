@@ -6,7 +6,7 @@
 > `query_db` khi cần chiều sâu (xem mục 6).
 >
 > Đọc file này TRƯỚC, rồi tra `spec_get` khi cần chi tiết đặc tả. Đặc tả sống
-> trong DB (`spec_item`), không trong `docs/spec/*.md` — xem CLAUDE.md.
+> trong DB (`spec_item`), không trong file markdown — xem CLAUDE.md.
 
 ## 0. Người bạn đang làm việc cùng
 
@@ -41,7 +41,7 @@ lupca — tiếng Việt, vai quản lý (không đọc sâu code, vì thế m�
 5. COMMIT + PUSH ngay từng fix.
 6. RESTART đúng cách (mục 3) — đổi code service dùng bởi worker thì restart CẢ worker.
 7. VERIFY SỐNG qua MCP tool surface — không tin "chắc là được".
-8. GHI SỔ: task DB + cập nhật `docs/spec` cùng commit.
+8. GHI SỔ: task DB + cập nhật `spec_item` (spec_write, kèm anchor) cùng phiên.
 ```
 
 Triage: bug CHẶN pipeline → sửa tại trận. Có đường vòng → ghi task DB ưu tiên

@@ -548,7 +548,7 @@ def get_specs(
 
     query = db.query(SpecItem).filter(SpecItem.archived_at.is_(None))
     if backlog:
-        # backlog = active + not yet built (docs/spec/08-living-spec.md,
+        # backlog = active + not yet built (spec_item "Trục THỰC HOÁ",
         # truc THUC HOA). status is a real column so this half is pushed
         # into SQL; "not built" is derived and applied after projection.
         query = query.filter(SpecItem.status == "active")
