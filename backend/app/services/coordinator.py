@@ -894,6 +894,51 @@ class CoordinatorService:
             return db_session.task_id, None
         return db_session.task_id or run.task_id, run.id
 
+    def _summarize_with_usage(
+        self,
+        agent: Any,
+        session_id: str,
+        usage_task_id: str | None,
+        usage_agent_run_id: str | None,
+        messages: list,
+        **kwargs: Any,
+    ) -> str:
+        response = self.llm_service.complete_sync(
+            agent,
+            messages,
+            model=kwargs.get("model"),
+            max_tokens=kwargs.get("max_tokens", self.max_output_tokens),
+            temperature=kwargs.get("temperature", 0),
+        )
+        # Track compaction usage
+        if response.usage and response.usage_is_measured:
+            record = LLMUsage(
+                session_id=session_id,
+                task_id=usage_task_id,
+                agent_run_id=usage_agent_run_id,
+                model=response.model,
+                provider=response.provider,
+                operation="compaction",
+                input_tokens=response.usage.input_tokens,
+                output_tokens=response.usage.output_tokens,
+                cached_tokens=response.usage.cached_tokens,
+                cost_usd=calculate_cost(
+                    response.model,
+                    response.provider,
+                    response.usage.input_tokens,
+                    response.usage.output_tokens,
+                    response.usage.cached_tokens,
+                ),
+                latency_ms=0,
+            )
+            try:
+                self.db.add(record)
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                logger.warning("Failed to record compaction usage for session=%s", session_id)
+        return response.text
+
     def _persist_failure(
         self,
         db_session: SessionModel,
@@ -961,42 +1006,14 @@ class CoordinatorService:
                 db_session, model, provider
             )
 
-            def summarizer_with_usage(messages: list, **kwargs: Any) -> str:
-                response = self.llm_service.complete_sync(
-                    agent,
-                    messages,
-                    model=kwargs.get("model"),
-                    max_tokens=kwargs.get("max_tokens", self.max_output_tokens),
-                    temperature=kwargs.get("temperature", 0),
-                )
-                # Track compaction usage
-                if response.usage and response.usage_is_measured:
-                    record = LLMUsage(
-                        session_id=db_session.id,
-                        task_id=usage_task_id,
-                        agent_run_id=usage_agent_run_id,
-                        model=response.model,
-                        provider=response.provider,
-                        operation="compaction",
-                        input_tokens=response.usage.input_tokens,
-                        output_tokens=response.usage.output_tokens,
-                        cached_tokens=response.usage.cached_tokens,
-                        cost_usd=calculate_cost(
-                            response.model,
-                            response.provider,
-                            response.usage.input_tokens,
-                            response.usage.output_tokens,
-                            response.usage.cached_tokens,
-                        ),
-                        latency_ms=0,
-                    )
-                    try:
-                        self.db.add(record)
-                        self.db.commit()
-                    except Exception:
-                        self.db.rollback()
-                        logger.warning("Failed to record compaction usage for session=%s", db_session.id)
-                return response.text
+            summarizer_with_usage = lambda msgs, **kw: self._summarize_with_usage(
+                agent,
+                db_session.id,
+                usage_task_id,
+                usage_agent_run_id,
+                msgs,
+                **kw,
+            )
 
             ctx = self._context_hierarchy()
             ctx.compact_context(
@@ -1216,42 +1233,14 @@ class CoordinatorService:
                 db_session, model, provider
             )
 
-            def summarizer_with_usage(messages: list, **kwargs: Any) -> str:
-                response = self.llm_service.complete_sync(
-                    agent,
-                    messages,
-                    model=kwargs.get("model"),
-                    max_tokens=kwargs.get("max_tokens", self.max_output_tokens),
-                    temperature=kwargs.get("temperature", 0),
-                )
-                # Track compaction usage
-                if response.usage and response.usage_is_measured:
-                    record = LLMUsage(
-                        session_id=db_session.id,
-                        task_id=usage_task_id,
-                        agent_run_id=usage_agent_run_id,
-                        model=response.model,
-                        provider=response.provider,
-                        operation="compaction",
-                        input_tokens=response.usage.input_tokens,
-                        output_tokens=response.usage.output_tokens,
-                        cached_tokens=response.usage.cached_tokens,
-                        cost_usd=calculate_cost(
-                            response.model,
-                            response.provider,
-                            response.usage.input_tokens,
-                            response.usage.output_tokens,
-                            response.usage.cached_tokens,
-                        ),
-                        latency_ms=0,
-                    )
-                    try:
-                        self.db.add(record)
-                        self.db.commit()
-                    except Exception:
-                        self.db.rollback()
-                        logger.warning("Failed to record compaction usage for session=%s", db_session.id)
-                return response.text
+            summarizer_with_usage = lambda msgs, **kw: self._summarize_with_usage(
+                agent,
+                db_session.id,
+                usage_task_id,
+                usage_agent_run_id,
+                msgs,
+                **kw,
+            )
 
             ctx = self._context_hierarchy()
             ctx.compact_context(
