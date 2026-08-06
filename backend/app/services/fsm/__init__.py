@@ -1,11 +1,3 @@
-"""State machine transitions, gate execution, and ledger management for tasks (Facade)."""
-
-from __future__ import annotations
-
-from typing import Literal
-from sqlalchemy.orm import Session
-
-from app.services.task_validators import TaskValidator
 from app.services.fsm.gate_ledger import (
     GateLedgerMixin,
     _task_cost_and_tokens,
@@ -28,24 +20,11 @@ from app.services.fsm.verdict_landing import (
     verdict_ac_checks,
 )
 
-GateDecision = Literal["approved", "rejected"]
-
-
-class TaskStateMachine(GateLedgerMixin, VerdictLandingMixin, TaskLifecycleMixin):
-    """Core state transitions, compare-and-set updates, and append-only gate ledger."""
-
-    PATCHABLE_FIELDS = {"plan", "acceptance_criteria", "priority", "tags", "raw_input"}
-
-    def __init__(self, db: Session):
-        self.db = db
-        self.validator = TaskValidator(db)
-        self._deferred_landing_event: tuple[str, dict[str, Any]] | None = None
-
-
 __all__ = [
-    "TaskStateMachine",
+    "GateLedgerMixin",
+    "VerdictLandingMixin",
+    "TaskLifecycleMixin",
     "TransitionResult",
-    "GateDecision",
     "_task_cost_and_tokens",
     "find_active_plan_run",
     "gate_unknowns",
