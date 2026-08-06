@@ -234,9 +234,9 @@ class CLIDispatcher:
         self.api_url = api_url  # deprecated compatibility argument
         self.mcp_secret = mcp_token or os.environ.get("MCP_TOKEN_SECRET", "")
 
-    def _new_process_manager(self) -> ProcessManager:
+    def _new_process_manager(self, timeout_seconds: int | None = None) -> ProcessManager:
         factory = self.process_manager_factory or ProcessManager
-        return factory(timeout_seconds=self.timeout_seconds)
+        return factory(timeout_seconds=timeout_seconds or self.timeout_seconds)
 
     async def spawn(
         self,
@@ -246,6 +246,8 @@ class CLIDispatcher:
         effort: str | None = None,
         cwd: str | None = None,
         on_start: Callable[[int], None] | None = None,
+        on_heartbeat: Callable[[int], None] | None = None,
+        timeout_seconds: int | None = None,
     ) -> AsyncIterator[str]:
         """Spawn a CLI and yield stdout chunks until it exits.
 
@@ -260,11 +262,22 @@ class CLIDispatcher:
         fires from the ``run_process`` background thread, and callers such as
         ``spec_plan_generator`` use this to persist the PID on a SQLAlchemy
         session that must not be touched from a second thread).
+        ``on_heartbeat`` is the same contract on a timer: it fires every
+        ``ProcessManager.heartbeat_interval`` while the child is alive, so a
+        caller can record that the run is still breathing.
+
+        ``timeout_seconds`` overrides this dispatcher's default for one spawn.
+        The default is 4 hours -- fine for an interactive coordinator CLI,
+        far too long for a run whose own row says 900s. A caller holding an
+        AgentRun should pass ``run.timeout_seconds``: CTV2-1410 measured a
+        plan-critic child alive for 1h51m with zero output because the row's
+        900s never reached the process that was supposed to honour it.
         """
 
         effective_cwd = cwd or self.working_directory
+        effective_timeout = timeout_seconds or self.timeout_seconds
         base_command = build_cli_command(
-            cli, model, prompt, effort=effort, timeout_seconds=self.timeout_seconds
+            cli, model, prompt, effort=effort, timeout_seconds=effective_timeout
         )
         from app.services.mcp_attach import attach_mcp
 
@@ -278,7 +291,7 @@ class CLIDispatcher:
         )
         if (cli or "").strip().lower() == "qwen":
             extra_env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
-        process_manager = self._new_process_manager()
+        process_manager = self._new_process_manager(effective_timeout)
         loop = asyncio.get_running_loop()
         events: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
 
@@ -286,6 +299,8 @@ class CLIDispatcher:
             loop.call_soon_threadsafe(events.put_nowait, (kind, value))
 
         process_manager.on_start = lambda pid: publish("pid", pid)
+        if on_heartbeat is not None:
+            process_manager.on_heartbeat = lambda pid: publish("heartbeat", pid)
 
         def run_process() -> None:
             try:
@@ -314,6 +329,9 @@ class CLIDispatcher:
                 elif kind == "pid":
                     if on_start is not None:
                         on_start(int(value))
+                elif kind == "heartbeat":
+                    if on_heartbeat is not None:
+                        on_heartbeat(int(value))
                 elif kind == "result":
                     result = value
                     if isinstance(result, ProcessResult) and result.status != ProcessStatus.COMPLETED:

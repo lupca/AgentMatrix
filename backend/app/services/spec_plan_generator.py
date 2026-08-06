@@ -167,6 +167,53 @@ def _pid_recorder(db, run: AgentRun | None):
     return on_start
 
 
+def _heartbeat_recorder(db, run: AgentRun | None):
+    """Build an ``on_heartbeat`` callback that keeps ``run.updated_at`` honest.
+
+    Without it a planner/critic run's `updated_at` is frozen at the moment it
+    started, so every reader that measures liveness from that column -- the
+    `no_progress` brake, a coordinator eyeballing `agent_runs` -- sees a run
+    that has been silent since birth and cannot tell "thinking" from "hung".
+
+    Measured 2026-08-06 (CTV2-1410): a critic run sat at `running` for 1h51m
+    with `updated_at` still equal to `started_at` to the millisecond and zero
+    output chunks. Nothing in the system could distinguish it from a run that
+    was about to answer.
+
+    Same threading contract as `_pid_recorder`: fired on the event-loop thread
+    by `CLIDispatcher.spawn`, never from the process thread.
+    """
+    if db is None or run is None:
+        return None
+
+    def on_heartbeat(_pid: int) -> None:
+        try:
+            run.updated_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.warning("Could not record heartbeat for run %s", run.id, exc_info=True)
+
+    return on_heartbeat
+
+
+def _effective_timeout(timeout_seconds: int | None) -> int:
+    """The caller's deadline, or the configured default.
+
+    Deliberately a plain int parameter and never `run.timeout_seconds`: after
+    `_begin_llm_run` commits, every ORM attribute on `run` is expired, so
+    reading one here would open a fresh transaction and hold it across the
+    whole LLM call -- the exact shape that hung the MCP server twice on
+    2026-08-04 and that `test_critic_step_releases_transaction_before_llm_call`
+    exists to prevent.
+    """
+    try:
+        seconds = int(timeout_seconds)
+    except (TypeError, ValueError):
+        return int(settings.RUN_TIMEOUT_SECONDS)
+    return seconds if seconds > 0 else int(settings.RUN_TIMEOUT_SECONDS)
+
+
 def _finish_llm_run(
     db,
     run: AgentRun | None,
@@ -476,6 +523,7 @@ async def generate_spec_plan(
     project_context: str | None = None,
     db=None,
     run: AgentRun | None = None,
+    timeout_seconds: int | None = None,
 ) -> tuple[SpecPlanResult, list[str]]:
     """Call the LLM once (with one retry on schema mismatch) and ground its
     file claims and flows in the code graph. Returns (result, flows).
@@ -573,6 +621,8 @@ async def generate_spec_plan(
                 temperature=0.3,
                 cwd=repo_root,
                 on_start=_pid_recorder(db, attempt_run),
+                on_heartbeat=_heartbeat_recorder(db, attempt_run),
+                timeout_seconds=_effective_timeout(timeout_seconds),
             )
         except Exception as exc:
             _finish_llm_run(
@@ -738,6 +788,7 @@ async def criticize_spec_plan(
     project_context: str | None = None,
     db=None,
     run: AgentRun | None = None,
+    timeout_seconds: int | None = None,
 ) -> tuple[PlanCriticResult, int]:
     """Run one independent, focused critic after planning and before dispatch.
 
@@ -792,6 +843,8 @@ async def criticize_spec_plan(
                 temperature=0.1,
                 cwd=repo_root,
                 on_start=_pid_recorder(db, attempt_run),
+                on_heartbeat=_heartbeat_recorder(db, attempt_run),
+                timeout_seconds=_effective_timeout(timeout_seconds),
             )
         except Exception as exc:
             _finish_llm_run(

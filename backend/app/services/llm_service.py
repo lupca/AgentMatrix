@@ -111,12 +111,19 @@ class LLMService:
         temperature: float = 0.7,
         cwd: str | None = None,
         on_start: Any = None,
+        on_heartbeat: Any = None,
+        timeout_seconds: int | None = None,
     ) -> ProviderResponse:
         """Complete a request through the provider selected by ``agent``.
 
-        ``on_start``, if given, is only ever forwarded to a CLI-backed
-        provider (invoked with the spawned subprocess's PID) -- API
-        providers have no equivalent and never receive it.
+        ``on_start``, ``on_heartbeat`` and ``timeout_seconds`` are only ever
+        forwarded to a CLI-backed provider -- an API provider has no
+        subprocess to report a PID for, no liveness tick, and its own
+        transport deadline, so it never receives them.
+
+        Pass ``timeout_seconds`` whenever the caller holds an AgentRun: the
+        dispatcher's own default is 4 hours and it does not know about the
+        row (CTV2-1410).
         """
 
         provider = self._provider_for(agent)
@@ -133,6 +140,8 @@ class LLMService:
                 effort=getattr(agent, "effort", None),
                 cwd=cwd,
                 on_start=on_start,
+                on_heartbeat=on_heartbeat,
+                timeout_seconds=timeout_seconds,
             )
         return await provider.complete(
             messages,

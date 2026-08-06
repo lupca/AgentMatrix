@@ -122,9 +122,9 @@ def execute_plan_run(db: Session, run: AgentRun, task: Task, timeout_seconds: in
     repo_root = os.path.abspath(project.repo_root) if project and project.repo_root else None
     try:
         if step == "plan":
-            _run_plan_step(db, run, task, project, repo_root)
+            _run_plan_step(db, run, task, project, repo_root, timeout_seconds)
         elif step == "critic":
-            _run_critic_step(db, run, task, project, repo_root)
+            _run_critic_step(db, run, task, project, repo_root, timeout_seconds)
         else:
             raise ValueError(
                 f"Unrecognized planner step in idempotency_key {run.idempotency_key!r}"
@@ -138,7 +138,12 @@ def execute_plan_run(db: Session, run: AgentRun, task: Task, timeout_seconds: in
 
 
 def _run_plan_step(
-    db: Session, run: AgentRun, task: Task, project: Project | None, repo_root: str | None
+    db: Session,
+    run: AgentRun,
+    task: Task,
+    project: Project | None,
+    repo_root: str | None,
+    timeout_seconds: int,
 ) -> None:
     agent = db.get(Agent, run.agent_id)
     if agent is None:
@@ -166,7 +171,13 @@ def _run_plan_step(
 
     result, flows = asyncio.run(
         spec_plan_generator.generate_spec_plan(
-            task, repo_root, agent, project_context=project_context, db=db, run=run,
+            task,
+            repo_root,
+            agent,
+            project_context=project_context,
+            db=db,
+            run=run,
+            timeout_seconds=timeout_seconds,
         )
     )
     record_tool_metric(
@@ -328,7 +339,12 @@ def _dispatch_critic_step(
 
 
 def _run_critic_step(
-    db: Session, run: AgentRun, task: Task, project: Project | None, repo_root: str | None
+    db: Session,
+    run: AgentRun,
+    task: Task,
+    project: Project | None,
+    repo_root: str | None,
+    timeout_seconds: int,
 ) -> None:
     if not task.planner:
         raise PlanCriticError(f"Task {task.id} has no plan to critique yet")
@@ -356,6 +372,7 @@ def _run_critic_step(
             project_context=project_context,
             db=db,
             run=run,
+            timeout_seconds=timeout_seconds,
         )
     )
     record_tool_metric(

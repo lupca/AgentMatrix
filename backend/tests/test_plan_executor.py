@@ -313,3 +313,76 @@ def test_planner_persists_task_after_boundary_commit_expires_orm_objects(
     assert updated_task.plan == "Refreshed plan after expiry."
     assert updated_task.planner == "@tx-planner3"
     assert "Fresh criterion" in (updated_task.acceptance_criteria or [])
+
+
+def test_plan_step_hands_the_run_deadline_to_the_llm_call(db_session, tmp_path):
+    """CTV2-1410: the run's own timeout must reach the process that honours it.
+
+    `execute_plan_run` has always received `timeout_seconds` and always
+    dropped it, so the planner/critic CLI ran under `CLIDispatcher`'s 4-hour
+    default. Measured 2026-08-06: a critic child alive 1h51m, zero output,
+    while its row said 900s.
+    """
+    db_session.add(Project(id="proj-to1", name="Timeout Project", repo_root=str(tmp_path)))
+    db_session.add(
+        Agent(id="@to-planner", name="Planner", role="coordinator", cli="claude", capabilities=["coordinator"])
+    )
+    task = Task(id="TASK-TO-1", project="proj-to1", title="Timeout test", status="todo")
+    db_session.add(task)
+    db_session.commit()
+
+    agent = db_session.get(Agent, "@to-planner")
+    run = plan_executor.create_plan_run(db_session, task, agent=agent, step="plan")
+    run.status = "running"
+    db_session.commit()
+
+    seen: dict[str, object] = {}
+
+    async def capture(agent_arg, messages, *args, **kwargs):
+        seen["timeout_seconds"] = kwargs.get("timeout_seconds")
+        seen["on_heartbeat"] = kwargs.get("on_heartbeat")
+        return _response(_valid_plan_payload())
+
+    with patch(
+        "app.services.spec_plan_generator.semantic_search",
+        new=AsyncMock(return_value=[]),
+    ), patch(
+        "app.services.spec_plan_generator.LLMService.complete",
+        new=AsyncMock(side_effect=capture),
+    ):
+        plan_executor.execute_plan_run(db_session, run, task, 900)
+
+    assert seen["timeout_seconds"] == 900
+    # A run that reports nothing for an hour must still look alive-or-not in
+    # the DB; without a heartbeat `updated_at` is frozen at started_at.
+    assert callable(seen["on_heartbeat"])
+
+
+def test_heartbeat_callback_moves_the_run_updated_at(db_session, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from app.services import spec_plan_generator
+
+    db_session.add(Project(id="proj-hb", name="HB Project", repo_root=str(tmp_path)))
+    db_session.add(
+        Agent(id="@hb-planner", name="Planner", role="coordinator", cli="claude", capabilities=["coordinator"])
+    )
+    task = Task(id="TASK-HB-1", project="proj-hb", title="HB test", status="todo")
+    db_session.add(task)
+    db_session.commit()
+
+    agent = db_session.get(Agent, "@hb-planner")
+    run = plan_executor.create_plan_run(db_session, task, agent=agent, step="plan")
+    stale = datetime.now(timezone.utc) - timedelta(hours=1)
+    run.status = "running"
+    run.started_at = stale
+    run.updated_at = stale
+    db_session.commit()
+
+    spec_plan_generator._heartbeat_recorder(db_session, run)(4242)
+
+    db_session.refresh(run)
+    updated_at = run.updated_at
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    assert updated_at > stale

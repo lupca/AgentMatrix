@@ -368,3 +368,70 @@ def test_cli_commands_forward_configured_effort():
     assert "--effort low" in claude
     codex = build_cli_command("codex", "gpt-5.6-luna", "hi", effort="high")
     assert "model_reasoning_effort=high" in codex
+
+
+@pytest.mark.asyncio
+async def test_spawn_timeout_override_reaches_process_manager_and_argv():
+    """CTV2-1410: a caller holding an AgentRun must be able to impose its deadline.
+
+    The dispatcher default is 4 hours. A planner/critic run whose own row says
+    900s was spawned under that default, so a hung child stayed alive for
+    1h51m with nothing willing to reap it.
+    """
+    captured: dict[str, object] = {}
+
+    managers: list[MagicMock] = []
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        manager = MagicMock()
+        manager.run_with_streaming.return_value = iter(
+            ["ok", ProcessResult(ProcessStatus.COMPLETED, 0, None)]
+        )
+        managers.append(manager)
+        return manager
+
+    dispatcher = CLIDispatcher(
+        working_directory="/tmp",
+        timeout_seconds=14_400,
+        process_manager_factory=factory,
+    )
+
+    chunks = [
+        chunk
+        async for chunk in dispatcher.spawn(
+            "agy", "gemini-2.5-pro", "prompt", timeout_seconds=900
+        )
+    ]
+
+    assert chunks == ["ok\n"]
+    assert captured["timeout_seconds"] == 900
+    # The CLI's own deadline must agree with the one enforced from outside,
+    # or the child outlives the reaper that is supposed to kill it.
+    argv = shlex.split(managers[0].run_with_streaming.call_args.args[0])
+    assert "--print-timeout" in argv
+    assert argv[argv.index("--print-timeout") + 1] == "900s"
+
+
+@pytest.mark.asyncio
+async def test_spawn_without_override_keeps_the_dispatcher_default():
+    captured: dict[str, object] = {}
+
+    def factory(**kwargs):
+        captured.update(kwargs)
+        manager = MagicMock()
+        manager.run_with_streaming.return_value = iter(
+            [ProcessResult(ProcessStatus.COMPLETED, 0, None)]
+        )
+        return manager
+
+    dispatcher = CLIDispatcher(
+        working_directory="/tmp",
+        timeout_seconds=14_400,
+        process_manager_factory=factory,
+    )
+
+    async for _ in dispatcher.spawn("agy", "gemini-2.5-pro", "prompt"):
+        pass
+
+    assert captured["timeout_seconds"] == 14_400

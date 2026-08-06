@@ -956,8 +956,34 @@ def execute_agent_run(
             # artifact -- it is a read-only research call that writes its
             # result onto the task via TaskOrchestrationService directly, and
             # Task.status stays 'todo' throughout, so none of the
-            # dispatch-flow machinery below (brakes tied to for_spawn dispatch
-            # bookkeeping, worktree isolation, result_ref) applies.
+            # dispatch-flow machinery below (worktree isolation, result_ref)
+            # applies.
+            #
+            # The BRAKES do apply, and used to be skipped along with the rest
+            # (CTV2-1410).  A planner call costs real money on the same task
+            # budget and runs under the same kill switch; `for_spawn=False`
+            # keeps it out of the concurrency accounting that genuinely is
+            # dispatch-only, while still honouring the cost ceiling, the token
+            # ceiling, `autonomy_enabled=false`, and agent/account health.
+            plan_brake = orch_svc_cls(db).check_brakes(
+                task, for_spawn=False, audit=True, run_id=run.id
+            )
+            if not plan_brake.allowed:
+                error = (
+                    f"Plan run stopped by safety brake "
+                    f"{plan_brake.code or 'unknown'}: "
+                    f"{plan_brake.reason or 'no reason recorded'}"
+                )
+                run.status = "cancelled"
+                run.completed_at = datetime.now(timezone.utc)
+                run.error_message = error
+                run.failure_category = "brake_stopped"
+                run.exit_code = 1
+                db.commit()
+                clear_cancel_request(run_id)
+                _nudge_driver(task_id, "run_agent_completed")
+                return run.exit_code
+
             plan_executor.execute_plan_run(db, run, task, timeout_seconds)
             clear_cancel_request(run_id)
             _nudge_driver(task_id, "run_agent_completed")

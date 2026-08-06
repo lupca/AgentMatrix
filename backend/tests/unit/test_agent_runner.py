@@ -1764,3 +1764,61 @@ def test_dead_letter_ignores_message_with_no_run_id(worker_db):
     outcome = runner.run_agent_dead_letter.fn(dead_message, {"retries": 1, "max_retries": 1})
 
     assert outcome == "discarded_no_run_id"
+
+
+def test_plan_run_is_stopped_by_a_safety_brake_instead_of_bypassing_it(
+    worker_db, monkeypatch, git_repo_root
+):
+    """CTV2-1410: the planner leg used to `return` before check_brakes ran.
+
+    A planner/critic call spends the same task budget and lives under the same
+    kill switch as any other run; only the concurrency bookkeeping is
+    dispatch-specific. Skipping the whole check meant `autonomy_enabled=false`
+    and the cost ceiling did not apply to planning at all.
+    """
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    run.idempotency_key = "planner:RUN-001:critic:abc123"
+    run.kind = "review"
+    db.commit()
+    db.close()
+    _force_no_progress_brake(monkeypatch)
+
+    executed = []
+    monkeypatch.setattr(
+        "app.workers.plan_executor.execute_plan_run",
+        lambda *args, **kwargs: executed.append(args),
+    )
+
+    runner.run_agent.fn("run-001", "RUN-001", "echo should-not-run", git_repo_root, 5)
+
+    assert executed == [], "planner ran despite a brake saying stop"
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    assert run.status == "cancelled"
+    assert run.failure_category == "brake_stopped"
+    assert "no_progress_limit" in (run.error_message or "")
+    db.close()
+
+
+def test_plan_run_proceeds_when_the_brakes_allow_it(
+    worker_db, monkeypatch, git_repo_root
+):
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    run.idempotency_key = "planner:RUN-001:critic:abc123"
+    run.kind = "review"
+    db.commit()
+    db.close()
+
+    executed = []
+    monkeypatch.setattr(
+        "app.workers.plan_executor.execute_plan_run",
+        lambda *args, **kwargs: executed.append(args),
+    )
+
+    runner.run_agent.fn("run-001", "RUN-001", "echo should-not-run", git_repo_root, 5)
+
+    assert len(executed) == 1
+    # The deadline the worker was handed must be the one the planner gets.
+    assert executed[0][3] == 5
