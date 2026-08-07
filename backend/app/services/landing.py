@@ -140,7 +140,7 @@ def _can_auto_clean_dirty_tree(repo_root: str, head: str) -> bool:
                 return False
 
         return True
-    except Exception:
+    except Exception:  # noqa: BLE001 - any read/compare error means: do not auto-clean
         return False
 
 
@@ -184,15 +184,14 @@ def land_result(repo_root: str, head: str, message: str) -> LandingResult:
 
     # Auto-clean if dirty working tree matches 100% of landing diff
     status_proc = _git(repo_root, "status", "--porcelain")
-    if status_proc.stdout.strip():
-        if _can_auto_clean_dirty_tree(repo_root, head):
-            logger.info(
-                "Dirty working tree in %s 100%% matches landing diff for %s; auto-cleaning before merge",
-                repo_root,
-                head,
-            )
-            _git(repo_root, "checkout", "--", ".")
-            _git(repo_root, "clean", "-fd")
+    if status_proc.stdout.strip() and _can_auto_clean_dirty_tree(repo_root, head):
+        logger.info(
+            "Dirty working tree in %s 100%% matches landing diff for %s; auto-cleaning before merge",
+            repo_root,
+            head,
+        )
+        _git(repo_root, "checkout", "--", ".")
+        _git(repo_root, "clean", "-fd")
 
     # Tracked modifications block a merge; untracked files are fine unless
     # the merge itself collides with them (git aborts on its own then).

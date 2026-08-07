@@ -150,3 +150,41 @@ def test_execution_failure_code_for_main_repo_mutated():
     code = _execution_failure_code("Main repository /tmp/repo was mutated during agent execution")
     assert code == "main-repo-mutated"
 
+
+
+def test_main_repo_mutation_detection_primitives(tmp_path):
+    """The guard in execute_agent_run compares _git_ref(HEAD) and
+    _git_status_porcelain before/after the CLI process. Verify both
+    primitives actually detect a moved HEAD and a dirtied working tree."""
+    import subprocess
+
+    from app.workers.cli_executor import _git_ref, _git_status_porcelain
+
+    repo = str(tmp_path)
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", repo, *args], check=True, capture_output=True,
+            env={"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+                 "HOME": repo, "PATH": "/usr/bin:/bin"},
+        )
+
+    git("init", "-q")
+    (tmp_path / "f.txt").write_text("v1\n")
+    git("add", "f.txt")
+    git("commit", "-qm", "c1")
+
+    head_before = _git_ref(repo, "HEAD")
+    status_before = _git_status_porcelain(repo)
+    assert head_before is not None
+    assert status_before == ""
+
+    # Dirty the working tree -> status snapshot must differ.
+    (tmp_path / "f.txt").write_text("v2\n")
+    assert _git_status_porcelain(repo) != status_before
+
+    # Commit -> HEAD snapshot must differ.
+    git("add", "f.txt")
+    git("commit", "-qm", "c2")
+    assert _git_ref(repo, "HEAD") != head_before
