@@ -33,6 +33,7 @@ from app.services.agent_matcher import POLICY_VERSION as AGENT_MATCHER_POLICY_VE
 from app.services.agent_matcher import AgentMatcher
 from app.services.agent_run_classification import classify_termination
 from app.services.approval_hold import derive_approval_hold
+from app.services.entity_admin import EntityValidationError, _validate_cli_model
 from app.services.landing import LandingResult, head_of, land_result
 from app.services.outbox import record_commit_event, record_run_requested
 from app.services.review_criteria import merged_review_criteria
@@ -380,6 +381,12 @@ class TaskLifecycleMixin:
             agent = self.db.get(Agent, agent_id)
             if agent is None:
                 raise PrerequisiteError(f"Agent {agent_id} not found")
+            agent_type = getattr(agent.agent_type, "value", agent.agent_type)
+            if agent_type == "cli" and agent.model:
+                try:
+                    _validate_cli_model(self.db, agent.cli, agent.model)
+                except EntityValidationError as exc:
+                    raise PrerequisiteError(str(exc)) from exc
             if kind == "execute" and _is_cheap_executor(agent):
                 design = (
                     self.db.query(ImplDesign)
