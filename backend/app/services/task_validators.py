@@ -542,15 +542,23 @@ class TaskValidator:
 
     def _task_tokens(self, task: Task) -> int:
         rows = (
-            self.db.query(LLMUsage.input_tokens, LLMUsage.output_tokens)
+            self.db.query(
+                LLMUsage.input_tokens,
+                LLMUsage.cached_tokens,
+                LLMUsage.cache_write_tokens,
+                LLMUsage.output_tokens,
+            )
             .outerjoin(AgentRun, LLMUsage.agent_run_id == AgentRun.id)
             .filter(or_(LLMUsage.task_id == task.id, AgentRun.task_id == task.id))
             .all()
         )
+        # Brake counts fresh input + cache writes + output; cache reads are
+        # free on the provider side and must not inflate the budget.
         return sum(
-            max(0, int(input_tokens or 0))
+            max(0, int(input_tokens or 0) - int(cached_tokens or 0))
+            + max(0, int(cache_write_tokens or 0))
             + max(0, int(output_tokens or 0))
-            for input_tokens, output_tokens in rows
+            for input_tokens, cached_tokens, cache_write_tokens, output_tokens in rows
         )
 
     def _setting(self, key: str, default: Any, converter: Any) -> Any:

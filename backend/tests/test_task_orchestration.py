@@ -938,7 +938,9 @@ def test_cli_subscription_cost_does_not_trip_usd_brake_but_tokens_do(
 ):
     task = _task(db_session, "GATE-BRAKE-TOKENS", mode="bypass")
     db_session.add(Setting(key="max_cost_usd_per_task", value="1.0"))
-    db_session.add(Setting(key="max_tokens_per_task", value="10"))
+    # CTV2-1424: brake now counts (input - cached) + cache_write + output,
+    # so the limit must be below the billable total (7-5)+0+4 = 6.
+    db_session.add(Setting(key="max_tokens_per_task", value="5"))
     db_session.add(
         LLMUsage(
             task_id=task.id,

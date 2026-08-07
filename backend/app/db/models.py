@@ -17,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Enum as SAEnum,
     event,
+    false as sa_false,
 )
 from sqlalchemy.orm import validates, relationship
 from sqlalchemy.dialects.postgresql import JSONB
@@ -1260,8 +1261,10 @@ class LLMUsage(Base):
     input_tokens = Column(Integer, nullable=False, default=0)
     output_tokens = Column(Integer, nullable=False, default=0)
     cached_tokens = Column(Integer, nullable=False, default=0)
+    cache_write_tokens = Column(Integer, nullable=False, default=0)
     cost_usd = Column(Numeric(14, 8), nullable=False, default=0)
     latency_ms = Column(Integer, nullable=False, default=0)
+    usage_is_measured = Column(Boolean, nullable=False, default=False, server_default=sa_false())
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     session = relationship("Session", back_populates="llm_usages")
@@ -1272,6 +1275,7 @@ class LLMUsage(Base):
         CheckConstraint("input_tokens >= 0", name="ck_llm_usage_input_nonnegative"),
         CheckConstraint("output_tokens >= 0", name="ck_llm_usage_output_nonnegative"),
         CheckConstraint("cached_tokens >= 0", name="ck_llm_usage_cached_nonnegative"),
+        CheckConstraint("cache_write_tokens >= 0", name="ck_llm_usage_cache_write_nonnegative"),
         CheckConstraint("cost_usd >= 0", name="ck_llm_usage_cost_nonnegative"),
         CheckConstraint("latency_ms >= 0", name="ck_llm_usage_latency_nonnegative"),
     )
