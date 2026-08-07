@@ -2970,3 +2970,82 @@ def test_stall_reason_falls_back_when_dependencies_are_met(db_session):
 
     reason = _stall_reason(db_session, db_session.get(Task, "BLOCKED-2"))
     assert "no progress" in reason
+
+
+def test_request_dispatch_valid_cli_model_passes(orchestration, db_session):
+    agent = Agent(
+        id="@valid-agy-agent",
+        name="Valid AGY Agent",
+        role="executor",
+        agent_type="cli",
+        cli="agy",
+        model="gemini-3.6-flash-high",
+    )
+    db_session.add(agent)
+    task = _task(db_session, "VALID-MODEL-001", mode="bypass")
+    db_session.commit()
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id=agent.id,
+        actor="coordinator",
+        idempotency_key="dispatch-valid-model-1",
+    )
+    assert result.applied is True
+    assert result.agent_run is not None
+
+
+def test_request_dispatch_invalid_cli_model_blocked(orchestration, db_session):
+    agent = Agent(
+        id="@invalid-agy-agent",
+        name="Invalid AGY Agent",
+        role="executor",
+        agent_type="cli",
+        cli="agy",
+        model="gpt-4o",
+    )
+    db_session.add(agent)
+    task = _task(db_session, "INVALID-MODEL-001", mode="bypass")
+    db_session.commit()
+
+    with pytest.raises(PrerequisiteError) as exc_info:
+        orchestration.request_dispatch(
+            task_id=task.id,
+            agent_id=agent.id,
+            actor="coordinator",
+            idempotency_key="dispatch-invalid-model-1",
+        )
+
+    err_msg = str(exc_info.value)
+    assert "gpt-4o" in err_msg
+    assert "agy" in err_msg
+    assert "gemini-3.6-flash-high" in err_msg
+
+    # Ensure no AgentRun was created
+    runs = db_session.query(AgentRun).filter(AgentRun.agent_id == agent.id).all()
+    assert len(runs) == 0
+
+
+def test_request_dispatch_unconstrained_cli_model_passes(orchestration, db_session):
+    agent = Agent(
+        id="@unconstrained-cli-agent",
+        name="Unconstrained Agent",
+        role="executor",
+        agent_type="cli",
+        cli="claude",
+        model="arbitrary-custom-model",
+    )
+    db_session.add(agent)
+    task = _task(db_session, "UNCONSTRAINED-MODEL-001", mode="bypass")
+    db_session.commit()
+
+    result = orchestration.request_dispatch(
+        task_id=task.id,
+        agent_id=agent.id,
+        actor="coordinator",
+        idempotency_key="dispatch-unconstrained-model-1",
+    )
+    assert result.applied is True
+    assert result.agent_run is not None
+
+
