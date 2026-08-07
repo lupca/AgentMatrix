@@ -209,3 +209,30 @@ def test_multiple_alembic_heads_blocks_landing(alembic_repo):
     assert _git(root, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode != 0
     status = _git(root, "status", "--porcelain", "--untracked-files=no").stdout.strip()
     assert status == "", f"repo has uncommitted tracked changes: {status}"
+
+
+def test_dirty_tree_matching_landing_diff_auto_cleans_and_lands(repo):
+    base, head = _run_branch_commit(repo, filename="feature.txt")
+
+    # Manually introduce dirty state on main that 100% matches the landing diff
+    (repo / "feature.txt").write_text("feature\n")
+
+    result = land_result(str(repo), head, "Merge T-1 matching dirty")
+
+    assert result.ok and result.landed_ref
+    assert (repo / "feature.txt").exists()
+    assert (repo / "feature.txt").read_text() == "feature\n"
+    assert _git(repo, "status", "--porcelain").stdout.strip() == ""
+
+
+def test_dirty_tree_with_unmatching_diff_still_refuses(repo):
+    base, head = _run_branch_commit(repo, filename="feature.txt")
+
+    # Manually introduce dirty state on main that does NOT match landing diff
+    (repo / "a.txt").write_text("unrelated dirty change\n")
+
+    result = land_result(str(repo), head, "Merge T-1 unmatching dirty")
+
+    assert not result.ok
+    assert "uncommitted tracked changes in: a.txt" in result.error
+

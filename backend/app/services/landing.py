@@ -99,6 +99,51 @@ def head_of(result_ref: str | None) -> str | None:
     return head or None
 
 
+def _can_auto_clean_dirty_tree(repo_root: str, head: str) -> bool:
+    """Check if uncommitted (tracked/untracked) changes in repo_root match 100% of head's diff over HEAD."""
+    try:
+        status_proc = _git(repo_root, "status", "--porcelain")
+        if status_proc.returncode != 0 or not status_proc.stdout.strip():
+            return False
+
+        dirty_lines = [line for line in status_proc.stdout.splitlines() if line.strip()]
+        if not dirty_lines:
+            return False
+
+        landing_files_proc = _git(repo_root, "diff", "--name-only", "HEAD", head)
+        if landing_files_proc.returncode != 0:
+            return False
+        landing_files = set(landing_files_proc.stdout.splitlines())
+
+        for line in dirty_lines:
+            raw_path = line[3:].strip()
+            if " -> " in raw_path:
+                raw_path = raw_path.split(" -> ")[-1].strip()
+            if raw_path.startswith('"') and raw_path.endswith('"'):
+                raw_path = raw_path[1:-1]
+
+            if raw_path not in landing_files:
+                return False
+
+            show = _git(repo_root, "show", f"{head}:{raw_path}")
+            if show.returncode != 0:
+                return False
+
+            full_path = os.path.join(repo_root, raw_path)
+            if not os.path.isfile(full_path):
+                return False
+
+            with open(full_path, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+
+            if content != show.stdout:
+                return False
+
+        return True
+    except Exception:
+        return False
+
+
 def land_result(repo_root: str, head: str, message: str) -> LandingResult:
     """Merge ``head`` into the branch checked out at ``repo_root``.
 
@@ -136,6 +181,18 @@ def land_result(repo_root: str, head: str, message: str) -> LandingResult:
         current = _git(repo_root, "rev-parse", "HEAD").stdout.strip()
         _cleanup_merged_run_branches(repo_root)
         return LandingResult(ok=True, landed_ref=current)
+
+    # Auto-clean if dirty working tree matches 100% of landing diff
+    status_proc = _git(repo_root, "status", "--porcelain")
+    if status_proc.stdout.strip():
+        if _can_auto_clean_dirty_tree(repo_root, head):
+            logger.info(
+                "Dirty working tree in %s 100%% matches landing diff for %s; auto-cleaning before merge",
+                repo_root,
+                head,
+            )
+            _git(repo_root, "checkout", "--", ".")
+            _git(repo_root, "clean", "-fd")
 
     # Tracked modifications block a merge; untracked files are fine unless
     # the merge itself collides with them (git aborts on its own then).

@@ -131,3 +131,22 @@ def test_prepare_review_artifact_handles_string_ac(tmp_path):
         template = json.load(f)
 
     assert len(template["ac_results"]) == 3  # Not 48 (string length)
+
+
+def test_process_env_for_cli_removes_git_env_vars():
+    from app.workers.cli_executor import _process_env_for_cli
+
+    mcp_env = {"GIT_DIR": "/tmp/fake.git", "GIT_WORK_TREE": "/tmp/fake", "OTHER_VAR": "val"}
+    env, _ = _process_env_for_cli("claude", mcp_env, is_review_run=False)
+
+    assert "GIT_DIR" not in env
+    assert "GIT_WORK_TREE" not in env
+    assert env.get("OTHER_VAR") == "val"
+
+
+def test_execution_failure_code_for_main_repo_mutated():
+    from app.workers.cli_executor import _execution_failure_code
+
+    code = _execution_failure_code("Main repository /tmp/repo was mutated during agent execution")
+    assert code == "main-repo-mutated"
+

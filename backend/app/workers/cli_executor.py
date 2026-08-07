@@ -372,6 +372,8 @@ def _cleanup_stale_process(run: AgentRun, grace_seconds: float = 2.0) -> None:
 def _execution_failure_code(error: str, *, status: str | None = None) -> str:
     """Return a stable, low-cardinality code for execution idempotency."""
     message = (error or "").lower()
+    if "main repository" in message and "mutated" in message:
+        return "main-repo-mutated"
     if "without committed changes" in message:
         return "no-committed-changes"
     if "declared 'result_ref: none'" in message:
@@ -381,6 +383,7 @@ def _execution_failure_code(error: str, *, status: str | None = None) -> str:
     if status:
         return f"execution-{status.lower()}"
     return "unexpected-execution-failure"
+
 
 
 def _record_execution_failure(
@@ -546,6 +549,22 @@ def _has_uncommitted_changes(repo_root: str) -> bool:
         return result.returncode == 0 and bool(result.stdout.strip())
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def _git_status_porcelain(repo_root: str) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
 
 
 def _build_execution_result_ref(
@@ -764,6 +783,9 @@ def _process_env_for_cli(
 
     if (cli or "").strip().lower() == "qwen":
         process_env["QWEN_CODE_SUPPRESS_YOLO_WARNING"] = "1"
+
+    process_env.pop("GIT_DIR", None)
+    process_env.pop("GIT_WORK_TREE", None)
 
     return process_env or None, review_git_dir
 
@@ -1021,6 +1043,8 @@ def execute_agent_run(
                 repo_root, task_id, task.acceptance_criteria, task.constraints
             )
         base_ref = _run_base_ref(run.result_ref) or _parse_result_ref(repo_root)
+        main_head_before = _git_ref(repo_root, "HEAD")
+        main_status_before = _git_status_porcelain(repo_root)
         if base_ref is None:
             run.status = "failed"
             run.error_message = "Could not determine repository HEAD before execution"
@@ -1318,7 +1342,31 @@ def execute_agent_run(
         run.completed_at = datetime.now(timezone.utc)
         effective_status = result.status.value
         if result.status == ProcessStatus.COMPLETED:
-            if is_review_run and task is not None:
+            main_head_after = _git_ref(repo_root, "HEAD")
+            main_status_after = _git_status_porcelain(repo_root)
+            if main_head_before and main_head_after and (
+                main_head_after != main_head_before or main_status_after != main_status_before
+            ):
+                err = (
+                    f"Main repository {repo_root} was mutated during agent execution: "
+                    f"HEAD moved from {main_head_before[:12]} to {main_head_after[:12]} or working tree was modified. "
+                    "Executor processes must run exclusively inside their isolated git worktree."
+                )
+                logger.error(err)
+                run.status = ProcessStatus.FAILED.value
+                effective_status = ProcessStatus.FAILED.value
+                run.error_message = err
+                _record_execution_failure(
+                    db,
+                    orch_svc_cls,
+                    task_id=task_id,
+                    error=err,
+                    actor=f"agent:{run.agent_id}",
+                    idempotency_key=f"run:{run.id}:execution-failure:main-repo-mutated",
+                    run_id=run.id,
+                    error_code="main-repo-mutated",
+                )
+            elif is_review_run and task is not None:
                 try:
                     review_result = load_review_result(
                         repo_root,
