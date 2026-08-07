@@ -311,6 +311,8 @@ def _record_cli_usage(db: Session, run: AgentRun, cli: str, stdout: str) -> None
             input_tokens=usage_data["input_tokens"],
             output_tokens=usage_data["output_tokens"],
             cached_tokens=usage_data["cached_tokens"],
+            cache_write_tokens=usage_data.get("cache_write_tokens", 0),
+            usage_is_measured=usage_data.get("usage_is_measured", False),
             # Qwen/Agy expose token counts but no authoritative USD amount;
             # keep the ledger schema's numeric default and surface that fact
             # through get_stats rather than presenting zero as free.

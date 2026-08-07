@@ -242,7 +242,14 @@ def parse_cli_token_usage(cli: str, stdout: str) -> dict[str, Any] | None:
 
         usage = data.get("usage")
         if not isinstance(usage, dict):
-            continue
+            # agy streams usage inside step_update events rather than at the
+            # top level.  Take the last step_update.usage seen so the final
+            # cumulative snapshot wins.
+            step_update = data.get("step_update")
+            if isinstance(step_update, dict):
+                usage = step_update.get("usage")
+            if not isinstance(usage, dict):
+                continue
 
         if vendor == "codex":
             cached_tokens = usage.get("cached_input_tokens", 0)
@@ -288,10 +295,17 @@ def parse_cli_token_usage(cli: str, stdout: str) -> dict[str, Any] | None:
             )
             cached_tokens = input_tokens
 
+        # cache_creation_input_tokens (claude) = tokens written to cache.
+        cache_write_tokens = _nonnegative_int(
+            usage.get("cache_creation_input_tokens")
+        )
+
         result: dict[str, Any] = {
             "input_tokens": input_tokens,
             "output_tokens": _nonnegative_int(usage.get("output_tokens")),
             "cached_tokens": cached_tokens,
+            "cache_write_tokens": cache_write_tokens,
+            "usage_is_measured": True,
         }
 
         if vendor == "codex" and "reasoning_output_tokens" in usage:
