@@ -36,6 +36,62 @@ def _message(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+NON_RETRYABLE_MODEL_PATTERNS = (
+    "invalid model",
+    "model not found",
+    "unknown model",
+    "model does not exist",
+    "unsupported model",
+    "no such model",
+    "invalid model name",
+    "valid models",
+    "available models",
+)
+
+NON_RETRYABLE_EXECUTABLE_PATTERNS = (
+    "executable not found",
+    "command not found",
+    "cli binary not found",
+    "binary not found",
+    "not found in path",
+    "no such file or directory",
+)
+
+
+def is_non_retryable_error(*texts: str | None) -> bool:
+    """Check if output/error matches non-retryable (permanent) failure patterns.
+
+    Non-retryable failures:
+    - Model does not exist / invalid model
+    - HTTP 400 errors involving model
+    - Executable / CLI binary not found
+    """
+    combined = _message(" ".join(t for t in texts if t))
+    if not combined:
+        return False
+
+    if any(marker in combined for marker in NON_RETRYABLE_MODEL_PATTERNS):
+        return True
+
+    if any(marker in combined for marker in NON_RETRYABLE_EXECUTABLE_PATTERNS):
+        return True
+
+    if "400" in combined and "model" in combined:
+        return True
+
+    return False
+
+
+def format_non_retryable_error_message(error: str | None, raw_output: str | None = None) -> str:
+    """Format a non-retryable error message explaining the reason and fix action."""
+    detail = (error or "").strip() or (raw_output or "").strip() or "Process failed with non-retryable error"
+    detail_clean = re.sub(r"\s+", " ", detail)
+    return (
+        f"Non-retryable execution error: {detail_clean}. "
+        "Fix: please update the model or agent configuration."
+    )
+
+
 def classify_termination(
     *,
     status: str | None,
@@ -98,7 +154,7 @@ def classify_termination(
         )
     ):
         return "infra_parse"
-    if any(
+    if is_non_retryable_error(message) or any(
         marker in message
         for marker in (
             "unknown option",

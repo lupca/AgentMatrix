@@ -37,6 +37,8 @@ from app.schemas.task import ReviewResult
 from app.services.agent_run_classification import (
     classify_review_outcome,
     classify_termination,
+    format_non_retryable_error_message,
+    is_non_retryable_error,
 )
 from app.services.command_builder import _is_review_task, review_result_path
 from app.services.coordinator import CoordinatorService
@@ -1324,7 +1326,14 @@ def execute_agent_run(
             _nudge_driver(task_id, "run_agent_completed")
             return result.exit_code
 
-        if result.status == ProcessStatus.FAILED and attempt < run.max_attempts:
+        is_non_retryable = (
+            result.status == ProcessStatus.FAILED
+            and is_non_retryable_error(result.error, raw_output)
+        )
+        if is_non_retryable:
+            run.error_message = format_non_retryable_error_message(result.error, raw_output)
+
+        if result.status == ProcessStatus.FAILED and attempt < run.max_attempts and not is_non_retryable:
             run.status = "queued"
             run.completed_at = None
             db.commit()
@@ -1480,7 +1489,7 @@ def execute_agent_run(
         elif is_review_run:
             orch_svc_cls(db).record_review_failure(
                 task_id=task_id,
-                error=result.error or result.status.value,
+                error=run.error_message or result.error or result.status.value,
                 actor=f"agent:{run.agent_id}",
                 idempotency_key=f"run:{run.id}:review-{result.status.value}",
                 run_id=run.id,
@@ -1490,7 +1499,7 @@ def execute_agent_run(
                 db,
                 orch_svc_cls,
                 task_id=task_id,
-                error=result.error or result.status.value,
+                error=run.error_message or result.error or result.status.value,
                 actor=f"agent:{run.agent_id}",
                 idempotency_key=f"run:{run.id}:execution-failure:{result.status.value}",
                 run_id=run.id,

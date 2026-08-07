@@ -766,6 +766,36 @@ def test_failed_agent_is_queued_for_retry(worker_db, monkeypatch, git_repo_root)
     db.close()
 
 
+@pytest.mark.parametrize(
+    "error_output",
+    [
+        "agy: invalid model @gpt-5.6-sol. Valid models: gpt-4o",
+        "HTTP 400: Codex free plan does not support model @claude-3-opus",
+        "executable not found: agy",
+    ],
+)
+def test_non_retryable_failed_agent_is_not_queued_for_retry(
+    worker_db, monkeypatch, git_repo_root, error_output
+):
+    manager = MagicMock()
+    manager.pid = 123
+    manager.run_with_streaming.return_value = iter(
+        [ProcessResult(ProcessStatus.FAILED, 1, error_output)]
+    )
+    monkeypatch.setattr(runner, "ProcessManager", MagicMock(return_value=manager))
+
+    result = runner.run_agent.fn("run-001", "RUN-001", "agent-cmd", git_repo_root, 5)
+
+    db = worker_db()
+    run = db.get(AgentRun, "run-001")
+    assert result == 1
+    assert run.status == "failed"
+    assert run.failure_category == "infra_config"
+    assert run.attempt == 1
+    assert "please update the model or agent configuration" in run.error_message.lower()
+    db.close()
+
+
 def test_timeout_is_terminal_and_not_retried(worker_db, monkeypatch, git_repo_root):
     manager = MagicMock()
     manager.pid = 123
