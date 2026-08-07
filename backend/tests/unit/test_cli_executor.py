@@ -131,3 +131,60 @@ def test_prepare_review_artifact_handles_string_ac(tmp_path):
         template = json.load(f)
 
     assert len(template["ac_results"]) == 3  # Not 48 (string length)
+
+
+def test_process_env_for_cli_removes_git_env_vars():
+    from app.workers.cli_executor import _process_env_for_cli
+
+    mcp_env = {"GIT_DIR": "/tmp/fake.git", "GIT_WORK_TREE": "/tmp/fake", "OTHER_VAR": "val"}
+    env, _ = _process_env_for_cli("claude", mcp_env, is_review_run=False)
+
+    assert "GIT_DIR" not in env
+    assert "GIT_WORK_TREE" not in env
+    assert env.get("OTHER_VAR") == "val"
+
+
+def test_execution_failure_code_for_main_repo_mutated():
+    from app.workers.cli_executor import _execution_failure_code
+
+    code = _execution_failure_code("Main repository /tmp/repo was mutated during agent execution")
+    assert code == "main-repo-mutated"
+
+
+
+def test_main_repo_mutation_detection_primitives(tmp_path):
+    """The guard in execute_agent_run compares _git_ref(HEAD) and
+    _git_status_porcelain before/after the CLI process. Verify both
+    primitives actually detect a moved HEAD and a dirtied working tree."""
+    import subprocess
+
+    from app.workers.cli_executor import _git_ref, _git_status_porcelain
+
+    repo = str(tmp_path)
+
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", repo, *args], check=True, capture_output=True,
+            env={"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                 "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
+                 "HOME": repo, "PATH": "/usr/bin:/bin"},
+        )
+
+    git("init", "-q")
+    (tmp_path / "f.txt").write_text("v1\n")
+    git("add", "f.txt")
+    git("commit", "-qm", "c1")
+
+    head_before = _git_ref(repo, "HEAD")
+    status_before = _git_status_porcelain(repo)
+    assert head_before is not None
+    assert status_before == ""
+
+    # Dirty the working tree -> status snapshot must differ.
+    (tmp_path / "f.txt").write_text("v2\n")
+    assert _git_status_porcelain(repo) != status_before
+
+    # Commit -> HEAD snapshot must differ.
+    git("add", "f.txt")
+    git("commit", "-qm", "c2")
+    assert _git_ref(repo, "HEAD") != head_before
